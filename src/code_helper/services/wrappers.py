@@ -56,20 +56,35 @@ _MODE_LITERAL = 0o755
 class WrapperSpec:
     """One managed wrapper — a generated ``~/.local/bin/<name>`` script.
 
+    Two shapes, discriminated by ``launch_command``:
+
+    - **env-var shape** (``launch_command is None``, the original form): the
+      script exports ``ANTHROPIC_*`` env vars and runs ``claude "$@"``.
+      ``base_url``/``haiku_model``/``sonnet_model``/``opus_model``/
+      ``subagent_model`` describe the endpoint + tier models.
+    - **command shape** (``launch_command`` set): the script ``exec``s a
+      provider's own launcher (e.g. ``ollama launch claude --model {model}``),
+      letting that launcher set up ``ANTHROPIC_*`` itself. ``launch_model`` is
+      the default model substituted into the ``{model}`` placeholder; the
+      env-var fields are unused. ``--model`` overrides ``launch_model``.
+
     ``auth`` selects how the token is obtained and how sensitive the on-disk
     script is treated (see module docstring). ``auth_value`` is the literal
-    token when ``auth == "literal"`` and is ignored otherwise.
+    token when ``auth == "literal"`` and is ignored otherwise. The env-var
+    fields carry defaults so a command-shape spec only names what it uses.
     """
 
     name: str
-    base_url: str
-    haiku_model: str
-    sonnet_model: str
-    opus_model: str
-    subagent_model: str | None
-    auth: str  # "literal" | "secret"
+    base_url: str = ""
+    haiku_model: str = ""
+    sonnet_model: str = ""
+    opus_model: str = ""
+    subagent_model: str | None = None
+    auth: str = "literal"  # "literal" | "secret"
     auth_value: str = ""
     token_env_var: str = ""
+    launch_command: str | None = None
+    launch_model: str = ""
     description: str = ""
 
 
@@ -98,6 +113,13 @@ WRAPPERS: list[WrapperSpec] = [
         auth="secret",
         token_env_var="ZAI_API_KEY",
         description="Claude Code → Z.ai",
+    ),
+    WrapperSpec(
+        name="glm-ollama",
+        auth="literal",
+        launch_command="ollama launch claude --model {model}",
+        launch_model="glm-5.2:cloud",
+        description="Claude Code → glm-5.2:cloud via `ollama launch claude`",
     ),
 ]
 
@@ -139,27 +161,51 @@ def render_script(
 ) -> str:
     """Return the bash wrapper body for ``spec`` (pure, no IO).
 
-    Shape: a subshell that exports the Anthropic endpoint + auth token + the
-    tier-model envs (haiku/sonnet/opus, and the subagent model if the spec has
-    one), then runs ``claude "$@"``. Every interpolated value is single-quoted
-    via :func:`_shell_single_quote` — including model names, which after
-    ``model_override`` can be arbitrary user input from ``--model``.
+    Two shapes, discriminated by ``spec.launch_command``:
 
-    ``ANTHROPIC_API_KEY=` is always emptied — this mirrors how Ollama's own
-    ``ollama launch claude`` integration does it (``cmd/launch/claude.go``): a
-    real Anthropic key inherited from the caller's environment would otherwise
-    take priority over ``ANTHROPIC_AUTH_TOKEN`` and silently defeat the
-    wrapper.
+    - **command shape** (``launch_command`` set): ``exec`` the provider's own
+      launcher (e.g. ``ollama launch claude --model {model} -- "$@"``), which
+      sets up ``ANTHROPIC_*`` itself. ``launch_model`` is the default model
+      substituted into the ``{model}`` placeholder; ``model_override``
+      replaces it. The model is the only user-controlled interpolation and is
+      single-quoted via :func:`_shell_single_quote` BEFORE substitution
+      (``str.replace``, not ``str.format``, so a model can never hijack the
+      template); ``launch_command`` itself is a trusted registry constant.
+      The ``--`` before ``"$@"`` is required: without it, the launcher parses
+      forwarded Claude flags (e.g. ``-p``) as its own and rejects them.
+    - **env-var shape** (``launch_command is None``): a subshell that exports
+      the Anthropic endpoint + auth token + the tier-model envs
+      (haiku/sonnet/opus, and the subagent model if the spec has one), then runs
+      ``claude "$@"``. Every interpolated value is single-quoted via
+      :func:`_shell_single_quote` — including model names, which after
+      ``model_override`` can be arbitrary user input from ``--model``.
+
+    ``ANTHROPIC_API_KEY=` is always emptied in the env-var shape — this mirrors
+    how Ollama's own ``ollama launch claude`` integration does it
+    (``cmd/launch/claude.go``): a real Anthropic key inherited from the
+    caller's environment would otherwise take priority over
+    ``ANTHROPIC_AUTH_TOKEN`` and silently defeat the wrapper.
 
     Args:
-        spec: The wrapper's provider description (endpoint + tier models).
-        token: The resolved auth token to embed (literal or secret).
+        spec: The wrapper's provider description (endpoint + tier models, or a
+            launch command).
+        token: The resolved auth token to embed (literal or secret). Ignored by
+            the command shape.
         model_override: When given, used for ALL tier models AND the subagent
-            model instead of ``spec``'s defaults (the ``--model`` flag).
+            model (env-var shape) or for the single ``{model}`` placeholder
+            (command shape), instead of ``spec``'s defaults (the ``--model``
+            flag).
 
     Returns:
         The complete script body, including the shebang.
     """
+    if spec.launch_command is not None:
+        model = model_override or spec.launch_model
+        quoted_model = _shell_single_quote(model)
+        cmd = spec.launch_command.replace("{model}", quoted_model)
+        lines = ["#!/bin/bash", f'exec {cmd} -- "$@"']
+        return "\n".join(lines) + "\n"
+
     haiku = model_override or spec.haiku_model
     sonnet = model_override or spec.sonnet_model
     opus = model_override or spec.opus_model
