@@ -8,8 +8,9 @@ delegate to a service, return its int. They do NOT catch/print/exit: a
 one-line stderr + exit 1 (full traceback under ``--debug``).
 
 The subcommands: ``list`` (registry + install state), ``add <name>``
-(install/update a wrapper, optionally ``--model``), ``remove <name>``
-(uninstall a wrapper if code-helper-managed).
+(install/update a wrapper, optionally ``--model``), ``edit-token [<name>]``
+(rotate a secret-auth wrapper's token; an arrow-key menu picks the wrapper
+when ``<name>`` is omitted, via :mod:`code_helper.cli.menu`).
 
 Root flags (``--debug`` / ``--dry-run``) attach via a single shared parent
 parser so they parse BOTH before and after the subcommand.
@@ -19,7 +20,7 @@ import argparse
 
 
 def _handle_list(args: argparse.Namespace) -> int:
-    """Show the wrapper registry + whether each is installed/foreign."""
+    """Show the wrapper registry + whether each is installed."""
     from code_helper.services.paths import Paths
     from code_helper.services.wrappers import list_wrappers
 
@@ -57,22 +58,64 @@ def _handle_add(args: argparse.Namespace) -> int:
     return 0
 
 
-def _handle_bare(args: argparse.Namespace) -> int:
-    """Bare ``code-helper`` (no subcommand) → print help."""
-    args._parser.print_help()
-    return 0
+def _handle_edit_token(args: argparse.Namespace) -> int:
+    """Interactively rotate the token of a secret-auth wrapper.
 
+    Unlike ``add``, this always prompts via ``getpass`` directly — it never
+    calls :func:`code_helper.services.secrets.resolve_token`, which would
+    silently return an existing ``token_env_var`` value instead of the new
+    one the user is trying to type in.
+    """
+    import getpass
 
-def _handle_remove(args: argparse.Namespace) -> int:
-    """Uninstall the named wrapper, only if code-helper-managed."""
+    from code_helper.cli.menu import MenuCancelled, select_from_menu
+    from code_helper.errors import CodeHelperError
     from code_helper.services.paths import Paths
-    from code_helper.services.wrappers import uninstall_wrapper
+    from code_helper.services.wrappers import (
+        WRAPPERS,
+        get_spec,
+        install_wrapper,
+        is_installed,
+    )
 
     paths = Paths.default()
     dry_run = getattr(args, "dry_run", False)
-    removed = uninstall_wrapper(paths, args.name, dry_run=dry_run)
-    if not removed:
+
+    if args.name:
+        spec = get_spec(args.name)
+    else:
+        secret_specs = [w for w in WRAPPERS if w.auth == "secret"]
+        if not secret_specs:
+            raise CodeHelperError("no wrapper has an editable (secret) token")
+        try:
+            chosen = select_from_menu(
+                [w.name for w in secret_specs],
+                prompt="select a wrapper to edit its token:",
+            )
+        except MenuCancelled:
+            print("cancelled")
+            return 0
+        spec = get_spec(chosen)
+
+    if spec.auth != "secret":
+        raise CodeHelperError(f"{spec.name} has no editable token (auth={spec.auth})")
+
+    state = "installed" if is_installed(paths, spec.name) else "not installed"
+    print(f"{spec.name}: currently {state}")
+
+    token = getpass.getpass(f"new {spec.name} token ({spec.token_env_var}): ")
+    if not token:
+        raise CodeHelperError("no token entered — aborting")
+
+    wrote = install_wrapper(paths, spec.name, token=token, dry_run=dry_run)
+    if not wrote:
         print("no changes")
+    return 0
+
+
+def _handle_bare(args: argparse.Namespace) -> int:
+    """Bare ``code-helper`` (no subcommand) → print help."""
+    args._parser.print_help()
     return 0
 
 
@@ -134,12 +177,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_add.set_defaults(func=_handle_add)
 
-    p_remove = subparsers.add_parser(
-        "remove",
-        help="uninstall a wrapper script (only if code-helper-managed)",
+    p_edit_token = subparsers.add_parser(
+        "edit-token",
+        help="interactively rotate a wrapper's secret token",
         parents=[sub_flags],
     )
-    p_remove.add_argument("name", help="wrapper name to remove")
-    p_remove.set_defaults(func=_handle_remove)
+    p_edit_token.add_argument(
+        "name",
+        nargs="?",
+        default=None,
+        help="wrapper name (omit to pick interactively with an arrow-key menu)",
+    )
+    p_edit_token.set_defaults(func=_handle_edit_token)
 
     return parser

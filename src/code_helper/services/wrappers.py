@@ -1,4 +1,4 @@
-"""The wrapper registry + generated-script lifecycle (install/uninstall/list).
+"""The wrapper registry + generated-script lifecycle (install/list).
 
 A "wrapper" is a small bash script in ``~/.local/bin`` that exports the
 ``ANTHROPIC_*`` environment variables Claude Code reads for its model tiers,
@@ -22,11 +22,9 @@ different trust models:
   logged. Mode ``0o700`` (owner-only — the script carries the secret in plain
   text).
 
-Ownership is proven by a MARKER comment embedded in the script body, not by
-matching the body or the token — so re-running ``add`` after a token rotation
-still recognizes (and safely updates) the same script, and a foreign,
-hand-written file with the same name is never touched. This mirrors the
-archived project's ``services/glm_script.py`` marker discipline exactly.
+``install_wrapper`` writes ``~/.local/bin/<name>`` unconditionally by name —
+whatever is already there (helper-generated or not) gets overwritten. There
+is no ownership marker and no "foreign file" guard.
 """
 
 from __future__ import annotations
@@ -42,17 +40,10 @@ __all__ = [
     "WRAPPERS",
     "render_script",
     "install_wrapper",
-    "uninstall_wrapper",
     "is_installed",
     "list_wrappers",
     "get_spec",
 ]
-
-#: Stable marker comment embedded in every generated script. Ownership is
-#: proven by this marker, NOT by a body/token match — so detection survives a
-#: token rotation and a model override, and a foreign
-#: ``~/.local/bin/<name>`` (no marker) is never touched.
-_MARKER = "# code-helper managed (do not edit)"
 
 #: Owner-only. A "secret" wrapper carries a real credential in plain text —
 #: group/other must have NO bits. A "literal" wrapper (no real secret) is
@@ -167,7 +158,7 @@ def render_script(
             model instead of ``spec``'s defaults (the ``--model`` flag).
 
     Returns:
-        The complete script body, including the shebang and marker line.
+        The complete script body, including the shebang.
     """
     haiku = model_override or spec.haiku_model
     sonnet = model_override or spec.sonnet_model
@@ -176,7 +167,6 @@ def render_script(
 
     lines = [
         "#!/bin/bash",
-        _MARKER,
         "(",
         f"export ANTHROPIC_BASE_URL={_shell_single_quote(spec.base_url)}",
         f"export ANTHROPIC_AUTH_TOKEN={_shell_single_quote(token)}",
@@ -198,31 +188,10 @@ def _mode_for(spec: WrapperSpec) -> int:
     return _MODE_SECRET if spec.auth == "secret" else _MODE_LITERAL
 
 
-def _is_ours(script) -> bool:
-    """True iff ``script`` exists and carries the helper marker (any body).
-
-    Marker-based, so it survives a token rotation or a ``--model`` override
-    (the generated body changes, the marker doesn't) and works without any
-    external state. A nonexistent or unreadable file is treated as NOT ours
-    (fail-safe toward "do not touch").
-    """
-    if not script.exists():
-        return False
-    try:
-        return _MARKER in script.read_text(encoding="utf-8")
-    except OSError:
-        return False
-
-
 def is_installed(paths: Paths, name: str) -> bool:
-    """True iff the wrapper named ``name`` is currently installed (by marker).
-
-    A foreign ``~/.local/bin/<name>`` (no marker) is "not installed" — the
-    single predicate shared by :func:`list_wrappers` and the install/remove
-    ownership checks.
-    """
+    """True iff ``~/.local/bin/<name>`` currently exists."""
     get_spec(name)  # validate the name
-    return _is_ours(paths.script_for(name))
+    return paths.script_for(name).exists()
 
 
 def install_wrapper(
@@ -235,18 +204,9 @@ def install_wrapper(
 ) -> bool:
     """Generate the ``name`` wrapper script. Return True iff it wrote.
 
-    Refuses to clobber a FOREIGN ``~/.local/bin/<name>`` (one without the
-    helper marker) — raises :class:`CodeHelperError` rather than destroying a
-    user's hand-written script. A helper-owned script (marker present) is
-    updated in place (so re-running ``add`` after a token rotation or a
-    different ``--model`` refreshes it). Idempotent: a byte-identical
-    re-install is a no-op (returns False).
-
-    Order of checks is load-bearing: the caller resolves ``token`` BEFORE
-    calling this (so an interactive secret prompt never fires for a name that
-    turns out to collide with a foreign file only AFTER the prompt) — this
-    function itself checks byte-equality (no-op) before the marker check
-    (refuse foreign), and only then writes.
+    Overwrites ``~/.local/bin/<name>`` unconditionally — whatever was there
+    before (helper-generated or not) is replaced. Idempotent: a
+    byte-identical re-install is a no-op (returns False).
 
     Args:
         paths: Resolved :class:`Paths` (``paths.bin_dir``).
@@ -262,20 +222,13 @@ def install_wrapper(
         True iff a write happened (or would happen, under ``dry_run``).
 
     Raises:
-        CodeHelperError: unknown name, OR a foreign file is in the way.
+        CodeHelperError: unknown name.
     """
     spec = get_spec(name)
     body = render_script(spec, token, model_override=model_override)
     script = paths.script_for(name)
-    if script.exists():
-        existing = script.read_text(encoding="utf-8")
-        if existing == body:
-            return False  # idempotent: identical script already installed
-        if _MARKER not in existing:
-            raise CodeHelperError(
-                f"{script} exists and is not code-helper-managed (no marker) — "
-                "refusing to overwrite; remove or rename it first"
-            )
+    if script.exists() and script.read_text(encoding="utf-8") == body:
+        return False  # idempotent: identical script already installed
     if dry_run:
         print(f"would write {script}")
         return True
@@ -284,40 +237,11 @@ def install_wrapper(
     return True
 
 
-def uninstall_wrapper(paths: Paths, name: str, *, dry_run: bool = False) -> bool:
-    """Remove the ``name`` wrapper script. Return True iff it was removed.
-
-    Marker-based: removes the script only when it carries the marker. A
-    foreign ``~/.local/bin/<name>`` (no marker) is left intact — this tool
-    never deletes files it did not create. Idempotent: returns False when the
-    script is absent or not ours (a no-op performs NO write at all — no
-    touched mtime, no mode change).
-    """
-    get_spec(name)  # validate the name even if nothing is installed
-    script = paths.script_for(name)
-    if not _is_ours(script):
-        return False
-    if dry_run:
-        print(f"would remove {script}")
-        return True
-    script.unlink()
-    print(f"removed {script}")
-    return True
-
-
 def list_wrappers(paths: Paths, *, print_fn=print) -> None:
     """Print the wrapper registry + whether each is present on disk.
 
-    Read-only (no write). A script that exists but lacks the marker is
-    reported as ``foreign`` rather than ``not installed`` — distinguishing
-    "never created" from "something else is already there".
+    Read-only (no write).
     """
     for spec in WRAPPERS:
-        script = paths.script_for(spec.name)
-        if _is_ours(script):
-            state = "installed"
-        elif script.exists():
-            state = "foreign"
-        else:
-            state = "not installed"
+        state = "installed" if paths.script_for(spec.name).exists() else "not installed"
         print_fn(f"{spec.name:12} {state:13} {spec.description}")
