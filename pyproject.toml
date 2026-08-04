@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "code-helper"
+dynamic = ["version"]
+description = "Manage generated Claude Code wrapper scripts (deepseek, glm, ...) in ~/.local/bin."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "axisrow" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+]
+dependencies = []
+
+[project.scripts]
+code-helper = "code_helper.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "build",
+    "hatchling>=1.21",
+    "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/axisrow/code-helper"
+
+[tool.hatch.version]
+path = "src/code_helper/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/code_helper"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+markers = [
+    "unit: fast isolated tests (pure logic, mocked IO)",
+    "integration: tests touching tmp HOME + fake services",
+]
+addopts = [
+    "--strict-markers",
+]
