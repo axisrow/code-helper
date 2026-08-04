@@ -10,7 +10,11 @@ one-line stderr + exit 1 (full traceback under ``--debug``).
 The subcommands: ``list`` (registry + install state), ``add <name>``
 (install/update a wrapper, optionally ``--model``), ``edit-token [<name>]``
 (rotate a secret-auth wrapper's token; an arrow-key menu picks the wrapper
-when ``<name>`` is omitted, via :mod:`code_helper.cli.menu`).
+when ``<name>`` is omitted, via :mod:`code_helper.cli.menu``), and ``tui``
+(single-pass arrow-key menu over the three commands above, via
+:mod:`code_helper.cli.tui`). A bare ``code-helper`` (no subcommand) also
+opens the TUI — it is the discoverable default for a new user, while every
+subcommand remains fully scriptable on its own.
 
 Root flags (``--debug`` / ``--dry-run``) attach via a single shared parent
 parser so they parse BOTH before and after the subcommand.
@@ -113,10 +117,15 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     return 0
 
 
-def _handle_bare(args: argparse.Namespace) -> int:
-    """Bare ``code-helper`` (no subcommand) → print help."""
-    args._parser.print_help()
-    return 0
+def _handle_tui(args: argparse.Namespace) -> int:
+    """``tui`` subcommand (and bare ``code-helper``) → the arrow-key menu.
+
+    Thin shell: delegate to :func:`code_helper.cli.tui.run_tui`, which
+    dispatches into the same ``_handle_*`` functions as the CLI subcommands.
+    """
+    from code_helper.cli.tui import run_tui
+
+    return run_tui(args)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -149,7 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Manage generated Claude Code wrapper scripts in ~/.local/bin.",
         parents=[sub_flags],
     )
-    parser.set_defaults(func=_handle_bare, _parser=parser)
+    parser.set_defaults(func=_handle_tui)
 
     subparsers = parser.add_subparsers(
         dest="cmd",
@@ -189,5 +198,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="wrapper name (omit to pick interactively with an arrow-key menu)",
     )
     p_edit_token.set_defaults(func=_handle_edit_token)
+
+    p_tui = subparsers.add_parser(
+        "tui",
+        help="open the arrow-key menu (also the bare `code-helper` default)",
+        parents=[sub_flags],
+    )
+    p_tui.set_defaults(func=_handle_tui)
 
     return parser
