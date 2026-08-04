@@ -22,7 +22,6 @@ from code_helper.services.wrappers import (
     is_installed,
     list_wrappers,
     render_script,
-    uninstall_wrapper,
 )
 
 _LITERAL_TOKEN = "ollama"
@@ -71,11 +70,6 @@ def test_render_script_embeds_token_single_quoted():
     body = render_script(get_spec("deepseek"), _LITERAL_TOKEN)
     assert f"ANTHROPIC_AUTH_TOKEN='{_LITERAL_TOKEN}'" in body
     assert "#!/bin/bash" in body
-
-
-@pytest.mark.unit
-def test_render_script_has_marker_comment():
-    assert "code-helper managed" in render_script(get_spec("deepseek"), _LITERAL_TOKEN)
 
 
 @pytest.mark.unit
@@ -152,7 +146,7 @@ def test_render_script_model_override_injection_is_neutralized():
 
 
 # --------------------------------------------------------------------------- #
-# install_wrapper — writes an executable, idempotent, refuses foreign files.
+# install_wrapper — writes an executable, idempotent, always overwrites by name.
 # --------------------------------------------------------------------------- #
 
 
@@ -203,22 +197,25 @@ def test_install_wrapper_unknown_name_raises_before_any_write(tmp_path):
 
 
 @pytest.mark.integration
-def test_install_wrapper_refuses_foreign_script(tmp_path):
-    """A foreign ~/.local/bin/deepseek is NOT overwritten — raise, don't clobber."""
+def test_install_wrapper_overwrites_any_existing_file(tmp_path):
+    """A pre-existing ~/.local/bin/deepseek (hand-written or not) is replaced."""
     paths = Paths.from_home(tmp_path)
-    foreign = "#!/bin/bash\necho my own deepseek\n"
+    existing = "#!/bin/bash\necho my own deepseek\n"
     script = paths.script_for("deepseek")
     script.parent.mkdir(parents=True, exist_ok=True)
-    script.write_text(foreign, encoding="utf-8")
+    script.write_text(existing, encoding="utf-8")
 
-    with pytest.raises(CodeHelperError, match="refuse|not code-helper-managed"):
-        install_wrapper(paths, "deepseek", token=_LITERAL_TOKEN)
-    assert script.read_text(encoding="utf-8") == foreign
+    wrote = install_wrapper(paths, "deepseek", token=_LITERAL_TOKEN)
+
+    assert wrote is True
+    body = script.read_text(encoding="utf-8")
+    assert body != existing
+    assert f"ANTHROPIC_AUTH_TOKEN='{_LITERAL_TOKEN}'" in body
 
 
 @pytest.mark.integration
-def test_install_wrapper_updates_ours_after_token_rotation(tmp_path):
-    """Re-installing with a new token rewrites the (marker-owned) script."""
+def test_install_wrapper_updates_after_token_rotation(tmp_path):
+    """Re-installing with a new token rewrites the script."""
     paths = Paths.from_home(tmp_path)
     install_wrapper(paths, "glm", token=_SECRET_TOKEN)
 
@@ -253,7 +250,7 @@ def test_install_wrapper_literal_mode_is_normal_executable(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# is_installed — ownership by a STABLE MARKER (not body/token).
+# is_installed / list_wrappers — plain existence, no ownership tracking.
 # --------------------------------------------------------------------------- #
 
 
@@ -272,126 +269,31 @@ def test_is_installed_false_when_absent(tmp_path):
 
 
 @pytest.mark.integration
-def test_is_installed_false_for_foreign_script(tmp_path):
+def test_is_installed_true_for_any_existing_file(tmp_path):
+    """Existence alone is enough — no marker/ownership check."""
     paths = Paths.from_home(tmp_path)
     script = paths.script_for("deepseek")
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text("#!/bin/bash\necho someone else's\n", encoding="utf-8")
 
-    assert is_installed(paths, "deepseek") is False
+    assert is_installed(paths, "deepseek") is True
 
 
 @pytest.mark.integration
-def test_is_installed_survives_token_rotation(tmp_path):
-    """Ours-after-rotation: the marker (not the token) proves ownership."""
-    paths = Paths.from_home(tmp_path)
-    install_wrapper(paths, "glm", token=_SECRET_TOKEN)
-    install_wrapper(
-        paths, "glm", token="11111111111111111111111111111111.bbbbbbbbbbbbbbbb"
-    )
-
-    assert is_installed(paths, "glm") is True
-
-
-# --------------------------------------------------------------------------- #
-# uninstall_wrapper — removes by marker; idempotent; foreign untouched.
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.integration
-def test_uninstall_wrapper_removes_script(tmp_path):
+def test_list_wrappers_reports_installed_and_not_installed(tmp_path):
     paths = Paths.from_home(tmp_path)
     install_wrapper(paths, "deepseek", token=_LITERAL_TOKEN)
-
-    removed = uninstall_wrapper(paths, "deepseek")
-
-    assert removed is True
-    assert not paths.script_for("deepseek").exists()
-
-
-@pytest.mark.integration
-def test_uninstall_wrapper_idempotent_when_absent(tmp_path):
-    paths = Paths.from_home(tmp_path)
-    assert uninstall_wrapper(paths, "deepseek") is False
-
-
-@pytest.mark.integration
-def test_uninstall_wrapper_does_not_touch_foreign_script(tmp_path):
-    paths = Paths.from_home(tmp_path)
-    foreign_body = "#!/bin/bash\necho my own deepseek\n"
-    script = paths.script_for("deepseek")
-    script.parent.mkdir(parents=True, exist_ok=True)
-    script.write_text(foreign_body, encoding="utf-8")
-
-    removed = uninstall_wrapper(paths, "deepseek")
-
-    assert removed is False
-    assert script.read_text(encoding="utf-8") == foreign_body
-
-
-@pytest.mark.integration
-def test_uninstall_wrapper_no_op_does_not_touch_mtime(tmp_path):
-    """A no-op uninstall must not rewrite the foreign file (no mtime change)."""
-    paths = Paths.from_home(tmp_path)
-    script = paths.script_for("deepseek")
-    script.parent.mkdir(parents=True, exist_ok=True)
-    script.write_text("#!/bin/bash\necho foreign\n", encoding="utf-8")
-    before = script.stat().st_mtime_ns
-
-    uninstall_wrapper(paths, "deepseek")
-
-    assert script.stat().st_mtime_ns == before
-
-
-@pytest.mark.integration
-def test_uninstall_wrapper_dry_run_does_not_remove(tmp_path):
-    paths = Paths.from_home(tmp_path)
-    install_wrapper(paths, "deepseek", token=_LITERAL_TOKEN)
-
-    removed = uninstall_wrapper(paths, "deepseek", dry_run=True)
-
-    assert removed is True
-    assert paths.script_for("deepseek").exists()
-
-
-@pytest.mark.integration
-def test_uninstall_wrapper_unknown_name_raises(tmp_path):
-    paths = Paths.from_home(tmp_path)
-    with pytest.raises(CodeHelperError, match="unknown wrapper"):
-        uninstall_wrapper(paths, "nope")
-
-
-# --------------------------------------------------------------------------- #
-# list_wrappers — installed / foreign / not installed.
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.integration
-def test_list_wrappers_reports_all_three_states(tmp_path, capsys):
-    paths = Paths.from_home(tmp_path)
-    install_wrapper(paths, "deepseek", token=_LITERAL_TOKEN)
-    foreign = paths.script_for("glm")
-    foreign.parent.mkdir(parents=True, exist_ok=True)
-    foreign.write_text("#!/bin/bash\necho not ours\n", encoding="utf-8")
 
     lines = []
     list_wrappers(paths, print_fn=lines.append)
     output = "\n".join(lines)
 
     assert "deepseek" in output and "installed" in output
-    assert "glm" in output and "foreign" in output
-
-
-@pytest.mark.integration
-def test_list_wrappers_reports_not_installed(tmp_path):
-    paths = Paths.from_home(tmp_path)
-    lines = []
-    list_wrappers(paths, print_fn=lines.append)
-    assert any("not installed" in line for line in lines)
+    assert "glm" in output and "not installed" in output
 
 
 # --------------------------------------------------------------------------- #
-# CLI: `add` / `remove` / `list` through main([...]).
+# CLI: `add` / `list` through main([...]).
 # --------------------------------------------------------------------------- #
 
 from code_helper.__main__ import main  # noqa: E402
@@ -424,17 +326,6 @@ def test_cli_add_with_model_override(tmp_path):
     paths = Paths.from_home(tmp_path)
     body = paths.script_for("deepseek").read_text(encoding="utf-8")
     assert "custom-model:tag" in body
-
-
-@pytest.mark.integration
-def test_cli_remove_deletes_script(tmp_path):
-    main(["add", "deepseek"])
-    paths = Paths.from_home(tmp_path)
-    assert paths.script_for("deepseek").exists()
-
-    assert main(["remove", "deepseek"]) == 0
-
-    assert not paths.script_for("deepseek").exists()
 
 
 @pytest.mark.integration

@@ -1,0 +1,99 @@
+"""Tests for the ``edit-token`` CLI subcommand.
+
+Follows the ``tests/test_wrappers.py`` "CLI through main([...])" pattern:
+HOME is patched by the autouse ``_isolate_home`` fixture, so
+``Paths.from_home(tmp_path)`` resolves to the same directory the handler
+writes to via ``Paths.default()``.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from code_helper.__main__ import main
+from code_helper.services.paths import Paths
+
+_OLD_TOKEN = "00000000000000000000000000000000.aaaaaaaaaaaaaaaa"
+_NEW_TOKEN = "11111111111111111111111111111111.bbbbbbbbbbbbbbbb"
+
+
+@pytest.mark.integration
+def test_edit_token_with_name_rewrites_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZAI_API_KEY", _OLD_TOKEN)
+    assert main(["add", "glm"]) == 0
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: _NEW_TOKEN)
+    assert main(["edit-token", "glm"]) == 0
+
+    paths = Paths.from_home(tmp_path)
+    body = paths.script_for("glm").read_text(encoding="utf-8")
+    assert _NEW_TOKEN in body
+    assert _OLD_TOKEN not in body
+
+
+@pytest.mark.integration
+def test_edit_token_unknown_name_exits_1(tmp_path, capsys):
+    code = main(["edit-token", "nope"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "unknown wrapper" in err
+
+
+@pytest.mark.integration
+def test_edit_token_literal_auth_wrapper_rejected(tmp_path, capsys):
+    code = main(["edit-token", "deepseek"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "no editable token" in err
+    assert "auth=literal" in err
+
+
+@pytest.mark.integration
+def test_edit_token_empty_input_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "")
+    code = main(["edit-token", "glm"])
+    assert code == 1
+
+
+@pytest.mark.integration
+def test_edit_token_dry_run_does_not_write(tmp_path, monkeypatch):
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: _NEW_TOKEN)
+    assert main(["--dry-run", "edit-token", "glm"]) == 0
+
+    paths = Paths.from_home(tmp_path)
+    assert not paths.script_for("glm").exists()
+
+
+@pytest.mark.integration
+def test_edit_token_no_name_uses_menu(tmp_path, monkeypatch):
+    # select_from_menu's `read_key` default is bound at def-time, so patching
+    # `_read_key_raw` after import has no effect; patch select_from_menu
+    # itself instead (its own key-parsing behavior is covered by test_menu.py).
+    monkeypatch.setattr(
+        "code_helper.cli.menu.select_from_menu", lambda items, **_kw: "glm"
+    )
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: _NEW_TOKEN)
+
+    assert main(["edit-token"]) == 0
+
+    paths = Paths.from_home(tmp_path)
+    body = paths.script_for("glm").read_text(encoding="utf-8")
+    assert _NEW_TOKEN in body
+
+
+@pytest.mark.integration
+def test_edit_token_menu_cancelled_writes_nothing(tmp_path, monkeypatch, capsys):
+    from code_helper.cli.menu import MenuCancelled
+
+    def _cancel(items, **_kw):
+        raise MenuCancelled()
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _cancel)
+
+    assert main(["edit-token"]) == 0
+
+    out = capsys.readouterr().out
+    assert "cancelled" in out
+    paths = Paths.from_home(tmp_path)
+    assert not paths.script_for("glm").exists()

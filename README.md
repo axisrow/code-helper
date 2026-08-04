@@ -22,8 +22,9 @@ code-helper list                     # show the wrapper registry + install state
 code-helper add deepseek             # create ~/.local/bin/deepseek
 code-helper add deepseek --model X   # override the default model
 code-helper add glm                  # prompts for ZAI_API_KEY (or reads it from env)
-code-helper remove deepseek          # remove, only if code-helper-managed
 code-helper --dry-run add deepseek   # preview, write nothing
+code-helper edit-token glm           # rotate glm's token via a hidden prompt (ignores ZAI_API_KEY)
+code-helper edit-token               # arrow-key menu over secret-auth wrappers
 ```
 
 ## Wrappers in the registry
@@ -35,9 +36,10 @@ code-helper --dry-run add deepseek   # preview, write nothing
 
 ## Safety
 
-- A wrapper this tool did not create (no `# code-helper managed` marker) is
-  **never** overwritten or deleted — `add`/`remove` refuse and leave it
-  untouched.
+- `add` and `edit-token` write `~/.local/bin/<name>` unconditionally, by
+  name — any pre-existing file there (hand-written or otherwise) is
+  overwritten. There is no `remove` command; delete a wrapper script
+  yourself if you no longer want it.
 - Every value interpolated into a generated script (token, base URL, model
   names) is POSIX single-quoted to prevent shell injection, even when the
   value comes from user input (`--model`) or an untrusted environment
