@@ -34,8 +34,17 @@ _SECRET_TOKEN = "00000000000000000000000000000000.aaaaaaaaaaaaaaaa"
 
 
 @pytest.mark.unit
-def test_registry_has_deepseek_and_glm():
-    assert {w.name for w in WRAPPERS} == {"deepseek", "glm"}
+def test_registry_has_deepseek_glm_and_glm_ollama():
+    assert {w.name for w in WRAPPERS} == {"deepseek", "glm", "glm-ollama"}
+
+
+@pytest.mark.unit
+def test_glm_ollama_is_command_shape():
+    spec = get_spec("glm-ollama")
+    assert spec.launch_command == "ollama launch claude --model {model}"
+    assert spec.launch_model == "glm-5.2:cloud"
+    assert spec.auth == "literal"  # no token — ollama launch authenticates itself
+    assert spec.base_url == ""  # env-var fields unused by command shape
 
 
 @pytest.mark.unit
@@ -111,6 +120,41 @@ def test_render_script_model_override_replaces_all_tiers():
     assert "ANTHROPIC_DEFAULT_SONNET_MODEL='custom:tag'" in body
     assert "ANTHROPIC_DEFAULT_OPUS_MODEL='custom:tag'" in body
     assert "CLAUDE_CODE_SUBAGENT_MODEL='custom:tag'" in body
+
+
+# --------------------------------------------------------------------------- #
+# render_script — command shape (launch_command set): exec the provider's own
+# launcher instead of exporting ANTHROPIC_* envs here.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_render_script_command_shape_launches_ollama():
+    body = render_script(get_spec("glm-ollama"), "")
+    assert body.startswith("#!/bin/bash")
+    assert "exec ollama launch claude --model 'glm-5.2:cloud' \"$@\"" in body
+    # the command shape does NOT export ANTHROPIC_* — ollama launch sets them
+    assert "ANTHROPIC_BASE_URL" not in body
+    assert "ANTHROPIC_AUTH_TOKEN" not in body
+    assert "export ANTHROPIC_API_KEY=" not in body
+    # bare `claude "$@"` (env-var shape's exec line) must not also be present
+    assert 'claude "$@"\n' not in body
+
+
+@pytest.mark.unit
+def test_render_script_command_shape_model_override():
+    body = render_script(get_spec("glm-ollama"), "", model_override="custom:tag")
+    assert "--model 'custom:tag'" in body
+    assert "glm-5.2:cloud" not in body
+
+
+@pytest.mark.unit
+def test_render_script_command_shape_model_injection_is_neutralized():
+    """--model is user input even in the command shape — must be single-quoted."""
+    hostile = "x'; touch /tmp/pwned; echo '"
+    body = render_script(get_spec("glm-ollama"), "", model_override=hostile)
+    assert f"--model '{hostile}'" not in body  # naive form would break out
+    assert "'\"'\"'" in body  # escaped-quote sequence proves quoting engaged
 
 
 # --------------------------------------------------------------------------- #
@@ -247,6 +291,21 @@ def test_install_wrapper_literal_mode_is_normal_executable(tmp_path):
 
     mode = stat.S_IMODE(paths.script_for("deepseek").stat().st_mode)
     assert mode == 0o755
+
+
+@pytest.mark.integration
+def test_install_wrapper_command_shape_writes_and_idempotent(tmp_path):
+    """Command-shape install writes a script; a byte-identical re-install is a no-op.
+
+    Mode (0o755 for literal auth) and the rendered body are pinned by the
+    literal-mode and command-shape render unit tests respectively — this test
+    only pins the install path itself (write happens, file exists, idempotent).
+    """
+    paths = Paths.from_home(tmp_path)
+
+    assert install_wrapper(paths, "glm-ollama", token="") is True
+    assert paths.script_for("glm-ollama").exists()
+    assert install_wrapper(paths, "glm-ollama", token="") is False
 
 
 # --------------------------------------------------------------------------- #

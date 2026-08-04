@@ -7,7 +7,10 @@ touching Claude Code's own configuration.
 
 Each wrapper exports the `ANTHROPIC_*` environment variables Claude Code reads
 for its model tiers, then execs `claude "$@"`. Running `deepseek` instead of
-`claude` transparently routes every request to that provider.
+`claude` transparently routes every request to that provider. A "command"
+wrapper (e.g. `glm-ollama`) instead execs the provider's own launcher —
+`ollama launch claude --model <m> "$@"` — letting that launcher set up the
+`ANTHROPIC_*` environment itself.
 
 ## Install
 
@@ -22,6 +25,7 @@ code-helper list                     # show the wrapper registry + install state
 code-helper add deepseek             # create ~/.local/bin/deepseek
 code-helper add deepseek --model X   # override the default model
 code-helper add glm                  # prompts for ZAI_API_KEY (or reads it from env)
+code-helper add glm-ollama           # create ~/.local/bin/glm-ollama (ollama launch claude)
 code-helper --dry-run add deepseek   # preview, write nothing
 code-helper edit-token glm           # rotate glm's token via a hidden prompt (ignores ZAI_API_KEY)
 code-helper edit-token               # arrow-key menu over secret-auth wrappers
@@ -33,6 +37,7 @@ code-helper edit-token               # arrow-key menu over secret-auth wrappers
 |---|---|---|
 | `deepseek` | local Ollama daemon (`http://127.0.0.1:11434`), `deepseek-v4-flash:0731-cloud` | literal token (`ollama`) |
 | `glm` | Z.ai (`https://api.z.ai/api/anthropic`) | secret (`ZAI_API_KEY`) |
+| `glm-ollama` | `ollama launch claude --model glm-5.2:cloud` (command wrapper) | none — `ollama launch` authenticates itself |
 
 ## Safety
 
