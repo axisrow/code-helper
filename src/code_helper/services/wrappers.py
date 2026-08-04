@@ -164,13 +164,15 @@ def render_script(
     Two shapes, discriminated by ``spec.launch_command``:
 
     - **command shape** (``launch_command`` set): ``exec`` the provider's own
-      launcher (e.g. ``ollama launch claude --model {model} "$@"``), which sets
-      up ``ANTHROPIC_*`` itself. ``launch_model`` is the default model
+      launcher (e.g. ``ollama launch claude --model {model} -- "$@"``), which
+      sets up ``ANTHROPIC_*`` itself. ``launch_model`` is the default model
       substituted into the ``{model}`` placeholder; ``model_override``
       replaces it. The model is the only user-controlled interpolation and is
       single-quoted via :func:`_shell_single_quote` BEFORE substitution
       (``str.replace``, not ``str.format``, so a model can never hijack the
       template); ``launch_command`` itself is a trusted registry constant.
+      The ``--`` before ``"$@"`` is required: without it, the launcher parses
+      forwarded Claude flags (e.g. ``-p``) as its own and rejects them.
     - **env-var shape** (``launch_command is None``): a subshell that exports
       the Anthropic endpoint + auth token + the tier-model envs
       (haiku/sonnet/opus, and the subagent model if the spec has one), then runs
@@ -201,7 +203,7 @@ def render_script(
         model = model_override or spec.launch_model
         quoted_model = _shell_single_quote(model)
         cmd = spec.launch_command.replace("{model}", quoted_model)
-        lines = ["#!/bin/bash", f'exec {cmd} "$@"']
+        lines = ["#!/bin/bash", f'exec {cmd} -- "$@"']
         return "\n".join(lines) + "\n"
 
     haiku = model_override or spec.haiku_model

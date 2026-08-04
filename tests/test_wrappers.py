@@ -132,7 +132,9 @@ def test_render_script_model_override_replaces_all_tiers():
 def test_render_script_command_shape_launches_ollama():
     body = render_script(get_spec("glm-ollama"), "")
     assert body.startswith("#!/bin/bash")
-    assert "exec ollama launch claude --model 'glm-5.2:cloud' \"$@\"" in body
+    # `--` is required: without it, `ollama launch` parses "$@" itself and
+    # rejects any Claude-bound flag (e.g. `-p`) as an unknown Ollama flag.
+    assert "exec ollama launch claude --model 'glm-5.2:cloud' -- \"$@\"" in body
     # the command shape does NOT export ANTHROPIC_* — ollama launch sets them
     assert "ANTHROPIC_BASE_URL" not in body
     assert "ANTHROPIC_AUTH_TOKEN" not in body
@@ -144,7 +146,7 @@ def test_render_script_command_shape_launches_ollama():
 @pytest.mark.unit
 def test_render_script_command_shape_model_override():
     body = render_script(get_spec("glm-ollama"), "", model_override="custom:tag")
-    assert "--model 'custom:tag'" in body
+    assert "--model 'custom:tag' -- \"$@\"" in body
     assert "glm-5.2:cloud" not in body
 
 
