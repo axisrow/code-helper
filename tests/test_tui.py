@@ -31,7 +31,7 @@ def _menu_sequence(monkeypatch, answers):
 
 @pytest.mark.integration
 def test_tui_list_dispatches_to_handler(tmp_path, monkeypatch, capsys):
-    _menu_sequence(monkeypatch, ["list"])
+    _menu_sequence(monkeypatch, ["list", "quit"])
 
     assert main(["tui"]) == 0
 
@@ -42,7 +42,7 @@ def test_tui_list_dispatches_to_handler(tmp_path, monkeypatch, capsys):
 
 @pytest.mark.integration
 def test_bare_invocation_opens_tui(tmp_path, monkeypatch, capsys):
-    _menu_sequence(monkeypatch, ["list"])
+    _menu_sequence(monkeypatch, ["list", "quit"])
 
     assert main([]) == 0
 
@@ -53,7 +53,7 @@ def test_bare_invocation_opens_tui(tmp_path, monkeypatch, capsys):
 
 @pytest.mark.integration
 def test_tui_add_installs_same_as_cli(tmp_path, monkeypatch):
-    _menu_sequence(monkeypatch, ["add", "deepseek"])
+    _menu_sequence(monkeypatch, ["add", "deepseek", "quit"])
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
 
     assert main(["tui"]) == 0
@@ -76,7 +76,7 @@ def test_tui_add_installs_same_as_cli(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_tui_add_model_override_reaches_handler(tmp_path, monkeypatch):
-    _menu_sequence(monkeypatch, ["add", "deepseek"])
+    _menu_sequence(monkeypatch, ["add", "deepseek", "quit"])
     monkeypatch.setattr("builtins.input", lambda _prompt: "my-model")
 
     assert main(["tui"]) == 0
@@ -87,7 +87,7 @@ def test_tui_add_model_override_reaches_handler(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_tui_add_empty_model_means_default(tmp_path, monkeypatch):
-    _menu_sequence(monkeypatch, ["add", "deepseek"])
+    _menu_sequence(monkeypatch, ["add", "deepseek", "quit"])
     monkeypatch.setattr("builtins.input", lambda _prompt: "   ")
 
     assert main(["tui"]) == 0
@@ -104,7 +104,7 @@ def test_tui_edit_token_delegates(tmp_path, monkeypatch):
     assert main(["add", "glm"]) == 0
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
 
-    _menu_sequence(monkeypatch, ["edit-token", "glm"])
+    _menu_sequence(monkeypatch, ["edit-token", "glm", "quit"])
     monkeypatch.setattr("getpass.getpass", lambda _prompt: _NEW_TOKEN)
 
     assert main(["tui"]) == 0
@@ -115,12 +115,45 @@ def test_tui_edit_token_delegates(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_tui_dry_run_toggle_prevents_write(tmp_path, monkeypatch):
-    _menu_sequence(monkeypatch, ["dry-run: off", "add", "deepseek"])
+    _menu_sequence(monkeypatch, ["dry-run: off", "add", "deepseek", "quit"])
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
 
     assert main(["tui"]) == 0
 
     assert not Paths.from_home(tmp_path).script_for("deepseek").exists()
+
+
+@pytest.mark.integration
+def test_tui_loops_after_command(tmp_path, monkeypatch, capsys):
+    # After `list` the menu reappears and `add` runs — proof of the loop.
+    _menu_sequence(monkeypatch, ["list", "add", "deepseek", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+
+    assert main(["tui"]) == 0
+
+    out = capsys.readouterr().out
+    assert "deepseek" in out  # `list` output
+    assert Paths.from_home(tmp_path).script_for("deepseek").exists()  # `add` ran
+
+
+@pytest.mark.integration
+def test_tui_error_returns_to_menu(tmp_path, monkeypatch, capsys):
+    from code_helper.errors import CodeHelperError
+
+    def _boom(**_kw):
+        raise CodeHelperError("simulated failure")
+
+    monkeypatch.setattr("code_helper.services.secrets.resolve_token", _boom)
+    _menu_sequence(monkeypatch, ["add", "glm", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+
+    assert main(["tui"]) == 0
+
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "simulated failure" in err
+    # The error did not exit the loop: `quit` was reached, and nothing was written.
+    assert not Paths.from_home(tmp_path).script_for("glm").exists()
 
 
 @pytest.mark.integration
