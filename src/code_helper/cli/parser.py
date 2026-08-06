@@ -77,6 +77,7 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     from code_helper.services.paths import Paths
     from code_helper.services.wrappers import (
         WRAPPERS,
+        describe_all,
         get_spec,
         install_wrapper,
         is_installed,
@@ -91,12 +92,26 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
         secret_specs = [w for w in WRAPPERS if w.auth == "secret"]
         if not secret_specs:
             raise CodeHelperError("no wrapper has an editable (secret) token")
+        items = describe_all(
+            paths,
+            secret_specs,
+            installed_word="installed",
+            not_installed_word="not installed",
+        )
         try:
             chosen = select_from_menu(
-                [w.name for w in secret_specs],
+                items,
                 prompt="select a wrapper to edit its token:",
             )
-        except MenuCancelled:
+        except MenuCancelled as e:
+            if e.hard:
+                # Ctrl-C: let it propagate so a TUI caller can treat this as
+                # "leave the TUI" rather than "command succeeded, pause and
+                # show the menu again" — see cli/tui.py's top-level catch.
+                # The plain CLI path has no such catch either, so Ctrl-C at
+                # `code-helper edit-token`'s picker behaves like Ctrl-C
+                # anywhere else in the CLI: an uncaught KeyboardInterrupt.
+                raise
             print("cancelled")
             return 0
         spec = get_spec(chosen)

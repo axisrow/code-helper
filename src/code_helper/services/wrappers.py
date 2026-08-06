@@ -29,6 +29,7 @@ is no ownership marker and no "foreign file" guard.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from code_helper.backends._atomic import atomic_write
@@ -42,6 +43,8 @@ __all__ = [
     "install_wrapper",
     "is_installed",
     "list_wrappers",
+    "describe_wrapper",
+    "describe_all",
     "get_spec",
 ]
 
@@ -283,11 +286,67 @@ def install_wrapper(
     return True
 
 
+def describe_wrapper(
+    spec: WrapperSpec, *, installed: bool, installed_word: str, not_installed_word: str
+) -> str:
+    """Format one ``name / install-state / description`` row.
+
+    The single source of truth for this row's column widths (``:12``/``:13``)
+    and field order — every caller that lists wrappers with their install
+    state (:func:`list_wrappers`, the TUI's wrapper picker, ``edit-token``'s
+    picker) renders through here instead of re-deriving the format string, so
+    the three menus can't silently drift apart on layout. ``installed_word``/
+    ``not_installed_word`` are caller-supplied because callers render in
+    different languages (``list_wrappers`` in English, the TUI in Russian) —
+    only the format itself is shared.
+    """
+    state = installed_word if installed else not_installed_word
+    return f"{spec.name:12} {state:13} {spec.description}"
+
+
+def describe_all(
+    paths: Paths,
+    specs: Sequence[WrapperSpec],
+    *,
+    installed_word: str,
+    not_installed_word: str,
+) -> list[tuple[str, str]]:
+    """``(name, describe_wrapper(...))`` pairs for a menu built over ``specs``.
+
+    Both ``edit-token``'s picker (over the ``secret``-auth subset) and the
+    TUI's ``add`` wrapper picker (over the full registry) build this exact
+    shape — the same ``is_installed`` lookup per spec, wrapped by
+    :func:`describe_wrapper` — differing only in which specs they iterate and
+    which language's install-state words they pass. Sharing the loop here
+    means that wiring (not just the row's column widths) can't drift between
+    the two menus.
+    """
+    return [
+        (
+            spec.name,
+            describe_wrapper(
+                spec,
+                installed=is_installed(paths, spec.name),
+                installed_word=installed_word,
+                not_installed_word=not_installed_word,
+            ),
+        )
+        for spec in specs
+    ]
+
+
 def list_wrappers(paths: Paths, *, print_fn=print) -> None:
     """Print the wrapper registry + whether each is present on disk.
 
-    Read-only (no write).
+    Read-only (no write). Goes through :func:`describe_all` like the two
+    menus do, rather than re-deriving ``script_for(...).exists()`` inline —
+    that helper exists to share the ``Paths``/:func:`is_installed` wiring,
+    not only the row format.
     """
-    for spec in WRAPPERS:
-        state = "installed" if paths.script_for(spec.name).exists() else "not installed"
-        print_fn(f"{spec.name:12} {state:13} {spec.description}")
+    for _name, label in describe_all(
+        paths,
+        WRAPPERS,
+        installed_word="installed",
+        not_installed_word="not installed",
+    ):
+        print_fn(label)

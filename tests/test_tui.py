@@ -7,6 +7,16 @@ writes to via ``Paths.default()``. The fake ``select_from_menu`` is patched
 on ``code_helper.cli.menu`` (not imported at module scope by ``tui.py`` /
 ``parser.py``) so the patch lands — same trick as
 ``test_edit_token_no_name_uses_menu``.
+
+Menu choices are returned by VALUE now that ``select_from_menu`` renders
+``(value, label)`` pairs — the fake below returns whatever the caller asked
+for regardless of label, exactly like the real thing.
+
+``add``'s flow is two menu picks (wrapper, then model) rather than one pick +
+a bare ``input()`` — see ``cli/tui.py``'s ``_run_add``. Every
+``_menu_sequence`` that drives ``add`` therefore lists both choices; use
+``"__default__"`` to keep the spec's default model, or ``"__custom__"`` plus a
+patched ``builtins.input`` to supply one.
 """
 
 from __future__ import annotations
@@ -53,8 +63,7 @@ def test_bare_invocation_opens_tui(tmp_path, monkeypatch, capsys):
 
 @pytest.mark.integration
 def test_tui_add_installs_same_as_cli(tmp_path, monkeypatch):
-    _menu_sequence(monkeypatch, ["add", "deepseek", "quit"])
-    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+    _menu_sequence(monkeypatch, ["add", "deepseek", "__default__", "quit"])
 
     assert main(["tui"]) == 0
 
@@ -76,7 +85,7 @@ def test_tui_add_installs_same_as_cli(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_tui_add_model_override_reaches_handler(tmp_path, monkeypatch):
-    _menu_sequence(monkeypatch, ["add", "deepseek", "quit"])
+    _menu_sequence(monkeypatch, ["add", "deepseek", "__custom__", "quit"])
     monkeypatch.setattr("builtins.input", lambda _prompt: "my-model")
 
     assert main(["tui"]) == 0
@@ -86,9 +95,25 @@ def test_tui_add_model_override_reaches_handler(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_tui_add_empty_model_means_default(tmp_path, monkeypatch):
-    _menu_sequence(monkeypatch, ["add", "deepseek", "quit"])
+def test_tui_add_custom_model_empty_input_means_default(tmp_path, monkeypatch):
+    _menu_sequence(monkeypatch, ["add", "deepseek", "__custom__", "quit"])
     monkeypatch.setattr("builtins.input", lambda _prompt: "   ")
+
+    assert main(["tui"]) == 0
+
+    body = Paths.from_home(tmp_path).script_for("deepseek").read_text(encoding="utf-8")
+    assert "deepseek-v4-flash:0731-cloud" in body
+
+
+@pytest.mark.integration
+def test_tui_add_default_model_never_calls_input(tmp_path, monkeypatch):
+    # The common case (keep the default model) must not prompt at all.
+    _menu_sequence(monkeypatch, ["add", "deepseek", "__default__", "quit"])
+
+    def _boom(_prompt):
+        raise AssertionError("input() must not be called for __default__")
+
+    monkeypatch.setattr("builtins.input", _boom)
 
     assert main(["tui"]) == 0
 
@@ -114,11 +139,12 @@ def test_tui_edit_token_delegates(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_tui_dry_run_toggle_prevents_write(tmp_path, monkeypatch):
-    _menu_sequence(monkeypatch, ["dry-run: off", "add", "deepseek", "quit"])
-    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+def test_tui_dry_run_flag_from_cli_still_respected(tmp_path, monkeypatch):
+    # There is no menu toggle anymore — `--dry-run` passed on the command
+    # line before `tui` must still prevent the write.
+    _menu_sequence(monkeypatch, ["add", "deepseek", "__default__", "quit"])
 
-    assert main(["tui"]) == 0
+    assert main(["--dry-run", "tui"]) == 0
 
     assert not Paths.from_home(tmp_path).script_for("deepseek").exists()
 
@@ -126,8 +152,7 @@ def test_tui_dry_run_toggle_prevents_write(tmp_path, monkeypatch):
 @pytest.mark.integration
 def test_tui_loops_after_command(tmp_path, monkeypatch, capsys):
     # After `list` the menu reappears and `add` runs — proof of the loop.
-    _menu_sequence(monkeypatch, ["list", "add", "deepseek", "quit"])
-    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+    _menu_sequence(monkeypatch, ["list", "add", "deepseek", "__default__", "quit"])
 
     assert main(["tui"]) == 0
 
@@ -144,8 +169,7 @@ def test_tui_error_returns_to_menu(tmp_path, monkeypatch, capsys):
         raise CodeHelperError("simulated failure")
 
     monkeypatch.setattr("code_helper.services.secrets.resolve_token", _boom)
-    _menu_sequence(monkeypatch, ["add", "glm", "quit"])
-    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+    _menu_sequence(monkeypatch, ["add", "glm", "__default__", "quit"])
 
     assert main(["tui"]) == 0
 
@@ -157,18 +181,126 @@ def test_tui_error_returns_to_menu(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.integration
-def test_tui_cancel_writes_nothing(tmp_path, monkeypatch, capsys):
+def test_tui_soft_cancel_on_main_menu_exits(tmp_path, monkeypatch, capsys):
+    # Esc/q (a soft MenuCancelled) on the MAIN menu means "leave the TUI".
     from code_helper.cli.menu import MenuCancelled
 
     def _cancel(items, **_kw):
-        raise MenuCancelled()
+        raise MenuCancelled(hard=False)
 
     monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _cancel)
 
     assert main(["tui"]) == 0
 
+    assert not Paths.from_home(tmp_path).script_for("deepseek").exists()
+
+
+@pytest.mark.integration
+def test_tui_soft_cancel_in_submenu_returns_to_main_menu(tmp_path, monkeypatch, capsys):
+    # Esc/q inside `add`'s wrapper picker returns to the main menu instead of
+    # exiting the whole TUI — proven by `list` running afterwards.
+    # Sequence: main menu -> "add"; wrapper picker -> soft cancel (back);
+    # main menu again -> "list"; main menu again -> "quit".
+    from code_helper.cli.menu import MenuCancelled
+
+    _CANCEL = object()
+    sequence = iter(["add", _CANCEL, "list", "quit"])
+
+    def _driver(items, **_kw):
+        nxt = next(sequence)
+        if nxt is _CANCEL:
+            raise MenuCancelled(hard=False)
+        return nxt
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _driver)
+
+    assert main(["tui"]) == 0
+
     out = capsys.readouterr().out
-    assert "cancelled" in out
+    assert "deepseek" in out  # `list` ran after returning from the cancelled `add`
+    assert not Paths.from_home(tmp_path).script_for("deepseek").exists()
+
+
+@pytest.mark.integration
+def test_tui_hard_cancel_exits_from_submenu_depth(tmp_path, monkeypatch, capsys):
+    # Ctrl-C (a hard MenuCancelled) from INSIDE a sub-menu exits the whole
+    # TUI immediately, not just one level.
+    from code_helper.cli.menu import MenuCancelled
+
+    sequence = iter(["add"])
+
+    def _driver(items, **_kw):
+        try:
+            return next(sequence)
+        except StopIteration:
+            raise MenuCancelled(hard=True) from None
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _driver)
+
+    assert main(["tui"]) == 0
+
+    assert not Paths.from_home(tmp_path).script_for("deepseek").exists()
+
+
+@pytest.mark.integration
+def test_tui_hard_cancel_inside_edit_token_picker_exits_tui(tmp_path, monkeypatch):
+    # `_handle_edit_token`'s own wrapper picker (parser.py) re-raises a hard
+    # MenuCancelled instead of swallowing it — this proves that reaches all
+    # the way up through `_run` to the TUI's top-level catch and exits
+    # cleanly, rather than being treated as "command finished, show a pause".
+    from code_helper.cli.menu import MenuCancelled
+
+    sequence = iter(["edit-token"])
+
+    def _driver(items, **_kw):
+        try:
+            return next(sequence)
+        except StopIteration:
+            raise MenuCancelled(hard=True) from None
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _driver)
+
+    assert main(["tui"]) == 0
+
+
+@pytest.mark.integration
+def test_tui_ctrl_c_during_custom_model_input_returns_to_menu(tmp_path, monkeypatch):
+    _menu_sequence(monkeypatch, ["add", "deepseek", "__custom__", "list", "quit"])
+
+    def _interrupt(_prompt):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr("builtins.input", _interrupt)
+
+    assert main(["tui"]) == 0
+
+    # add was aborted by Ctrl-C during the model prompt — nothing written —
+    # and the loop kept going (`list` afterwards proves it did not crash).
+    assert not Paths.from_home(tmp_path).script_for("deepseek").exists()
+
+
+@pytest.mark.integration
+def test_tui_settings_toggles_debug_and_returns(tmp_path, monkeypatch):
+    _menu_sequence(monkeypatch, ["settings", "debug", "__back__", "quit"])
+
+    assert main(["tui"]) == 0
+
+
+@pytest.mark.integration
+def test_tui_add_back_from_wrapper_picker_returns_to_main_menu(tmp_path, monkeypatch):
+    _menu_sequence(monkeypatch, ["add", "__back__", "quit"])
+
+    assert main(["tui"]) == 0
+
+    assert not Paths.from_home(tmp_path).script_for("deepseek").exists()
+
+
+@pytest.mark.integration
+def test_tui_add_back_from_model_picker_returns_to_main_menu(tmp_path, monkeypatch):
+    _menu_sequence(monkeypatch, ["add", "deepseek", "__back__", "quit"])
+
+    assert main(["tui"]) == 0
+
     assert not Paths.from_home(tmp_path).script_for("deepseek").exists()
 
 

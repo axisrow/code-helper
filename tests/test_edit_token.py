@@ -84,10 +84,11 @@ def test_edit_token_no_name_uses_menu(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_edit_token_menu_cancelled_writes_nothing(tmp_path, monkeypatch, capsys):
+    # Esc/q — a soft cancel — prints "cancelled" and returns 0, same as ever.
     from code_helper.cli.menu import MenuCancelled
 
     def _cancel(items, **_kw):
-        raise MenuCancelled()
+        raise MenuCancelled(hard=False)
 
     monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _cancel)
 
@@ -95,5 +96,24 @@ def test_edit_token_menu_cancelled_writes_nothing(tmp_path, monkeypatch, capsys)
 
     out = capsys.readouterr().out
     assert "cancelled" in out
+    paths = Paths.from_home(tmp_path)
+    assert not paths.script_for("glm").exists()
+
+
+@pytest.mark.integration
+def test_edit_token_hard_cancel_propagates(tmp_path, monkeypatch):
+    # Ctrl-C (a hard cancel) is NOT swallowed into "cancelled" + exit 0 — it
+    # propagates like any other uncaught KeyboardInterrupt in the plain CLI,
+    # so a TUI caller can distinguish "back" from "leave the whole TUI".
+    from code_helper.cli.menu import MenuCancelled
+
+    def _cancel(items, **_kw):
+        raise MenuCancelled(hard=True)
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _cancel)
+
+    with pytest.raises(MenuCancelled):
+        main(["edit-token"])
+
     paths = Paths.from_home(tmp_path)
     assert not paths.script_for("glm").exists()
