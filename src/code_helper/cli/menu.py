@@ -24,7 +24,14 @@ import shutil
 import sys
 from collections.abc import Callable, Sequence
 
-__all__ = ["select_from_menu", "MenuCancelled", "press_any_key"]
+__all__ = ["select_from_menu", "MenuCancelled", "press_any_key", "MAX_DIGIT_ITEMS"]
+
+#: How many items can get a digit shortcut. There are only nine single-key
+#: digits (``0`` is not used — it would read as "tenth"), so a longer menu
+#: necessarily has unnumbered rows. Exported because a caller rendering its own
+#: key hint must not promise more digits than this — see ``cli/tui.py``'s
+#: ``_hint``, where claiming "1-21" on a 21-item menu was a real, shipped bug.
+MAX_DIGIT_ITEMS = 9
 
 #: How long to wait for a follow-up byte after ESC before treating it as a
 #: lone Escape keypress. Real escape sequences arrive as one burst from the
@@ -321,7 +328,7 @@ def select_from_menu(
     # needed only by the DIGIT_<n> handler.
     digit_of: dict[str, int] = {}
     for value, _label in pairs:
-        if value not in unnumbered and len(digit_of) < 9:
+        if value not in unnumbered and len(digit_of) < MAX_DIGIT_ITEMS:
             digit_of[value] = len(digit_of) + 1
     by_digit = {n: value for value, n in digit_of.items()}
 
