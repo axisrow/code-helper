@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
+from enum import Enum
 from pathlib import Path
+from typing import NamedTuple
 
 from code_helper.backends._atomic import atomic_write
 from code_helper.errors import CodeHelperError
@@ -117,16 +119,19 @@ def is_installed(paths: Paths, name: str) -> bool:
     return paths.script_for(name).exists()
 
 
-def is_managed(paths: Paths, name: str) -> bool:
-    """True iff ``~/.local/bin/<name>`` exists AND carries our marker.
+def _marker_at(path: Path) -> bool:
+    """True iff ``path`` carries our marker on its first or second line.
 
     Reads only the first couple of lines. Anything unreadable (a binary, a
     permission error, a dangling symlink) counts as *not* ours — the safe
-    answer, since it makes the guard refuse rather than clobber.
+    answer, since it makes the guard refuse rather than clobber. The single
+    marker-sniff behind :func:`is_managed` (which resolves the path from a
+    wrapper name) and :func:`_is_ours_marker_only` (which takes a raw path for
+    the OPENAI_TOML siblings), so the read order and the "unreadable = not
+    ours" exception tuple live in one place.
     """
-    script = paths.script_for(name)
     try:
-        with script.open("r", encoding="utf-8") as fh:
+        with path.open("r", encoding="utf-8") as fh:
             for _ in range(2):
                 line = fh.readline()
                 if not line:
@@ -136,6 +141,16 @@ def is_managed(paths: Paths, name: str) -> bool:
     except (OSError, UnicodeDecodeError):
         return False
     return False
+
+
+def is_managed(paths: Paths, name: str) -> bool:
+    """True iff ``~/.local/bin/<name>`` exists AND carries our marker.
+
+    Reads only the first couple of lines. Anything unreadable (a binary, a
+    permission error, a dangling symlink) counts as *not* ours — the safe
+    answer, since it makes the guard refuse rather than clobber.
+    """
+    return _marker_at(paths.script_for(name))
 
 
 def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
@@ -394,6 +409,233 @@ def _strip_token(body: str) -> str:
     )
 
 
+def _is_ours_marker_only(path: Path) -> bool:
+    """True iff ``path`` carries our marker on its first or second line.
+
+    The OPENAI_TOML TOML profile carries the same marker comment the bash
+    wrapper does, which is what lets the ownership guard recognise it as ours.
+    That file has NO pre-marker legacy form (the shape is new), so unlike
+    :func:`_is_ours` there is no byte-identical-to-legacy migration clause —
+    the marker alone is the proof of authorship. Unreadable (binary, perms, a
+    dangling symlink) counts as not ours, so the guard refuses rather than
+    clobbers — the same safe answer :func:`is_managed` gives.
+    """
+    return _marker_at(path)
+
+
+def _is_our_catalog(path: Path) -> bool:
+    """True iff ``path`` is a model catalog in the format we generate.
+
+    The catalog is JSON, and JSON has no comments — so the marker the wrapper
+    and the TOML profile carry cannot ride along. Authorship is recognised by
+    structure instead: a ``{"version": 1, "models": [...]}`` body is the shape
+    :func:`openai_catalog_body` writes. Anything else (an unrelated JSON file,
+    a hand-written catalog, a TOML) is not ours, so the guard refuses rather
+    than clobbers — the same safe answer the marker-based checks give. A
+    foreign file that *happened* to match this shape would still only be
+    overwritten with the same kind of derived data, so the structural test is
+    safe in the way a marker is: it never recognises content with real value.
+    """
+    import json
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return False
+    return (
+        isinstance(data, dict)
+        and data.get("version") == 1
+        and isinstance(data.get("models"), list)
+    )
+
+
+class _FilePlan(NamedTuple):
+    """One file a wrapper install writes, and how to treat an existing copy.
+
+    The plan is the shape-driven answer to "which files does this install
+    write?" — one entry for a single-shape wrapper, three for ``OPENAI_TOML``
+    (wrapper + TOML profile + catalog). Pairing each file with its own
+    ``managed_check`` and ``is_wrapper`` flag as data is what lets one
+    orchestrator (:func:`_install_plan`) handle every shape: the per-file
+    ownership predicate varies (marker+legacy for the wrapper, marker-only for
+    the TOML profile, structural-JSON for the catalog) without the orchestrator
+    knowing which shape it is looking at.
+    """
+
+    path: Path
+    body: str
+    mode: int
+    managed_check: Callable[[Path], bool]
+    # Only the bash wrapper can carry a secret, so only it participates in the
+    # discard-only-secret check.
+    is_wrapper: bool
+
+
+class _Action(str, Enum):
+    """What :func:`_decide` resolved for one plan entry."""
+
+    SKIP = "skip"  # byte-identical file already installed — write nothing
+    WRITE = "write"  # no existing file, or ours and not a secret-discard
+    OVERWRITE_FOREIGN = "overwrite_foreign"  # an existing file that is not ours
+    DISCARD_SECRET = "discard_secret"  # ours, but holds the only copy of a token
+
+
+#: The refusal message for each guarding action. One place so the ``--force``
+#: hint and the "refusing to …" wording cannot drift between code paths.
+_REFUSAL: dict[_Action, str] = {
+    _Action.OVERWRITE_FOREIGN: (
+        "{path} exists and was not created by code-helper — "
+        "refusing to overwrite (use --force)"
+    ),
+    _Action.DISCARD_SECRET: (
+        "{path} holds a wrapper whose token exists nowhere else, "
+        "and the replacement does not use one — refusing to discard "
+        "the only copy of its token (use --force)"
+    ),
+}
+
+
+def _decide(paths: Paths, spec: WrapperSpec, f: _FilePlan) -> _Action:
+    """Resolve what an install would do with one plan entry.
+
+    Reads the existing file once and runs that file's ownership check once,
+    returning the action. The orchestrator consumes the action without
+    re-reading or re-checking, which is what keeps a multi-file install from
+    reading and re-rendering each file twice — the refusal pass and the write
+    pass share the one decision.
+
+    Order matters and mirrors the old single-file lifecycle: an identical file
+    short-circuits to SKIP before the ownership check runs (a foreign file that
+    *happens* to be byte-identical to what we would write needs no write and no
+    prompt), and the discard-only-secret check runs only for the wrapper slot.
+    """
+    if not f.path.exists():
+        return _Action.WRITE
+    if _read_text_or_none(f.path) == f.body:
+        return _Action.SKIP
+    if not f.managed_check(f.path):
+        return _Action.OVERWRITE_FOREIGN
+    if f.is_wrapper and _discards_only_secret(paths, spec, f.path):
+        return _Action.DISCARD_SECRET
+    return _Action.WRITE
+
+
+def _install_plan(
+    paths: Paths,
+    spec: WrapperSpec,
+    plan: list[_FilePlan],
+    *,
+    dry_run: bool,
+    force: bool,
+    confirm: Callable[[Path], bool] | None,
+) -> bool:
+    """Write every file in ``plan``. Return True iff any changed (or would, dry-run).
+
+    One orchestrator for every shape: a single-file wrapper passes a one-entry
+    plan, ``OPENAI_TOML`` passes three. The per-file lifecycle — idempotence,
+    the ownership guard, the discard-only-secret check, dry-run print or atomic
+    write — lives here once, not triplicated per shape.
+
+    Atomic w.r.t. the ownership guard: in a non-dry-run install every foreign
+    / discard-only-secret refusal is decided BEFORE any file is written, so a
+    refusal in one slot never leaves another slot's file half-written. Each
+    file's fate is decided once by :func:`_decide` (which does the reads and
+    checks); the dry-run, refusal, and write passes below only consume those
+    decisions, so nothing is re-read.
+
+    Raises:
+        CodeHelperError: a foreign or secret-discard file is in the way and was
+            not confirmed (``force`` / ``confirm``).
+    """
+    decisions = [(f, _decide(paths, spec, f)) for f in plan]
+
+    if dry_run:
+        wrote = False
+        for f, action in decisions:
+            if action is _Action.SKIP:
+                continue
+            if action is _Action.OVERWRITE_FOREIGN:
+                print(f"would overwrite UNMANAGED file {f.path}")
+            elif action is _Action.DISCARD_SECRET:
+                print(f"would discard the only copy of {f.path}'s token")
+            else:
+                print(f"would write {f.path}")
+            wrote = True
+        return wrote
+
+    # Resolve EVERY refusal before writing ANY file — a foreign file in one
+    # slot never leaves another slot's file half-written.
+    for f, action in decisions:
+        if action in (_Action.OVERWRITE_FOREIGN, _Action.DISCARD_SECRET):
+            if not force and (confirm is None or not confirm(f.path)):
+                raise CodeHelperError(_REFUSAL[action].format(path=f.path))
+
+    wrote = False
+    for f, action in decisions:
+        if action is _Action.SKIP:
+            continue
+        if action is _Action.OVERWRITE_FOREIGN:
+            print(f"overwriting unmanaged file {f.path}")
+        elif action is _Action.DISCARD_SECRET:
+            print(f"discarding the only copy of {f.path}'s token")
+        atomic_write(f.path, f.body, mode=f.mode)
+        print(f"wrote {f.path}")
+        wrote = True
+    return wrote
+
+
+def _wrapper_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_FilePlan]:
+    """The one-file plan every non-``OPENAI_TOML`` shape installs."""
+    return [
+        _FilePlan(
+            paths.script_for(spec.alias),
+            render_script(spec, token),
+            _mode_for(spec),
+            lambda _p: _is_ours(paths, spec, token),
+            True,
+        )
+    ]
+
+
+def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_FilePlan]:
+    """The three-file plan: bash wrapper + TOML profile + model catalog.
+
+    Each slot carries its own ownership check — :func:`_is_ours` (marker OR
+    legacy byte-match) for the wrapper, :func:`_is_ours_marker_only` for the
+    TOML profile (carries the marker comment, no legacy form), and
+    :func:`_is_our_catalog` for the catalog (JSON cannot carry a comment
+    marker, so authorship is structural). Modes: the wrapper follows
+    :func:`_mode_for` (``0o700`` for a secret, else ``0o755``); the profile and
+    catalog are ``0o600`` owner-only.
+    """
+    from code_helper.services.render import openai_catalog_body, openai_toml_body
+
+    catalog_path = paths.codex_catalog_for(spec.alias)
+    return [
+        _FilePlan(
+            paths.script_for(spec.alias),
+            render_script(spec, token),
+            _mode_for(spec),
+            lambda _p: _is_ours(paths, spec, token),
+            True,
+        ),
+        _FilePlan(
+            paths.codex_config_for(spec.alias),
+            openai_toml_body(spec, str(catalog_path)),
+            0o600,
+            _is_ours_marker_only,
+            False,
+        ),
+        _FilePlan(
+            catalog_path,
+            openai_catalog_body(spec),
+            0o600,
+            _is_our_catalog,
+            False,
+        ),
+    ]
+
+
 def install_wrapper(
     paths: Paths,
     spec: WrapperSpec | str,
@@ -407,6 +649,13 @@ def install_wrapper(
     """Write ``spec``'s script. Return True iff it wrote (or would, in dry-run).
 
     Idempotent: a byte-identical re-install is a no-op.
+
+    The shape selects the file plan — one file for most shapes
+    (:func:`_wrapper_plan`), three for ``OPENAI_TOML``
+    (:func:`_openai_toml_plan`: bash wrapper + TOML profile + model catalog) —
+    and one orchestrator (:func:`_install_plan`) writes whichever plan it was
+    handed, so the ownership guard, dry-run, force, and confirm behaviour are
+    identical per file regardless of how many files a shape writes.
 
     Args:
         paths: Resolved :class:`Paths`.
@@ -432,45 +681,14 @@ def install_wrapper(
     )
     spec = resolved
 
-    body = render_script(spec, token)
-    script = paths.script_for(spec.alias)
-
-    if script.exists() and _read_text_or_none(script) == body:
-        return False  # identical script already installed
-
-    # Ownership check runs only for a file we did not write. Order matters:
-    # the idempotence check above means an unchanged reinstall never prompts.
-    if script.exists() and not _is_ours(paths, spec, token):
-        if dry_run:
-            print(f"would overwrite UNMANAGED file {script}")
-            return True
-        if not force:
-            if confirm is None or not confirm(script):
-                raise CodeHelperError(
-                    f"{script} exists and was not created by code-helper — "
-                    f"refusing to overwrite (use --force)"
-                )
-        print(f"overwriting unmanaged file {script}")
-    elif script.exists() and _discards_only_secret(paths, spec, script):
-        # Ours, but a DIFFERENT wrapper whose token exists nowhere else.
-        if dry_run:
-            print(f"would discard the only copy of {script}'s token")
-            return True
-        if not force:
-            if confirm is None or not confirm(script):
-                raise CodeHelperError(
-                    f"{script} holds a wrapper whose token exists nowhere else, "
-                    f"and the replacement does not use one — refusing to discard "
-                    f"the only copy of its token (use --force)"
-                )
-        print(f"discarding the only copy of {script}'s token")
-
-    if dry_run:
-        print(f"would write {script}")
-        return True
-    atomic_write(script, body, mode=_mode_for(spec))
-    print(f"wrote {script}")
-    return True
+    plan = (
+        _openai_toml_plan(paths, spec, token)
+        if spec.shape is ConfigShape.OPENAI_TOML
+        else _wrapper_plan(paths, spec, token)
+    )
+    return _install_plan(
+        paths, spec, plan, dry_run=dry_run, force=force, confirm=confirm
+    )
 
 
 def describe_wrapper(

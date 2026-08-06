@@ -55,10 +55,16 @@ def test_registry_has_ollama_and_zai():
 
 
 @pytest.mark.unit
-def test_ollama_declares_both_shapes():
-    """One provider, two connection mechanisms — deepseek vs glm-ollama."""
+def test_ollama_declares_three_shapes():
+    """One provider, three connection mechanisms: direct HTTP (deepseek),
+    `ollama launch` (glm-ollama), and a Codex TOML profile (codex × ollama)."""
     ollama = get_provider("ollama")
-    assert ollama.shapes == {ConfigShape.ANTHROPIC_ENV, ConfigShape.OLLAMA_LAUNCH}
+    assert ollama.shapes == {
+        ConfigShape.ANTHROPIC_ENV,
+        ConfigShape.OLLAMA_LAUNCH,
+        ConfigShape.OPENAI_TOML,
+    }
+    assert ollama.wire_api == "responses"
 
 
 @pytest.mark.unit
@@ -93,8 +99,19 @@ def test_claude_ollama_prefers_direct_http():
 
 
 @pytest.mark.unit
-def test_codex_ollama_uses_launcher():
+def test_codex_ollama_uses_toml():
+    # Two shapes are possible now; priority picks the TOML profile (no extra
+    # binary on PATH). The launcher is still reachable via --shape ollama-launch.
     shape = resolve_shape(get_agent("codex"), get_provider("ollama"))
+    assert shape is ConfigShape.OPENAI_TOML
+
+
+@pytest.mark.unit
+def test_codex_ollama_launcher_shape_is_reachable():
+    """--shape ollama-launch overrides priority — the launcher path stays open."""
+    shape = resolve_shape(
+        get_agent("codex"), get_provider("ollama"), preferred=ConfigShape.OLLAMA_LAUNCH
+    )
     assert shape is ConfigShape.OLLAMA_LAUNCH
 
 

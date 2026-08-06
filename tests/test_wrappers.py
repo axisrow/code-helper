@@ -16,17 +16,25 @@ import pytest
 from code_helper.errors import CodeHelperError
 from code_helper.services.model import ConfigShape
 from code_helper.services.paths import Paths
-from code_helper.services.spec import get_preset, spec_from_preset
+from code_helper.services.render import (
+    openai_catalog_body,
+    openai_toml_body,
+    render_script,
+)
+from code_helper.services.spec import (
+    WrapperSpec,
+    build_spec,
+    get_preset,
+    spec_from_preset,
+)
 from code_helper.services.wrappers import (
     WRAPPERS,
-    build_spec,
     discover_managed,
     get_spec,
     install_wrapper,
     is_installed,
     is_managed,
     list_wrappers,
-    render_script,
 )
 
 
@@ -544,3 +552,184 @@ def test_cli_dry_run_add_does_not_write(tmp_path):
     assert main(["--dry-run", "add", "deepseek"]) == 0
     paths = Paths.from_home(tmp_path)
     assert not paths.script_for("deepseek").exists()
+
+
+# --------------------------------------------------------------------------- #
+# OPENAI_TOML shape — codex via a Codex profile (~/.codex/<alias>.config.toml)
+# plus a model catalog, launched as `codex --profile <alias>`.
+# --------------------------------------------------------------------------- #
+
+
+def _toml_spec(model: str = "glm-5.2:cloud", alias: str = "glm-5-codex") -> WrapperSpec:
+    return build_spec(agent="codex", provider="ollama", model=model, alias=alias)
+
+
+@pytest.mark.unit
+def test_render_openai_toml_wrapper_runs_codex_with_profile():
+    """The wrapper is a one-line dispatch to `codex --profile <alias>`."""
+    spec = _toml_spec()
+    body = render_script(spec, "")
+    assert body.startswith("#!/bin/bash")
+    assert "exec codex --profile 'glm-5-codex' \"$@\"" in body
+    # No ANTHROPIC_* env and no launcher — the profile carries the config.
+    assert "ANTHROPIC_" not in body
+    assert "ollama launch" not in body
+
+
+@pytest.mark.unit
+def test_render_openai_toml_wrapper_alias_is_quoted():
+    """The alias is user-chosen, so it is single-quoted — defence in depth on
+    top of ``validate_alias``'s allow-list (which already excludes quotes and
+    shell metacharacters). The model picker / ``--alias`` can name a wrapper
+    with ``.``/``-`` (e.g. ``glm-5-codex``), which the quoting wraps harmlessly.
+    """
+    spec = _toml_spec(alias="glm-5-codex")
+    body = render_script(spec, "")
+    assert "exec codex --profile 'glm-5-codex' \"$@\"" in body
+
+
+@pytest.mark.unit
+def test_openai_toml_body_carries_marker_model_base_url_wire_api():
+    """The profile body matches the contract in issue #7, with /v1/ derived."""
+    spec = _toml_spec(model="glm-5.2:cloud")
+    body = openai_toml_body(spec, "/home/u/.codex/glm-5-codex.model.json")
+    # Marker on line 1 — what the ownership guard keys off.
+    assert body.startswith("# code-helper: managed wrapper")
+    assert 'model = "glm-5.2:cloud"' in body  # `:` and `.` => must be quoted
+    assert 'model_provider = "ollama-launch"' in body
+    assert 'model_catalog_json = "/home/u/.codex/glm-5-codex.model.json"' in body
+    assert "[model_providers.ollama-launch]" in body
+    # base_url derives /v1/ from the provider's Anthropic-root base_url.
+    assert 'base_url = "http://127.0.0.1:11434/v1/"' in body
+    assert 'wire_api = "responses"' in body
+
+
+@pytest.mark.unit
+def test_openai_toml_body_quoted_model_with_colon_and_dot():
+    """A model like `glm-5.2:cloud` MUST be in quotes or Codex rejects the TOML."""
+    spec = _toml_spec(model="glm-5.2:cloud")
+    body = openai_toml_body(spec, "/x.json")
+    assert 'model = "glm-5.2:cloud"' in body
+    # A double quote in the model would be escaped, not break the string.
+    weird = 'we"ird'
+    spec2 = _toml_spec(model=weird)
+    body2 = openai_toml_body(spec2, "/x.json")
+    assert 'model = "we\\"ird"' in body2
+
+
+@pytest.mark.unit
+def test_openai_catalog_body_has_context_window_for_unknown_model():
+    """The catalog gives Codex a context window for models it does not know."""
+    import json
+
+    spec = _toml_spec(model="glm-5.2:cloud")
+    payload = json.loads(openai_catalog_body(spec))
+    assert payload["version"] == 1
+    entry = payload["models"][0]
+    assert entry["id"] == "glm-5.2:cloud"
+    assert entry["context_window"] >= 1
+
+
+@pytest.mark.integration
+def test_install_openai_toml_writes_three_files(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    spec = _toml_spec()
+
+    assert install_wrapper(paths, spec) is True
+
+    assert paths.script_for("glm-5-codex").exists()
+    assert paths.codex_config_for("glm-5-codex").exists()
+    assert paths.codex_catalog_for("glm-5-codex").exists()
+    # The wrapper is executable; the config/catalog are owner-only (no token,
+    # but they are our generated config — 0o600, not 0o755).
+    assert stat.S_IMODE(paths.script_for("glm-5-codex").stat().st_mode) & stat.S_IXUSR
+    config_mode = stat.S_IMODE(paths.codex_config_for("glm-5-codex").stat().st_mode)
+    assert config_mode == 0o600
+    catalog_mode = stat.S_IMODE(paths.codex_catalog_for("glm-5-codex").stat().st_mode)
+    assert catalog_mode == 0o600
+
+
+@pytest.mark.integration
+def test_install_openai_toml_is_idempotent_across_three_files(tmp_path):
+    """A byte-identical re-install of all three files is a no-op."""
+    paths = Paths.from_home(tmp_path)
+    spec = _toml_spec()
+
+    first = install_wrapper(paths, spec)
+    second = install_wrapper(paths, spec)
+
+    assert first is True
+    assert second is False
+
+
+@pytest.mark.integration
+def test_install_openai_toml_refuses_foreign_config_file(tmp_path):
+    """A foreign ~/.codex/<alias>.config.toml is not silently clobbered."""
+    paths = Paths.from_home(tmp_path)
+    spec = _toml_spec()
+    config = paths.codex_config_for("glm-5-codex")
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text('# someone else\nmodel = "gpt-4o"\n', encoding="utf-8")
+
+    with pytest.raises(CodeHelperError, match="refusing to overwrite"):
+        install_wrapper(paths, spec)
+
+    # Untouched — the guard fired before any write, including the wrapper.
+    assert config.read_text(encoding="utf-8") == '# someone else\nmodel = "gpt-4o"\n'
+    assert not paths.script_for("glm-5-codex").exists()
+
+
+@pytest.mark.integration
+def test_install_openai_toml_force_overwrites_foreign_config(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    spec = _toml_spec()
+    config = paths.codex_config_for("glm-5-codex")
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("# foreign\n", encoding="utf-8")
+
+    assert install_wrapper(paths, spec, force=True) is True
+    assert config.read_text(encoding="utf-8").startswith("# code-helper:")
+
+
+@pytest.mark.integration
+def test_install_openai_toml_dry_run_writes_nothing_and_lists_three(tmp_path, capsys):
+    paths = Paths.from_home(tmp_path)
+    spec = _toml_spec()
+
+    assert install_wrapper(paths, spec, dry_run=True) is True
+
+    assert not paths.script_for("glm-5-codex").exists()
+    assert not paths.codex_config_for("glm-5-codex").exists()
+    assert not paths.codex_catalog_for("glm-5-codex").exists()
+    out = capsys.readouterr().out
+    assert "would write" in out
+    # All three intended writes are announced.
+    assert str(paths.script_for("glm-5-codex")) in out
+    assert str(paths.codex_config_for("glm-5-codex")) in out
+    assert str(paths.codex_catalog_for("glm-5-codex")) in out
+
+
+@pytest.mark.integration
+def test_install_openai_toml_replacing_our_own_never_prompts(tmp_path):
+    """A model bump rewrites all three without asking — add-as-update path."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(model="glm-5:cloud"))
+
+    def _explode(_path):  # pragma: no cover - must not be reached
+        raise AssertionError("must not ask before replacing our own wrapper")
+
+    wrote = install_wrapper(paths, _toml_spec(model="glm-5.2:cloud"), confirm=_explode)
+    assert wrote is True
+    config = paths.codex_config_for("glm-5-codex").read_text(encoding="utf-8")
+    assert 'model = "glm-5.2:cloud"' in config
+
+
+@pytest.mark.unit
+def test_paths_codex_accessors_reject_non_single_component():
+    """The same structural guard as script_for — no writing outside ~/.codex."""
+    paths = Paths.from_home("/tmp/whatever")
+    for bad in ("../../etc/passwd", "a/b", "", ".", ".."):
+        with pytest.raises(CodeHelperError, match="single path component"):
+            paths.codex_config_for(bad)
+        with pytest.raises(CodeHelperError, match="single path component"):
+            paths.codex_catalog_for(bad)

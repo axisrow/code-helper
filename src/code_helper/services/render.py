@@ -30,7 +30,13 @@ from code_helper.errors import CodeHelperError
 from code_helper.services.model import ConfigShape
 from code_helper.services.spec import WrapperSpec
 
-__all__ = ["render_script", "render_legacy_script", "MARKER_PREFIX"]
+__all__ = [
+    "render_script",
+    "render_legacy_script",
+    "openai_toml_body",
+    "openai_catalog_body",
+    "MARKER_PREFIX",
+]
 
 #: Second line of every generated script. Presence of this prefix is how
 #: ``is_managed`` tells a file this tool wrote from a file it merely found —
@@ -109,12 +115,116 @@ def _render_ollama_launch(spec: WrapperSpec, token: str) -> str:
     )
 
 
-#: Shape -> renderer. Adding an OpenAI-compatible provider later means one
-#: entry in ``PROVIDERS`` plus ``ConfigShape.OPENAI_TOML: _render_codex_toml``
-#: here — no change to the axes model, the CLI, or the TUI.
+def _render_openai_toml(spec: WrapperSpec, token: str) -> str:
+    """``exec codex --profile <alias> "$@"`` — the OPENAI_TOML wrapper.
+
+    The model, base URL, and wire protocol live in a sibling TOML profile
+    (``openai_toml_body``) plus a model catalog (``openai_catalog_body``),
+    both written alongside this script by ``install_wrapper``. The wrapper
+    itself is just the dispatch line, so ``token`` is unused: ollama is
+    ``literal``-auth and the daemon takes care of authentication itself.
+
+    ``agent.binary`` is interpolated bare (registry constant, constrained at
+    import time); ``spec.alias`` is user-chosen, so it is single-quoted — the
+    same structural-vs-quoted split as the launch renderer's ``--model``.
+    """
+    q = _shell_single_quote
+    return (
+        "#!/bin/bash\n"
+        f"{_marker(spec)}\n"
+        f'exec {spec.agent.binary} --profile {q(spec.alias)} "$@"\n'
+    )
+
+
+#: ``model_catalog_json`` floors for models the catalog describes. No axis
+#: carries a context window, so these are pragmatic defaults a future data
+#: source can override in one place.
+_DEFAULT_CONTEXT_WINDOW = 128000
+_DEFAULT_MAX_OUTPUT = 32768
+
+#: The ``[model_providers.X]`` table name written into the profile. Stable so
+#: the profile the wrapper points at (via ``--profile <alias>``) and the table
+#: name inside it cannot drift apart.
+_PROVIDER_TABLE = "ollama-launch"
+
+
+def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
+    """The ``~/.codex/<alias>.config.toml`` profile body (pure, no IO).
+
+    Codex ≥ 0.146.0 resolves profiles from per-file config: the basename
+    ``<alias>.config.toml`` is addressed as ``--profile <alias>``, and legacy
+    ``[profiles.X]`` tables inside ``config.toml`` are rejected — so this is a
+    whole file, not a fragment. ``config.toml`` is never read or modified.
+
+    ``base_url`` gets ``/v1/`` appended because the provider's ``base_url`` is
+    the Anthropic-protocol root (no version segment), which is what
+    ``ANTHROPIC_ENV`` wants; the OpenAI-compatible endpoint this profile
+    targets lives under ``/v1``. Derived here rather than stored on the
+    provider, so the one field serves both shapes without a conflict.
+
+    ``catalog_path`` is the already-resolved ``<alias>.model.json`` location,
+    passed in (rather than computed) because this function is pure and has no
+    ``Paths`` — the install path owns the resolution.
+
+    The marker on line 1 is the same comment the bash wrapper carries, which is
+    what lets the ownership guard recognise this as ours. The profile name
+    inside (``model_provider``) is a fixed registry-style identifier, not user
+    input, so it needs no quoting.
+    """
+    base_url = spec.provider.base_url.rstrip("/") + "/v1/"
+    return (
+        f"{_marker(spec)}\n"
+        f'model = "{_toml_string(spec.model)}"\n'
+        f'model_provider = "{_PROVIDER_TABLE}"\n'
+        f'model_catalog_json = "{_toml_string(catalog_path)}"\n'
+        "\n"
+        f"[model_providers.{_PROVIDER_TABLE}]\n"
+        f'name = "Ollama"\n'
+        f'base_url = "{_toml_string(base_url)}"\n'
+        f'wire_api = "{spec.provider.wire_api}"\n'
+    )
+
+
+def openai_catalog_body(spec: WrapperSpec) -> str:
+    """The ``~/.codex/<alias>.model.json`` catalog body (pure, no IO).
+
+    Without a catalog, Codex does not learn the context window of a model it
+    does not ship knowledge of (``glm-5.2:cloud`` etc.). This is a minimal
+    entry so the model is usable; the real window is unknown to this tool, so
+    :data:`_DEFAULT_CONTEXT_WINDOW` is a floor, not a measurement.
+    """
+    import json
+
+    entry = {
+        "id": spec.model,
+        "name": spec.model,
+        "context_window": _DEFAULT_CONTEXT_WINDOW,
+        "max_output_tokens": _DEFAULT_MAX_OUTPUT,
+    }
+    return json.dumps({"version": 1, "models": [entry]}, indent=2) + "\n"
+
+
+def _toml_string(value: str) -> str:
+    """Quote ``value`` for a TOML basic string.
+
+    TOML basic strings are ``"..."`` with ``\\`` and ``"`` escaped; a bare
+    model like ``glm-5.2:cloud`` (``:``/``.``) MUST be quoted or Codex rejects
+    the file. This is the TOML equivalent of the shell ``_shell_single_quote``
+    — a per-target escape for values that originate outside the registry.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+#: Shape -> renderer. Each renderer returns the bash WRAPPER body only; the
+#: OPENAI_TOML shape additionally writes a TOML profile and catalog via the
+#: ``openai_toml_body`` / ``openai_catalog_body`` helpers (orchestrated in
+#: ``install_wrapper``, not here). Adding a provider that reuses an existing
+#: shape still needs no new renderer — only a shape with no entry surfaces as
+#: "not implemented yet".
 _RENDERERS: dict[ConfigShape, Callable[[WrapperSpec, str], str]] = {
     ConfigShape.ANTHROPIC_ENV: _render_anthropic_env,
     ConfigShape.OLLAMA_LAUNCH: _render_ollama_launch,
+    ConfigShape.OPENAI_TOML: _render_openai_toml,
 }
 
 

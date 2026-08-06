@@ -338,26 +338,58 @@ def test_tui_new_builds_a_wrapper_from_the_axes(tmp_path, monkeypatch):
 
     assert main(["tui"]) == 0
 
-    body = Paths.from_home(tmp_path).script_for("glm-5-codex").read_text()
-    assert "exec ollama launch codex --model 'glm-5:cloud' -- \"$@\"" in body
+    paths = Paths.from_home(tmp_path)
+    alias = "glm-5-codex"
+    body = paths.script_for(alias).read_text()
+    # codex × ollama resolves to OPENAI_TOML by priority now.
+    assert f"exec codex --profile '{alias}' \"$@\"" in body
+    assert paths.codex_config_for(alias).exists()
+    assert paths.codex_catalog_for(alias).exists()
 
 
 @pytest.mark.integration
 def test_tui_new_matches_the_cli_byte_for_byte(tmp_path, monkeypatch):
-    """The 1-to-1 contract, for the constructor path as well as presets."""
+    """The 1-to-1 contract, for the constructor path as well as presets.
+
+    Extends to all three OPENAI_TOML files: the wrapper, the TOML profile, and
+    the model catalog must each match between the TUI and CLI installs.
+    """
     _fake_models(monkeypatch, "glm-5:cloud")
     _menu_sequence(monkeypatch, ["new", "codex", "ollama", "glm-5:cloud", "quit"])
     monkeypatch.setattr("builtins.input", lambda _p="": "")
     main(["tui"])
-    via_tui = Paths.from_home(tmp_path).script_for("glm-5-codex").read_text()
+    tui_paths = Paths.from_home(tmp_path)
+    alias = "glm-5-codex"
 
     other_home = tmp_path / "other"
     other_home.mkdir()
     monkeypatch.setenv("HOME", str(other_home))
     main(["add", "--agent", "codex", "--provider", "ollama", "--model", "glm-5:cloud"])
-    via_cli = Paths.from_home(other_home).script_for("glm-5-codex").read_text()
+    cli_paths = Paths.from_home(other_home)
 
-    assert via_tui == via_cli
+    # The wrapper and the catalog carry no absolute paths, so they must be
+    # byte-identical. The TOML profile embeds an absolute path to the catalog
+    # (`model_catalog_json`), which differs between the two homes — compare it
+    # modulo that path.
+    assert (
+        tui_paths.script_for(alias).read_text()
+        == cli_paths.script_for(alias).read_text()
+    )
+    assert (
+        tui_paths.codex_catalog_for(alias).read_text()
+        == cli_paths.codex_catalog_for(alias).read_text()
+    )
+    tui_toml = (
+        tui_paths.codex_config_for(alias)
+        .read_text()
+        .replace(str(tui_paths.codex_dir), "")
+    )
+    cli_toml = (
+        cli_paths.codex_config_for(alias)
+        .read_text()
+        .replace(str(cli_paths.codex_dir), "")
+    )
+    assert tui_toml == cli_toml
 
 
 @pytest.mark.integration
