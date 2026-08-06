@@ -25,6 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from code_helper.errors import CodeHelperError
+
 
 @dataclass(frozen=True)
 class Paths:
@@ -68,5 +70,24 @@ class Paths:
         """Return the resolved path of the wrapper script named ``name``.
 
         Pure arithmetic (``bin_dir / name``) — no existence check, no IO.
+
+        ``name`` must be a single path component. This is a STRUCTURAL guard,
+        independent of :func:`code_helper.services.naming.validate_alias`:
+        that function owns the human-facing rules and runs early, this one
+        guarantees that no code path — including a future one that forgets to
+        validate — can address a file outside ``bin_dir``. Duplication here is
+        deliberate; the failure it prevents is writing an executable to an
+        arbitrary filesystem location.
+
+        ``Path(name).name != name`` is the whole check: it rejects
+        ``"../../etc/passwd"``, ``"a/b"``, ``""``, ``"."`` and ``".."`` alike,
+        without ``resolve()`` — so this stays pure arithmetic with no IO.
+
+        Raises:
+            CodeHelperError: ``name`` is not a single path component.
         """
+        if name in ("", ".", "..") or Path(name).name != name:
+            raise CodeHelperError(
+                f"invalid wrapper name (must be a single path component): {name!r}"
+            )
         return self.bin_dir / name
