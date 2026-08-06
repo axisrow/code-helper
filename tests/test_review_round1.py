@@ -155,6 +155,80 @@ def test_edit_token_preserves_a_customized_model(tmp_path, monkeypatch):
     assert "tok2" in body
 
 
+def test_edit_token_preserves_non_uniform_tier_models(tmp_path, monkeypatch):
+    """Rotation must not flatten a preset whose tiers genuinely differ.
+
+    ``glm`` is the reason presets still exist: haiku/sonnet/opus are three
+    DIFFERENT models, which no single ``--model`` can express. Reconstructing
+    the spec from one recovered model and letting ``build_spec`` synthesize
+    uniform tiers turned the cycle-1 fix into a wider version of the bug it
+    was closing — and the test written for that fix only covered a uniform
+    override, so it could not see this.
+    """
+    paths = _bin(tmp_path)
+    install_wrapper(paths, "glm", token="tok1")
+    before = (paths.bin_dir / "glm").read_text()
+    assert "'glm-4.7'" in before and "'glm-5.2[1m]'" in before
+
+    monkeypatch.setattr("getpass.getpass", lambda *a, **k: "tok2")
+    assert main(["edit-token", "glm"]) == 0
+
+    after = (paths.bin_dir / "glm").read_text()
+    tiers = [ln for ln in after.splitlines() if "_MODEL=" in ln]
+    assert tiers == [ln for ln in before.splitlines() if "_MODEL=" in ln], (
+        "edit-token rewrote tier models it was not asked to touch"
+    )
+    assert "tok2" in after
+
+
+def test_edit_token_rotates_a_legacy_customized_install(tmp_path, monkeypatch):
+    """A markerless install customized with ``--model`` must still be rotatable.
+
+    The guard's message tells the user to pass ``--force``, but ``edit-token``
+    accepts no such flag — so this was a dead end with a hint pointing at
+    something that does not exist, on a file this tool wrote.
+    """
+    from code_helper.services.spec import get_preset, spec_from_preset
+
+    paths = _bin(tmp_path)
+    legacy = spec_from_preset(get_preset("glm"), model_override="customX")
+    (paths.bin_dir / "glm").write_text(render_legacy_script(legacy, "oldtok"))
+
+    monkeypatch.setattr("getpass.getpass", lambda *a, **k: "newtok")
+    assert main(["edit-token", "glm"]) == 0
+
+    after = (paths.bin_dir / "glm").read_text()
+    assert "newtok" in after
+    assert "customX" in after, "rotation discarded the legacy model choice"
+
+
+def test_a_foreign_file_named_after_a_preset_is_not_adopted(tmp_path):
+    """Sharing a preset's NAME must not be enough to be recognised as ours.
+
+    The legacy lookup takes its axes from a same-named preset, so the only
+    thing separating "our old output" from "someone else's file called glm"
+    is the re-render proof: the reconstructed spec must reproduce the file's
+    every non-token byte. Without that check this path would adopt — and then
+    silently overwrite — any file whose name happened to match a preset.
+    """
+    from code_helper.services.wrappers import spec_from_installed
+
+    paths = _bin(tmp_path)
+    (paths.bin_dir / "glm").write_text(
+        "#!/bin/bash\n"
+        "(\n"
+        "export ANTHROPIC_DEFAULT_HAIKU_MODEL='x'\n"
+        "export ANTHROPIC_DEFAULT_SONNET_MODEL='y'\n"
+        "export ANTHROPIC_DEFAULT_OPUS_MODEL='z'\n"
+        "rm -rf /\n"
+        ")\n"
+    )
+
+    assert spec_from_installed(paths, "glm") is None
+    with pytest.raises(CodeHelperError, match="refusing to overwrite"):
+        install_wrapper(paths, "glm", token="t", confirm=None)
+
+
 def test_edit_token_reaches_an_axes_built_wrapper(tmp_path, monkeypatch):
     """A secret wrapper from the constructor is a first-class product of this PR."""
     paths = _bin(tmp_path)

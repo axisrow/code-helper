@@ -159,12 +159,24 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
         (ln for ln in body.split("\n")[:2] if ln.startswith(MARKER_PREFIX)), None
     )
     if marker is None:
-        return None
+        # A markerless file predates the marker, so its axes are not recorded
+        # anywhere — but if a preset of this name renders to the same body
+        # (any model), that preset supplies them and the FILE supplies the
+        # models. Without this, rotating a legacy install customized with
+        # ``--model`` reverted it to the preset defaults: the very bug the
+        # installed-spec lookup exists to prevent, just one release older.
+        return _spec_from_legacy_body(name, body)
 
     fields = dict(re.findall(r"(\w+)=([^,()\s]+)", marker[len(MARKER_PREFIX) :]))
     model = _model_from_body(body)
     if not all((fields.get("agent"), fields.get("provider"), model)):
         return None
+
+    # ALL tiers, not just the one that names the wrapper. A single model would
+    # let build_spec synthesize uniform tiers, which silently rewrites the two
+    # tiers it did not read — and ``glm``, whose three tiers genuinely differ,
+    # is the whole reason presets still exist.
+    tiers = _tiers_from_body(body)
 
     try:
         return build_spec(
@@ -172,6 +184,8 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
             provider=fields["provider"],
             model=model,
             alias=name,
+            tier_models=tiers,
+            subagent_model=_env_value(body, "CLAUDE_CODE_SUBAGENT_MODEL"),
         )
     except CodeHelperError:
         # A marker naming an agent/provider this build no longer knows, or a
@@ -179,21 +193,67 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
         return None
 
 
-def _model_from_body(body: str) -> str | None:
-    """The model a rendered wrapper body was written with, or None.
+def _spec_from_legacy_body(name: str, body: str) -> WrapperSpec | None:
+    """Spec for a markerless wrapper, if a same-named preset explains it.
 
-    Reads the sonnet tier for the env shape and the ``--model`` argument for
-    the launch shape — both are single-quoted by the renderer, so the value is
-    recovered by unquoting rather than by re-parsing shell.
+    The preset supplies the axes the missing marker would have recorded; the
+    body supplies the models, so a legacy install customized with ``--model``
+    keeps that choice. Returns None unless re-rendering the result reproduces
+    the file's every non-token byte — the same proof-of-authorship the guard
+    uses, so this recognises no file the guard would refuse.
     """
-    for pattern in (
-        r"^export ANTHROPIC_DEFAULT_SONNET_MODEL='(.*)'$",
-        r"--model '(.*?)' --",
-    ):
-        found = re.search(pattern, body, re.MULTILINE)
-        if found:
-            return found.group(1).replace("'\"'\"'", "'")
-    return None
+    try:
+        preset = spec_from_preset(get_preset(name))
+    except CodeHelperError:
+        return None
+
+    candidate = _respec_from_body(preset, body)
+    if candidate is None:
+        return None
+
+    token = _env_value(body, "ANTHROPIC_AUTH_TOKEN") or ""
+    if _strip_token(body) != _strip_token(render_legacy_script(candidate, token)):
+        return None
+    return candidate
+
+
+def _env_value(body: str, var: str) -> str | None:
+    """The single-quoted value exported to ``var`` in ``body``, or None.
+
+    The renderer single-quotes every value, so recovery is unquoting rather
+    than shell parsing; the doubled-quote escape is reversed to match.
+    """
+    found = re.search(rf"^export {var}='(.*)'$", body, re.MULTILINE)
+    return found.group(1).replace("'\"'\"'", "'") if found else None
+
+
+def _tiers_from_body(body: str) -> TierModels | None:
+    """The per-tier models a rendered env-shape body carries, or None.
+
+    None for the launch shape, which has no tiers — ``build_spec`` then does
+    the right thing for that shape on its own.
+    """
+    haiku = _env_value(body, "ANTHROPIC_DEFAULT_HAIKU_MODEL")
+    sonnet = _env_value(body, "ANTHROPIC_DEFAULT_SONNET_MODEL")
+    opus = _env_value(body, "ANTHROPIC_DEFAULT_OPUS_MODEL")
+    if None in (haiku, sonnet, opus):
+        return None
+    return TierModels(haiku=haiku, sonnet=sonnet, opus=opus)
+
+
+def _model_from_body(body: str) -> str | None:
+    """The model that NAMES a rendered wrapper, or None.
+
+    The sonnet tier for the env shape (the mid tier is what a user means by
+    "the model" when tiers differ) and the ``--model`` argument for the launch
+    shape. This identifies the wrapper; it does not describe it — see
+    :func:`_tiers_from_body` for the full env-shape configuration.
+    """
+    sonnet = _env_value(body, "ANTHROPIC_DEFAULT_SONNET_MODEL")
+    if sonnet is not None:
+        return sonnet
+    found = re.search(r"--model '(.*?)' --", body)
+    return found.group(1).replace("'\"'\"'", "'") if found else None
 
 
 def _read_text_or_none(script: Path) -> str | None:
@@ -236,13 +296,56 @@ def _is_ours(paths: Paths, spec: WrapperSpec, token: str) -> bool:
     with a DIFFERENT one. Matching on the token would therefore fail in the
     single case that matters most. Everything else in the body must still
     match exactly.
+
+    The comparison is made against a spec rebuilt from the FILE's own models
+    rather than the caller's, so a legacy wrapper installed with ``--model``
+    is recognised too. Without that, the check only ever matched preset
+    defaults, and a customized legacy install dead-ended on a message telling
+    the user to pass ``--force`` — a flag ``edit-token`` does not accept.
+    Recognition still proves authorship: a body only matches if re-rendering
+    it reproduces every non-token byte.
     """
     if is_managed(paths, spec.alias):
         return True
     existing = _read_text_or_none(paths.script_for(spec.alias))
     if existing is None:
         return False
-    return _strip_token(existing) == _strip_token(render_legacy_script(spec, token))
+
+    candidates = [spec]
+    as_written = _respec_from_body(spec, existing)
+    if as_written is not None:
+        candidates.append(as_written)
+
+    stripped = _strip_token(existing)
+    return any(
+        stripped == _strip_token(render_legacy_script(candidate, token))
+        for candidate in candidates
+    )
+
+
+def _respec_from_body(spec: WrapperSpec, body: str) -> WrapperSpec | None:
+    """``spec`` with the models the FILE actually carries, or None.
+
+    Only the models are taken from the body — agent, provider, and shape stay
+    the caller's, so this can widen *which model* counts as ours but never
+    which agent or provider does.
+    """
+    tiers = _tiers_from_body(body)
+    model = _model_from_body(body)
+    if model is None:
+        return None
+    try:
+        return build_spec(
+            agent=spec.agent,
+            provider=spec.provider,
+            model=model,
+            alias=spec.alias,
+            shape=spec.shape,
+            tier_models=tiers,
+            subagent_model=_env_value(body, "CLAUDE_CODE_SUBAGENT_MODEL"),
+        )
+    except CodeHelperError:
+        return None
 
 
 def _strip_token(body: str) -> str:
