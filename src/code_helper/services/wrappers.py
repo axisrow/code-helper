@@ -331,6 +331,34 @@ def _is_ours(paths: Paths, spec: WrapperSpec, token: str) -> bool:
     )
 
 
+def _discards_only_secret(paths: Paths, spec: WrapperSpec, script: Path) -> bool:
+    """True iff installing ``spec`` would destroy the only copy of a token.
+
+    A ``secret``-auth wrapper carries its token nowhere but the generated
+    script: there is no config file, and the provider's ``*_API_KEY`` env var
+    is a possible *source*, not a guaranteed copy — a user who typed the token
+    at the prompt has it nowhere else. Replacing such a file with a wrapper
+    that never asked for a token therefore loses it irrecoverably, and
+    ``--alias`` is what makes that reachable by a typo.
+
+    Deliberately NOT "the body changed". Prompting on any content change would
+    fire on every model bump and every token rotation — ``add``-as-update, the
+    tool's primary use — and a prompt seen constantly is one users learn to
+    dismiss, which would cost more safety than it buys. The two conditions are:
+
+    - the OUTGOING file is a ``secret`` wrapper (something is at stake), and
+    - the INCOMING one is not (nobody was asked for a replacement token).
+
+    secret → secret is therefore silent on purpose: the old token does go away,
+    but the user was just prompted for the new one, so it is a deliberate
+    replacement rather than a silent loss.
+    """
+    if spec.auth == "secret":
+        return False
+    installed = spec_from_installed(paths, script.name)
+    return installed is not None and installed.auth == "secret"
+
+
 def _respec_from_body(spec: WrapperSpec, body: str) -> WrapperSpec | None:
     """``spec`` with the models the FILE actually carries, or None.
 
@@ -423,6 +451,19 @@ def install_wrapper(
                     f"refusing to overwrite (use --force)"
                 )
         print(f"overwriting unmanaged file {script}")
+    elif script.exists() and _discards_only_secret(paths, spec, script):
+        # Ours, but a DIFFERENT wrapper whose token exists nowhere else.
+        if dry_run:
+            print(f"would discard the only copy of {script}'s token")
+            return True
+        if not force:
+            if confirm is None or not confirm(script):
+                raise CodeHelperError(
+                    f"{script} holds a wrapper whose token exists nowhere else, "
+                    f"and the replacement does not use one — refusing to discard "
+                    f"the only copy of its token (use --force)"
+                )
+        print(f"discarding the only copy of {script}'s token")
 
     if dry_run:
         print(f"would write {script}")
