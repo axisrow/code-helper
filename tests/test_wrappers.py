@@ -1049,3 +1049,187 @@ def test_add_secret_auth_openai_toml_refuses_before_token_prompt(tmp_path, monke
         ]
     )
     assert code != 0  # refused, not prompted
+
+
+# --------------------------------------------------------------------------- #
+# Round-2 review findings (M1-M5): cleanup's own ownership guard, TOMLDecodeError
+# leaking past spec_from_installed, SKIP-install cleanup gating, a self-marked
+# catalog surviving a missing profile, and wire_api registry validation.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_shape_switch_cleanup_refuses_to_delete_a_foreign_catalog(tmp_path):
+    """M1: a hand-curated catalog next to OUR profile survives a shape switch.
+
+    _cleanup_openai_toml_siblings must gate the catalog unlink on the
+    catalog's OWN ownership proof, not inherit it from the profile's marker —
+    otherwise a foreign catalog sitting next to our profile is silently
+    deleted with no --force and no prompt, exactly what the install-time guard
+    exists to prevent.
+    """
+    paths = Paths.from_home(tmp_path)
+    alias = "glm-5-codex"
+    install_wrapper(paths, _toml_spec(model="glm-5.2:cloud", alias=alias))
+    assert paths.codex_config_for(alias).exists()
+
+    # Replace ONLY the catalog with a foreign, hand-curated one — the profile
+    # (and its marker) is untouched.
+    catalog = paths.codex_catalog_for(alias)
+    catalog.write_text(
+        '{"version": 1, "models": [{"id": "hand-curated", "context_window": 200000}]}',
+        encoding="utf-8",
+    )
+
+    launcher_spec = build_spec(
+        agent="claude",
+        provider="ollama",
+        model="glm-5:cloud",
+        alias=alias,
+        shape=ConfigShape.OLLAMA_LAUNCH,
+    )
+    assert install_wrapper(paths, launcher_spec) is True
+
+    # The wrapper switched shape; the foreign catalog survives untouched.
+    assert paths.script_for(alias).exists()
+    assert "hand-curated" in catalog.read_text(encoding="utf-8")
+    # The profile WAS ours and is cleaned up independently.
+    assert not paths.codex_config_for(alias).exists()
+
+
+@pytest.mark.integration
+def test_spec_from_installed_survives_corrupt_toml_profile(tmp_path):
+    """M2: a hand-truncated/corrupt TOML profile degrades to None, never raises.
+
+    spec_from_installed's documented contract is "never raises" — every caller
+    (edit-token, discover_managed) relies on falling back to the preset path.
+    tomllib.loads raises TOMLDecodeError (a ValueError) on malformed TOML; that
+    must be caught, not left to escape as a raw traceback.
+    """
+    paths = Paths.from_home(tmp_path)
+    alias = "glm-5-codex"
+    install_wrapper(paths, _toml_spec(model="glm-5.2:cloud", alias=alias))
+
+    # Corrupt the profile — an unterminated string is invalid TOML.
+    config = paths.codex_config_for(alias)
+    corrupted = config.read_text(encoding="utf-8").replace(
+        'model = "glm-5.2:cloud"', 'model = "glm-5.2:cloud'
+    )
+    config.write_text(corrupted, encoding="utf-8")
+
+    # Must not raise — None is the documented "unrecoverable" outcome.
+    assert spec_from_installed(paths, alias) is None
+
+
+@pytest.mark.integration
+def test_install_openai_toml_skip_still_cleans_orphaned_siblings_and_reports_it(
+    tmp_path,
+):
+    """M3: a byte-identical (SKIP) wrapper re-install still cleans up siblings
+    left over from an EARLIER OPENAI_TOML install, and that cleanup is
+    reflected in the return value — not silently dropped because the wrapper
+    slot itself didn't change.
+    """
+    paths = Paths.from_home(tmp_path)
+    alias = "glm-5-codex"
+    install_wrapper(paths, _toml_spec(model="glm-5.2:cloud", alias=alias))
+    assert paths.codex_config_for(alias).exists()
+    assert paths.codex_catalog_for(alias).exists()
+
+    # Switch shapes once (this itself cleans up — assert a clean starting
+    # point by re-manufacturing an orphaned sibling by hand afterwards).
+    launcher_spec = build_spec(
+        agent="claude",
+        provider="ollama",
+        model="glm-5:cloud",
+        alias=alias,
+        shape=ConfigShape.OLLAMA_LAUNCH,
+    )
+    install_wrapper(paths, launcher_spec)
+    assert not paths.codex_config_for(alias).exists()
+
+    # Re-create an orphaned, OUR-marked profile by hand (simulating a leftover
+    # from an install that predates this cleanup, or a partial failure) with
+    # no matching catalog — the wrapper slot for a second install of the SAME
+    # launcher_spec is now byte-identical (SKIP).
+    from code_helper.services.render import openai_toml_body
+
+    stray_profile = paths.codex_config_for(alias)
+    stray_profile.write_text(
+        openai_toml_body(_toml_spec(alias=alias), "/nonexistent.json"),
+        encoding="utf-8",
+    )
+    assert stray_profile.exists()
+
+    wrote = install_wrapper(paths, launcher_spec)
+    # The wrapper write itself is a no-op (SKIP), but the stray profile was
+    # cleaned up — that must still be reported as a change.
+    assert wrote is True
+    assert not stray_profile.exists()
+
+
+@pytest.mark.integration
+def test_catalog_survives_missing_profile_on_reinstall(tmp_path):
+    """M4: our own catalog is NOT misclassified as foreign when the sibling
+    profile has been removed — it proves its own authorship via the
+    ``managed_by`` field in the JSON body, independent of the profile.
+    """
+    paths = Paths.from_home(tmp_path)
+    alias = "glm-5-codex"
+    install_wrapper(paths, _toml_spec(model="glm-5.2:cloud", alias=alias))
+
+    # Simulate losing the profile (user tidying ~/.codex, a sync conflict)
+    # while the catalog — which self-identifies — remains.
+    paths.codex_config_for(alias).unlink()
+    assert paths.codex_catalog_for(alias).exists()
+
+    # A re-install (any model) must NOT refuse the catalog as foreign.
+    wrote = install_wrapper(paths, _toml_spec(model="glm-5.3:cloud", alias=alias))
+    assert wrote is True
+    assert paths.codex_catalog_for(alias).exists()
+    assert paths.codex_config_for(alias).exists()  # profile rewritten too
+
+
+@pytest.mark.unit
+def test_openai_catalog_body_carries_managed_by_marker():
+    """M4: the catalog's own JSON body proves authorship without its sibling."""
+    import json
+
+    from code_helper.services.render import (
+        CATALOG_MANAGED_BY_KEY,
+        CATALOG_MANAGED_BY_VALUE,
+    )
+
+    spec = _toml_spec()
+    payload = json.loads(openai_catalog_body(spec))
+    assert payload[CATALOG_MANAGED_BY_KEY] == CATALOG_MANAGED_BY_VALUE
+
+
+@pytest.mark.unit
+def test_validate_registries_rejects_openai_toml_provider_without_wire_api():
+    """M5: a provider declaring openai-toml with a bad wire_api fails at
+    import/registry-validation time, not with a broken profile at codex
+    runtime — the whole point of the shape being a data-driven extension
+    point.
+    """
+    import code_helper.services.model as model_mod
+
+    bad_provider = Provider(
+        name="bad-openai",
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        base_url="https://api.bad.invalid/v1",
+        auth="literal",
+        auth_value="x",
+        model_list_api=ModelListAPI.OPENAI_V1,
+        wire_api="",  # missing — must be "responses" or "chat"
+    )
+    original = model_mod.PROVIDERS
+    model_mod.PROVIDERS = original + (bad_provider,)
+    try:
+        with pytest.raises(CodeHelperError, match="invalid wire_api"):
+            model_mod._validate_registries()
+    finally:
+        # Restore WITHOUT importlib.reload: reloading would mint new class
+        # objects for ConfigShape/Provider/etc, breaking identity comparisons
+        # (`is`) any test running after this one relies on.
+        model_mod.PROVIDERS = original

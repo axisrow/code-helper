@@ -36,6 +36,8 @@ __all__ = [
     "openai_toml_body",
     "openai_catalog_body",
     "MARKER_PREFIX",
+    "CATALOG_MANAGED_BY_KEY",
+    "CATALOG_MANAGED_BY_VALUE",
 ]
 
 #: Second line of every generated script. Presence of this prefix is how
@@ -207,6 +209,17 @@ def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
     )
 
 
+#: Top-level marker key in the catalog JSON — the JSON equivalent of
+#: ``render.MARKER_PREFIX``. JSON has no comments, so the bash/TOML marker
+#: comment cannot ride along; this field is what lets the catalog prove its
+#: OWN authorship instead of borrowing the sibling profile's marker (see
+#: ``wrappers._is_our_catalog``). A catalog we wrote before this field existed
+#: has no key at all — treated the same as "not (self-)provably ours", exactly
+#: like a markerless pre-marker wrapper before the byte-match migration path.
+CATALOG_MANAGED_BY_KEY = "managed_by"
+CATALOG_MANAGED_BY_VALUE = "code-helper"
+
+
 def openai_catalog_body(spec: WrapperSpec) -> str:
     """The ``~/.codex/<alias>.model.json`` catalog body (pure, no IO).
 
@@ -214,6 +227,12 @@ def openai_catalog_body(spec: WrapperSpec) -> str:
     does not ship knowledge of (``glm-5.2:cloud`` etc.). This is a minimal
     entry so the model is usable; the real window is unknown to this tool, so
     :data:`_DEFAULT_CONTEXT_WINDOW` is a floor, not a measurement.
+
+    Carries :data:`CATALOG_MANAGED_BY_KEY` at the top level — proof of
+    authorship the catalog can offer on its OWN, without needing its sibling
+    ``<alias>.config.toml`` profile to still exist. Extra top-level keys are
+    harmless: Codex reads ``models``, and a catalog is JSON, so an unknown key
+    is simply ignored by any conformant reader.
     """
     import json
 
@@ -223,7 +242,12 @@ def openai_catalog_body(spec: WrapperSpec) -> str:
         "context_window": _DEFAULT_CONTEXT_WINDOW,
         "max_output_tokens": _DEFAULT_MAX_OUTPUT,
     }
-    return json.dumps({"version": 1, "models": [entry]}, indent=2) + "\n"
+    body = {
+        "version": 1,
+        CATALOG_MANAGED_BY_KEY: CATALOG_MANAGED_BY_VALUE,
+        "models": [entry],
+    }
+    return json.dumps(body, indent=2) + "\n"
 
 
 def _toml_string(value: str) -> str:

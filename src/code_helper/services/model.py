@@ -242,6 +242,22 @@ def _validate_registries() -> None:
             raise CodeHelperError(
                 f"provider {provider.name!r} has invalid auth {provider.auth!r}"
             )
+        # openai_toml_body (render.py) consumes wire_api unconditionally for
+        # every provider that can resolve to OPENAI_TOML — an empty or
+        # unrecognised value renders a profile Codex rejects at runtime rather
+        # than a registry error at import time. The whole selling point of the
+        # shape is "a second OpenAI-compatible provider is just a PROVIDERS
+        # entry"; catching a missing wire_api here, not at `codex` runtime, is
+        # what keeps that promise honest.
+        if ConfigShape.OPENAI_TOML in provider.shapes and provider.wire_api not in (
+            "responses",
+            "chat",
+        ):
+            raise CodeHelperError(
+                f"provider {provider.name!r} declares openai-toml but has "
+                f"invalid wire_api {provider.wire_api!r} (must be 'responses' "
+                f"or 'chat')"
+            )
     for label, names in (
         ("agent", [a.name for a in AGENTS]),
         ("provider", [p.name for p in PROVIDERS]),

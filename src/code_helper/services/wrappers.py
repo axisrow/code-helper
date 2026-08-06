@@ -38,6 +38,8 @@ from code_helper.services.model import Agent, ConfigShape, Provider
 from code_helper.services.naming import validate_alias
 from code_helper.services.paths import Paths
 from code_helper.services.render import (
+    CATALOG_MANAGED_BY_KEY,
+    CATALOG_MANAGED_BY_VALUE,
     MARKER_PREFIX,
     render_legacy_script,
     render_script,
@@ -349,25 +351,39 @@ def _model_from_toml_profile(paths: Paths, alias: str) -> str | None:
     cannot recover the model from the wrapper the way the other shapes do —
     the model is in the TOML profile written alongside it. ``tomllib`` (3.11+)
     parses it correctly; on 3.10 (the project's minimum) a line regex reads
-    the ``model = "..."`` key this renderer is the only writer of. Unreadable
-    or absent → None, so the caller falls back to the preset path rather than
-    raising.
+    the ``model = "..."`` key this renderer is the only writer of. Unreadable,
+    absent, or UNPARSEABLE → None, so the caller falls back to the preset path
+    rather than raising — this function's whole contract, inherited by
+    :func:`spec_from_installed`, is that it never raises. A hand-edited or
+    truncated profile (reachable the moment a user touches ``~/.codex`` by
+    hand) makes ``tomllib.loads`` raise ``TOMLDecodeError``, a ``ValueError``
+    subclass and NOT a :class:`CodeHelperError` — left uncaught it used to
+    escape all the way to ``edit-token``/``add --alias`` as a raw traceback,
+    bypassing the ownership guard whose entire job is to handle a bad file in
+    the way (and which ``--force`` could otherwise rescue).
     """
     profile = _read_text_or_none(paths.codex_config_for(alias))
     if profile is None:
         return None
     try:
         import tomllib  # py3.11+
-
-        data = tomllib.loads(profile)
-        model = data.get("model")
-        return model if isinstance(model, str) and model else None
     except ModuleNotFoundError:
         # 3.10 fallback: this renderer is the only writer of the profile, so a
         # plain ``^model = "..."`` line match is sufficient — tomllib's
-        # validation is not needed for a file we authored.
+        # validation is not needed for a file we authored. A malformed line
+        # simply fails to match, which is the same "unrecoverable → None"
+        # outcome the 3.11+ branch gives for a ValueError.
         found = re.search(r'^model = "(.*)"$', profile, re.MULTILINE)
         return _toml_unescape(found.group(1)) if found else None
+
+    try:
+        data = tomllib.loads(profile)
+    except ValueError:
+        # tomllib.TOMLDecodeError is a ValueError subclass — a hand-edited or
+        # truncated profile, not this module's problem to resolve here.
+        return None
+    model = data.get("model")
+    return model if isinstance(model, str) and model else None
 
 
 def _read_text_or_none(script: Path) -> str | None:
@@ -514,22 +530,59 @@ def _is_ours_marker_only(path: Path) -> bool:
     return _marker_at(path)
 
 
+def _catalog_self_marked(path: Path) -> bool:
+    """True iff ``path`` is JSON carrying our own ``managed_by`` field.
+
+    The catalog's own proof of authorship (see ``render.CATALOG_MANAGED_BY_KEY``)
+    — independent of any sibling file. A purely structural test
+    (``{"version": 1, "models": [...]}`` alone) is too permissive: that shape
+    is generic enough that a hand-curated or third-party catalog plausibly
+    uses it too, and treating it as proof clobbers a researched
+    ``context_window`` with the :data:`_DEFAULT_CONTEXT_WINDOW` floor — silent
+    data loss without ``--force``. Requiring our specific marker field closes
+    that. Unreadable/non-JSON/missing key → False, the same safe-refuse answer
+    every other ownership check in this module gives.
+    """
+    body = _read_text_or_none(path)
+    if body is None:
+        return False
+    try:
+        import json
+
+        data = json.loads(body)
+    except ValueError:
+        return False
+    return (
+        isinstance(data, dict)
+        and data.get(CATALOG_MANAGED_BY_KEY) == CATALOG_MANAGED_BY_VALUE
+    )
+
+
 def _is_our_catalog(paths: Paths, alias: str) -> bool:
     """True iff the catalog for ``alias`` is one we wrote.
 
-    The catalog is JSON, and JSON has no comments — so the marker the wrapper
-    and TOML profile carry cannot ride along. A purely structural test
-    (``{"version": 1, "models": [...]}``) is too permissive: that is a generic
-    shape a hand-curated or third-party catalog plausibly uses, and treating it
-    as proof of authorship clobbers a researched ``context_window`` with the
-    :data:`_DEFAULT_CONTEXT_WINDOW` floor — silent data loss without
-    ``--force``. Instead the catalog is proven ours by its SIBLING: the
-    ``<alias>.config.toml`` profile is written alongside it and carries our
-    marker, so the catalog is ours iff the profile is. A foreign catalog with
-    no (or a foreign) profile routes to ``OVERWRITE_FOREIGN`` like the other
-    two slots. The byte-identical idempotence case is handled earlier in
-    :func:`_decide` (SKIP), so this only gates non-identical existing catalogs.
+    Two ways to qualify, checked in order:
+
+    - it carries our own ``managed_by`` field (:func:`_catalog_self_marked`)
+      — the catalog proves its OWN authorship, independent of any other file;
+      or
+    - its SIBLING ``<alias>.config.toml`` profile carries our marker
+      (fallback, for a catalog written by a release before the ``managed_by``
+      field existed — the same "second, migration-path proof" pattern
+      :func:`_is_ours` uses for the wrapper's pre-marker legacy form).
+
+    Without the first clause, losing the sibling profile (a user tidying
+    ``~/.codex``, a partial restore, a sync conflict) stranded a catalog we
+    genuinely wrote as "foreign" on the next install — a real regression a
+    prior, purely-structural version of this check did not have. A foreign
+    catalog that matches NEITHER clause routes to ``OVERWRITE_FOREIGN`` like
+    the other two slots; the byte-identical idempotence case is handled
+    earlier in :func:`_decide` (SKIP), so this only gates non-identical
+    existing catalogs.
     """
+    catalog_path = paths.codex_catalog_for(alias)
+    if _catalog_self_marked(catalog_path):
+        return True
     return _marker_at(paths.codex_config_for(alias))
 
 
@@ -741,52 +794,60 @@ def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_File
     ]
 
 
-def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) -> None:
+def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) -> bool:
     """Remove the ``~/.codex/<alias>.config.toml`` + ``<alias>.model.json`` we wrote.
 
-    Only run when a PREVIOUS install under ``alias`` was OPENAI_TOML and the new
-    one is not: the old profile/catalog no longer match anything the new wrapper
-    dispatches to, so leaving them is silent clutter (and a stale catalog could
-    mislead a later ``codex --profile <alias>`` if the alias is ever reused for
-    OPENAI_TOML again). Only OUR siblings are removed — proven the same way the
-    install guard proves them: the profile by its marker, the catalog by its
-    sibling profile's marker. A foreign profile/catalog under the alias is left
-    untouched, exactly as the install guard would refuse to overwrite it.
+    Only meaningful when a PREVIOUS install under ``alias`` was OPENAI_TOML and
+    the new one is not: the old profile/catalog no longer match anything the
+    new wrapper dispatches to, so leaving them is silent clutter (and a stale
+    catalog could mislead a later ``codex --profile <alias>`` if the alias is
+    ever reused for OPENAI_TOML again).
+
+    Each sibling is gated by ITS OWN ownership proof, independently —
+    :func:`_is_ours_marker_only` for the profile, :func:`_is_our_catalog` for
+    the catalog. This is deliberately NOT "the profile's marker decides both":
+    an earlier version inferred the catalog's fate from the profile alone,
+    which meant a hand-curated catalog sitting next to OUR profile was deleted
+    with no ``--force`` and no prompt — the exact thing the install-time
+    ownership guard exists to prevent, just reached through a different door.
+    A foreign profile or foreign catalog is left untouched, matching what the
+    install guard would have refused to overwrite.
+
+    Best-effort by design: called AFTER the wrapper install already succeeded
+    (see ``install_wrapper``), so a failure here must never make a successful
+    install look failed. An unlink failure is reported on stderr and skipped,
+    not raised — unlike the install-time write path, where a failure aborts
+    before anything user-visible has changed.
+
+    Returns:
+        True iff anything was removed (or, in dry-run, would be) — folded into
+        ``install_wrapper``'s own return value so a run whose only effect was
+        deleting orphaned siblings is not reported as "no changes".
     """
-    config_path = paths.codex_config_for(alias)
-    catalog_path = paths.codex_catalog_for(alias)
+    import sys
 
-    # The profile marker is the single proof both siblings share (the catalog
-    # is JSON — no comment marker; see ``_is_our_catalog``). Decide once, BEFORE
-    # removing anything: unlinking the profile first would make the re-check
-    # false and strand the catalog.
-    profile_is_ours = _marker_at(config_path)
-    if not profile_is_ours:
-        return
-
-    if config_path.exists():
+    changed = False
+    for path, owns in (
+        (paths.codex_config_for(alias), _is_ours_marker_only),
+        (paths.codex_catalog_for(alias), lambda _p: _is_our_catalog(paths, alias)),
+    ):
+        if not path.exists() or not owns(path):
+            continue
         if dry_run:
-            print(f"would remove orphaned sibling {config_path}")
-        else:
-            try:
-                config_path.unlink()
-            except OSError as exc:
-                raise CodeHelperError(
-                    f"failed to remove orphaned sibling {config_path}: {exc}"
-                ) from exc
-            print(f"removed orphaned sibling {config_path}")
-
-    if catalog_path.exists():
-        if dry_run:
-            print(f"would remove orphaned sibling {catalog_path}")
-        else:
-            try:
-                catalog_path.unlink()
-            except OSError as exc:
-                raise CodeHelperError(
-                    f"failed to remove orphaned sibling {catalog_path}: {exc}"
-                ) from exc
-            print(f"removed orphaned sibling {catalog_path}")
+            print(f"would remove orphaned sibling {path}")
+            changed = True
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            print(
+                f"warning: failed to remove orphaned sibling {path}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        print(f"removed orphaned sibling {path}")
+        changed = True
+    return changed
 
 
 def install_wrapper(
@@ -845,12 +906,17 @@ def install_wrapper(
 
     # A non-OPENAI_TOML install under an alias that previously held an
     # OPENAI_TOML install leaves the ``~/.codex/<alias>.*`` siblings orphaned
-    # — the new wrapper no longer dispatches ``codex --profile <alias>``. Only
-    # clean up AFTER a successful (non-dry-run) write or a dry-run that would
-    # have written, and only for OUR siblings; a refusal above already raised
-    # before reaching here.
+    # — the new wrapper no longer dispatches ``codex --profile <alias>``. Runs
+    # regardless of whether the wrapper slot itself changed (a SKIP re-install
+    # under an alias that still carries stale siblings must still clean them
+    # up — the siblings are the whole point, not a side effect of the wrapper
+    # write), but only for OUR siblings; a refusal above already raised before
+    # reaching here, so nothing here is racing an unresolved guard decision.
+    # Its own return value is folded into ``wrote`` so a run whose only effect
+    # was deleting orphaned siblings is not reported as "no changes".
     if spec.shape is not ConfigShape.OPENAI_TOML:
-        _cleanup_openai_toml_siblings(paths, spec.alias, dry_run=dry_run)
+        cleaned = _cleanup_openai_toml_siblings(paths, spec.alias, dry_run=dry_run)
+        wrote = wrote or cleaned
 
     return wrote
 
