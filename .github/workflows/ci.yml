@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A force-push or a quick follow-up commit makes the in-flight run obsolete;
+# cancel it rather than paying for a result nobody will read.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Ubuntu only, deliberately: cli/menu.py is stdlib-but-Unix-only
+    # (termios/tty), so a Windows runner would fail on import, not on a real
+    # defect. macOS would pass but only re-tests what the author already runs
+    # locally.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The range pyproject.toml advertises in its classifiers. Keep the two
+        # in step: a version claimed there but untested here is a claim
+        # nothing checks.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      # Lint once — ruff's result cannot differ across interpreters, and
+      # target-version is pinned in pyproject.toml.
+      - name: Lint
+        if: matrix.python-version == '3.12'
+        run: |
+          ruff check src/ tests/
+          ruff format --check src/ tests/
+
+      - name: Test
+        run: pytest -q
