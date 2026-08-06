@@ -56,6 +56,7 @@ __all__ = ["run_tui"]
 _LIST = "list"
 _ADD = "add"
 _EDIT_TOKEN = "edit-token"
+_NEW = "new"
 _SETTINGS = "settings"
 _QUIT = "quit"
 _BACK = "__back__"
@@ -69,8 +70,16 @@ def _hint(numbered_count: int, *, exit_word: str) -> str:
     CLAUDE.md. ``numbered_count`` must match the number of non-``_BACK``/
     ``_QUIT`` items passed to the same ``select_from_menu`` call, or the
     printed range and the working digits drift apart again.
+
+    Capped at :data:`MAX_DIGIT_ITEMS`, because the menu itself only assigns
+    that many digits. Without the cap a long list (the model picker can show
+    20+) advertised "1-21" while keys 10 and up did nothing — the exact drift
+    this function exists to prevent, caught only on a real terminal.
     """
-    digits = "1" if numbered_count == 1 else f"1-{numbered_count}"
+    from code_helper.cli.menu import MAX_DIGIT_ITEMS
+
+    usable = min(numbered_count, MAX_DIGIT_ITEMS)
+    digits = "1" if usable == 1 else f"1-{usable}"
     return f"↑/↓ · {digits} · Enter выбрать · Esc/q {exit_word}"
 
 
@@ -95,6 +104,7 @@ def run_tui(args: argparse.Namespace) -> int:
     from code_helper.cli.menu import MenuCancelled, press_any_key, select_from_menu
     from code_helper.cli.parser import _handle_add, _handle_edit_token, _handle_list
     from code_helper.errors import CodeHelperError, emit_error
+    from code_helper.services.model import AGENTS
     from code_helper.services.paths import Paths
     from code_helper.services.wrappers import WRAPPERS, describe_all, get_spec
 
@@ -182,10 +192,9 @@ def run_tui(args: argparse.Namespace) -> int:
         if name == _BACK:
             return
 
-        spec = get_spec(name)
-        default_model = (
-            spec.launch_model if spec.launch_command is not None else spec.sonnet_model
-        )
+        # `spec.model` is the resolved model whatever the config shape — the
+        # old launch_command/sonnet_model branch is gone with the flat spec.
+        default_model = get_spec(name).model
         model_items = [
             ("__default__", f"оставить по умолчанию ({default_model})"),
             ("__custom__", "указать свою модель"),
@@ -206,6 +215,103 @@ def run_tui(args: argparse.Namespace) -> int:
             args.model = None
 
         args.name = name
+        # Clear the constructor fields: the menu loops, so a previous `new`
+        # run would otherwise leave args.agent set and flip _handle_add into
+        # constructor mode for what the user picked as a preset.
+        args.agent = None
+        args.provider = None
+        args.alias = None
+        args.shape = None
+        _run(_handle_add, getattr(args, "debug", False))
+        _pause()
+
+    def _run_new() -> None:
+        """Constructor flow: agent → provider → model → alias, then dispatch.
+
+        Mirrors ``code-helper add --agent … --provider … --model …`` exactly —
+        it fills the same ``Namespace`` fields and calls the same
+        ``_handle_add``. Nothing here validates or writes; the two read-only
+        lookups (:func:`compatible_providers`, :func:`list_models`) only decide
+        what to put on screen.
+        """
+        from code_helper.cli.menu import MAX_DIGIT_ITEMS
+        from code_helper.services.model import compatible_providers, get_agent
+        from code_helper.services.models_api import list_models
+        from code_helper.services.spec import suggest_alias
+
+        agent_items = [
+            *[(a.name, f"{a.name:10} {a.description}") for a in AGENTS],
+            (_BACK, "← назад"),
+        ]
+        agent_name = _pick(agent_items, "выберите агента:")
+        if agent_name == _BACK:
+            return
+        agent = get_agent(agent_name)
+
+        # Only compatible providers are offered: an impossible pairing should
+        # be unreachable, not merely rejected after the fact.
+        usable = compatible_providers(agent)
+        provider_items = [
+            *[(p.name, f"{p.name:10} {p.description}") for p in usable],
+            (_BACK, "← назад"),
+        ]
+        provider_name = _pick(provider_items, f"провайдер для {agent.name}:")
+        if provider_name == _BACK:
+            return
+        provider = next(p for p in usable if p.name == provider_name)
+
+        result = list_models(provider)
+        if not result.ok:
+            print(result.error)
+            # The next menu frame clears the screen on a TTY, so without a
+            # pause this explanation is erased in the same breath it is
+            # printed and the user sees only an empty picker. Every other
+            # error surface in this file pairs its output with _pause().
+            _pause()
+        # Only the first MAX_DIGIT_ITEMS get a digit shortcut, and a long list
+        # scrolls a normal terminal past the top of the frame. Show that many
+        # and say so, rather than printing 20+ rows where half are unreachable
+        # by number — manual entry covers anything not listed.
+        shown = result.models[:MAX_DIGIT_ITEMS]
+        hidden = len(result.models) - len(shown)
+        custom_label = "указать модель вручную"
+        if hidden:
+            custom_label += f" (ещё {hidden} — введите имя)"
+        model_items = [
+            *[(m, m) for m in shown],
+            ("__custom__", custom_label),
+            (_BACK, "← назад"),
+        ]
+        model = _pick(model_items, f"модель ({provider.name}):")
+        if model == _BACK:
+            return
+        if model == "__custom__":
+            try:
+                model = input("введите модель: ").strip()
+            except KeyboardInterrupt:
+                print()
+                return
+            if not model:
+                return
+
+        try:
+            default_alias = suggest_alias(model, agent.name)
+        except CodeHelperError as e:
+            emit_error(e, getattr(args, "debug", False))
+            _pause()
+            return
+        try:
+            typed = input(f"имя команды [{default_alias}]: ").strip()
+        except KeyboardInterrupt:
+            print()
+            return
+
+        args.name = None
+        args.agent = agent.name
+        args.provider = provider.name
+        args.model = model
+        args.alias = typed or default_alias
+        args.shape = None
         _run(_handle_add, getattr(args, "debug", False))
         _pause()
 
@@ -227,7 +333,8 @@ def run_tui(args: argparse.Namespace) -> int:
         while True:
             items = [
                 (_LIST, "list         показать обёртки и их состояние"),
-                (_ADD, "add          установить или обновить обёртку"),
+                (_ADD, "add          установить готовую обёртку (пресет)"),
+                (_NEW, "new          собрать: агент + провайдер + модель"),
                 (_EDIT_TOKEN, "edit-token   заменить токен обёртки"),
                 (_SETTINGS, "settings     отладочные настройки"),
                 (_QUIT, "quit         выход"),
@@ -252,6 +359,10 @@ def run_tui(args: argparse.Namespace) -> int:
 
             if choice == _ADD:
                 _run_add()
+                continue
+
+            if choice == _NEW:
+                _run_new()
                 continue
 
             if choice == _EDIT_TOKEN:

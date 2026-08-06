@@ -311,3 +311,181 @@ def test_tui_quit_returns_zero(tmp_path, monkeypatch):
     assert main(["tui"]) == 0
 
     assert not Paths.from_home(tmp_path).script_for("deepseek").exists()
+
+
+# --------------------------------------------------------------------------- #
+# `new` — the constructor flow (agent → provider → model → alias)
+# --------------------------------------------------------------------------- #
+
+
+def _fake_models(monkeypatch, *names, error=None):
+    """Stub the model listing so the TUI never touches the network."""
+    import code_helper.services.models_api as api
+    from code_helper.services.models_api import ModelListResult
+
+    monkeypatch.setattr(
+        api,
+        "list_models",
+        lambda provider, **kw: ModelListResult(tuple(names), "url", error),
+    )
+
+
+@pytest.mark.integration
+def test_tui_new_builds_a_wrapper_from_the_axes(tmp_path, monkeypatch):
+    _fake_models(monkeypatch, "glm-5:cloud")
+    _menu_sequence(monkeypatch, ["new", "codex", "ollama", "glm-5:cloud", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _p="": "")  # accept the default alias
+
+    assert main(["tui"]) == 0
+
+    body = Paths.from_home(tmp_path).script_for("glm-5-codex").read_text()
+    assert "exec ollama launch codex --model 'glm-5:cloud' -- \"$@\"" in body
+
+
+@pytest.mark.integration
+def test_tui_new_matches_the_cli_byte_for_byte(tmp_path, monkeypatch):
+    """The 1-to-1 contract, for the constructor path as well as presets."""
+    _fake_models(monkeypatch, "glm-5:cloud")
+    _menu_sequence(monkeypatch, ["new", "codex", "ollama", "glm-5:cloud", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _p="": "")
+    main(["tui"])
+    via_tui = Paths.from_home(tmp_path).script_for("glm-5-codex").read_text()
+
+    other_home = tmp_path / "other"
+    other_home.mkdir()
+    monkeypatch.setenv("HOME", str(other_home))
+    main(["add", "--agent", "codex", "--provider", "ollama", "--model", "glm-5:cloud"])
+    via_cli = Paths.from_home(other_home).script_for("glm-5-codex").read_text()
+
+    assert via_tui == via_cli
+
+
+@pytest.mark.integration
+def test_tui_new_typed_alias_wins(tmp_path, monkeypatch):
+    _fake_models(monkeypatch, "glm-5:cloud")
+    _menu_sequence(monkeypatch, ["new", "codex", "ollama", "glm-5:cloud", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _p="": "mycodex")
+
+    main(["tui"])
+    assert Paths.from_home(tmp_path).script_for("mycodex").exists()
+
+
+@pytest.mark.integration
+def test_tui_new_offers_manual_entry_when_the_daemon_is_down(tmp_path, monkeypatch):
+    """A missing daemon must degrade to typing a model, not block the flow."""
+    _fake_models(monkeypatch, error="could not reach ollama")
+    _menu_sequence(monkeypatch, ["new", "codex", "ollama", "__custom__", "quit"])
+    typed = iter(["qwen3.5:9b", ""])  # model, then accept the default alias
+    monkeypatch.setattr("builtins.input", lambda _p="": next(typed))
+
+    assert main(["tui"]) == 0
+    assert Paths.from_home(tmp_path).script_for("qwen3.5-codex").exists()
+
+
+@pytest.mark.integration
+def test_tui_new_only_offers_compatible_providers(tmp_path, monkeypatch):
+    """codex cannot use z.ai, so z.ai must not even appear in its picker."""
+    _fake_models(monkeypatch, "m")
+    seen: list[list] = []
+
+    def _fake(items, **_kw):
+        seen.append([value for value, _label in items])
+        # agent, provider, model, then quit
+        return {0: "new", 1: "codex", 2: "ollama", 3: "m"}.get(len(seen) - 1, "quit")
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _fake)
+    monkeypatch.setattr("builtins.input", lambda _p="": "")
+    main(["tui"])
+
+    provider_menu = seen[2]
+    assert "ollama" in provider_menu
+    assert "zai" not in provider_menu
+
+
+@pytest.mark.integration
+def test_tui_new_back_from_each_step_returns_to_menu(tmp_path, monkeypatch):
+    _fake_models(monkeypatch, "m")
+    for sequence in (
+        ["new", "__back__", "quit"],
+        ["new", "codex", "__back__", "quit"],
+        ["new", "codex", "ollama", "__back__", "quit"],
+    ):
+        _menu_sequence(monkeypatch, sequence)
+        assert main(["tui"]) == 0
+        assert not Paths.from_home(tmp_path).bin_dir.exists()
+
+
+@pytest.mark.integration
+def test_tui_new_ctrl_c_at_alias_prompt_returns_to_menu(tmp_path, monkeypatch):
+    _fake_models(monkeypatch, "glm-5:cloud")
+    _menu_sequence(monkeypatch, ["new", "codex", "ollama", "glm-5:cloud", "quit"])
+
+    def _interrupt(_prompt=""):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", _interrupt)
+
+    assert main(["tui"]) == 0
+    assert not Paths.from_home(tmp_path).bin_dir.exists()
+
+
+@pytest.mark.integration
+def test_tui_preset_still_works_after_a_new_run(tmp_path, monkeypatch):
+    """The loop reuses one Namespace — `new` must not leave `add` in axis mode."""
+    _fake_models(monkeypatch, "glm-5:cloud")
+    _menu_sequence(
+        monkeypatch,
+        [
+            "new",
+            "codex",
+            "ollama",
+            "glm-5:cloud",
+            "add",
+            "glm-ollama",
+            "__default__",
+            "quit",
+        ],
+    )
+    monkeypatch.setattr("builtins.input", lambda _p="": "")
+
+    assert main(["tui"]) == 0
+    paths = Paths.from_home(tmp_path)
+    assert paths.script_for("glm-5-codex").exists()
+    assert paths.script_for("glm-ollama").exists()
+
+
+@pytest.mark.unit
+def test_hint_never_promises_more_digits_than_the_menu_assigns():
+    """Regression: a 21-item menu advertised "1-21" but only 1-9 worked.
+
+    Caught only on a real terminal — every other TUI test injects
+    select_from_menu and never renders a hint against a long list.
+    """
+    from code_helper.cli.menu import MAX_DIGIT_ITEMS
+    from code_helper.cli.tui import _hint
+
+    assert f"1-{MAX_DIGIT_ITEMS}" in _hint(21, exit_word="назад")
+    assert "1-21" not in _hint(21, exit_word="назад")
+    assert "1-3" in _hint(3, exit_word="назад")  # short menus unaffected
+
+
+@pytest.mark.integration
+def test_tui_new_long_model_list_is_capped_and_says_so(tmp_path, monkeypatch):
+    """All models must stay reachable: the extras move behind manual entry."""
+    from code_helper.cli.menu import MAX_DIGIT_ITEMS
+
+    _fake_models(monkeypatch, *[f"m{i}" for i in range(20)])
+    seen: list[list[str]] = []
+    answers = iter(["new", "codex", "ollama", "__back__", "quit"])
+
+    def _fake(items, **_kw):
+        seen.append([label for _v, label in items])
+        return next(answers)
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _fake)
+    main(["tui"])
+
+    model_menu = seen[3]
+    # MAX_DIGIT_ITEMS models + "manual" + "back"
+    assert len(model_menu) == MAX_DIGIT_ITEMS + 2
+    assert any("ещё 11" in label for label in model_menu)

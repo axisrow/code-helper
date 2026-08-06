@@ -14,15 +14,37 @@ import stat
 import pytest
 
 from code_helper.errors import CodeHelperError
+from code_helper.services.model import ConfigShape
 from code_helper.services.paths import Paths
+from code_helper.services.spec import get_preset, spec_from_preset
 from code_helper.services.wrappers import (
     WRAPPERS,
+    build_spec,
+    discover_managed,
     get_spec,
     install_wrapper,
     is_installed,
+    is_managed,
     list_wrappers,
     render_script,
 )
+
+
+def script_text(paths: Paths, name: str) -> str:
+    return paths.script_for(name).read_text(encoding="utf-8")
+
+
+def _rendered(preset: str, token: str = "", *, model: str | None = None) -> str:
+    """Render a preset's body, optionally with a ``--model`` override.
+
+    ``render_script`` no longer takes ``model_override`` — the model is
+    resolved when the spec is built. This helper keeps the tests reading the
+    way they did while going through the new path.
+    """
+    return render_script(
+        spec_from_preset(get_preset(preset), model_override=model), token
+    )
+
 
 _LITERAL_TOKEN = "ollama"
 _SECRET_TOKEN = "00000000000000000000000000000000.aaaaaaaaaaaaaaaa"
@@ -39,12 +61,12 @@ def test_registry_has_deepseek_glm_and_glm_ollama():
 
 
 @pytest.mark.unit
-def test_glm_ollama_is_command_shape():
+def test_glm_ollama_uses_the_launcher_shape():
     spec = get_spec("glm-ollama")
-    assert spec.launch_command == "ollama launch claude --model {model}"
-    assert spec.launch_model == "glm-5.2:cloud"
+    assert spec.shape is ConfigShape.OLLAMA_LAUNCH
+    assert spec.agent.name == "claude"
+    assert spec.model == "glm-5.2:cloud"
     assert spec.auth == "literal"  # no token — ollama launch authenticates itself
-    assert spec.base_url == ""  # env-var fields unused by command shape
 
 
 @pytest.mark.unit
@@ -52,7 +74,11 @@ def test_deepseek_is_literal_auth():
     spec = get_spec("deepseek")
     assert spec.auth == "literal"
     assert spec.auth_value == "ollama"
-    assert spec.base_url == "http://127.0.0.1:11434"
+    assert spec.provider.base_url == "http://127.0.0.1:11434"
+    # Same provider as glm-ollama, different shape — that is the whole point
+    # of naming the axes.
+    assert spec.provider.name == "ollama"
+    assert spec.shape is ConfigShape.ANTHROPIC_ENV
 
 
 @pytest.mark.unit
@@ -60,7 +86,18 @@ def test_glm_is_secret_auth():
     spec = get_spec("glm")
     assert spec.auth == "secret"
     assert spec.token_env_var == "ZAI_API_KEY"
-    assert spec.base_url == "https://api.z.ai/api/anthropic"
+    assert spec.provider.base_url == "https://api.z.ai/api/anthropic"
+
+
+@pytest.mark.unit
+def test_glm_keeps_distinct_models_per_tier():
+    """The reason TierModels exists — one --model could not express this."""
+    tiers = get_spec("glm").tier_models
+    assert (tiers.haiku, tiers.sonnet, tiers.opus) == (
+        "glm-4.7",
+        "glm-5-turbo",
+        "glm-5.2[1m]",
+    )
 
 
 @pytest.mark.unit
@@ -113,9 +150,7 @@ def test_render_script_empties_anthropic_api_key():
 
 @pytest.mark.unit
 def test_render_script_model_override_replaces_all_tiers():
-    body = render_script(
-        get_spec("deepseek"), _LITERAL_TOKEN, model_override="custom:tag"
-    )
+    body = _rendered("deepseek", _LITERAL_TOKEN, model="custom:tag")
     assert "ANTHROPIC_DEFAULT_HAIKU_MODEL='custom:tag'" in body
     assert "ANTHROPIC_DEFAULT_SONNET_MODEL='custom:tag'" in body
     assert "ANTHROPIC_DEFAULT_OPUS_MODEL='custom:tag'" in body
@@ -145,7 +180,7 @@ def test_render_script_command_shape_launches_ollama():
 
 @pytest.mark.unit
 def test_render_script_command_shape_model_override():
-    body = render_script(get_spec("glm-ollama"), "", model_override="custom:tag")
+    body = _rendered("glm-ollama", model="custom:tag")
     assert "--model 'custom:tag' -- \"$@\"" in body
     assert "glm-5.2:cloud" not in body
 
@@ -154,7 +189,7 @@ def test_render_script_command_shape_model_override():
 def test_render_script_command_shape_model_injection_is_neutralized():
     """--model is user input even in the command shape — must be single-quoted."""
     hostile = "x'; touch /tmp/pwned; echo '"
-    body = render_script(get_spec("glm-ollama"), "", model_override=hostile)
+    body = _rendered("glm-ollama", model=hostile)
     assert f"--model '{hostile}'" not in body  # naive form would break out
     assert "'\"'\"'" in body  # escaped-quote sequence proves quoting engaged
 
@@ -187,7 +222,7 @@ def test_render_script_token_injection_is_neutralized():
 def test_render_script_model_override_injection_is_neutralized():
     """--model is now user-controlled input; it must be quoted just like a token."""
     hostile = "x'; touch /tmp/pwned; echo '"
-    body = render_script(get_spec("deepseek"), _LITERAL_TOKEN, model_override=hostile)
+    body = _rendered("deepseek", _LITERAL_TOKEN, model=hostile)
     assert "'\"'\"'" in body
 
 
@@ -243,20 +278,118 @@ def test_install_wrapper_unknown_name_raises_before_any_write(tmp_path):
 
 
 @pytest.mark.integration
-def test_install_wrapper_overwrites_any_existing_file(tmp_path):
-    """A pre-existing ~/.local/bin/deepseek (hand-written or not) is replaced."""
+def test_install_wrapper_refuses_to_clobber_a_foreign_file(tmp_path):
+    """A file we did not write is NOT silently replaced.
+
+    This inverts the project's earlier "overwrites any existing file"
+    behaviour. That was safe while names came from a closed registry; with
+    user-chosen aliases the same code path could destroy an unrelated
+    executable on PATH (``~/.local/bin/claude`` is a real symlink on a normal
+    install). Presets are not exempt — the guard keys off the file, not the
+    name's origin.
+    """
     paths = Paths.from_home(tmp_path)
     existing = "#!/bin/bash\necho my own deepseek\n"
     script = paths.script_for("deepseek")
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(existing, encoding="utf-8")
 
-    wrote = install_wrapper(paths, "deepseek", token=_LITERAL_TOKEN)
+    with pytest.raises(CodeHelperError, match="refusing to overwrite"):
+        install_wrapper(paths, "deepseek", token=_LITERAL_TOKEN)
 
+    assert script.read_text(encoding="utf-8") == existing  # untouched
+
+
+@pytest.mark.integration
+def test_install_wrapper_force_overwrites_a_foreign_file(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    script = paths.script_for("deepseek")
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("#!/bin/bash\necho mine\n", encoding="utf-8")
+
+    assert install_wrapper(paths, "deepseek", token=_LITERAL_TOKEN, force=True) is True
+    assert f"ANTHROPIC_AUTH_TOKEN='{_LITERAL_TOKEN}'" in script.read_text()
+
+
+@pytest.mark.integration
+def test_install_wrapper_replaces_its_own_earlier_output(tmp_path):
+    """The guard must not get in the way of the normal update path."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "deepseek", token=_LITERAL_TOKEN)
+
+    def _explode(_path):  # pragma: no cover - must not be reached
+        raise AssertionError("must not ask before replacing our own wrapper")
+
+    wrote = install_wrapper(paths, "deepseek", token="rotated-token", confirm=_explode)
     assert wrote is True
-    body = script.read_text(encoding="utf-8")
-    assert body != existing
-    assert f"ANTHROPIC_AUTH_TOKEN='{_LITERAL_TOKEN}'" in body
+    assert "ANTHROPIC_AUTH_TOKEN='rotated-token'" in script_text(paths, "deepseek")
+
+
+@pytest.mark.integration
+def test_install_wrapper_non_interactive_fails_fast_instead_of_blocking(tmp_path):
+    """confirm=None means "no way to ask" — must error, never read stdin.
+
+    This is the guarantee that a scripted/CI run cannot hang waiting on input.
+    """
+    paths = Paths.from_home(tmp_path)
+    script = paths.script_for("deepseek")
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("#!/bin/bash\necho mine\n", encoding="utf-8")
+
+    with pytest.raises(CodeHelperError, match="--force"):
+        install_wrapper(paths, "deepseek", token=_LITERAL_TOKEN, confirm=None)
+
+
+@pytest.mark.integration
+def test_install_wrapper_dry_run_never_asks_about_a_foreign_file(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    script = paths.script_for("deepseek")
+    script.parent.mkdir(parents=True, exist_ok=True)
+    original = "#!/bin/bash\necho mine\n"
+    script.write_text(original, encoding="utf-8")
+
+    def _explode(_path):  # pragma: no cover - must not be reached
+        raise AssertionError("dry-run must never prompt")
+
+    assert (
+        install_wrapper(
+            paths, "deepseek", token=_LITERAL_TOKEN, dry_run=True, confirm=_explode
+        )
+        is True
+    )
+    assert script.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.integration
+def test_is_managed_distinguishes_ours_from_foreign(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "deepseek", token=_LITERAL_TOKEN)
+    assert is_managed(paths, "deepseek") is True
+
+    foreign = paths.script_for("glm")
+    foreign.write_text("#!/bin/bash\necho hi\n", encoding="utf-8")
+    assert is_installed(paths, "glm") is True  # exists...
+    assert is_managed(paths, "glm") is False  # ...but not ours
+
+
+@pytest.mark.integration
+def test_is_managed_false_for_binary_file(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    paths.bin_dir.mkdir(parents=True, exist_ok=True)
+    paths.script_for("blob").write_bytes(b"\x7fELF\x00\x01\x02binary")
+    assert is_managed(paths, "blob") is False
+
+
+@pytest.mark.integration
+def test_discover_managed_finds_ad_hoc_wrappers(tmp_path):
+    """A wrapper built from the axes has no preset — the marker is its only record."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(
+        paths, build_spec(agent="codex", provider="ollama", model="qwen3.5:9b")
+    )
+    paths.script_for("stranger").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    assert discover_managed(paths) == ["qwen3.5-codex"]
 
 
 @pytest.mark.integration

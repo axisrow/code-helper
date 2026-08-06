@@ -27,7 +27,7 @@ classifiers = [
 dependencies = []
 
 [project.scripts]
-code-helper = "code_helper.__main__:main"
+code-helper = "code_helper.__main__:cli"
 
 [project.optional-dependencies]
 dev = [

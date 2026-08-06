@@ -21,26 +21,201 @@ parser so they parse BOTH before and after the subcommand.
 """
 
 import argparse
+import sys
+
+
+def _handle_list_axes(what: str) -> int:
+    """Print the agent/provider registries, or the compatibility matrix.
+
+    ``matrix`` is executable documentation: it is rendered by calling
+    ``resolve_shape`` itself, so what it shows and what ``add`` accepts cannot
+    disagree. It is where a user sees that some pairings are simply blank.
+    """
+    from code_helper.errors import CodeHelperError
+    from code_helper.services.model import AGENTS, PROVIDERS, resolve_shape
+
+    if what == "agents":
+        for agent in AGENTS:
+            shapes = ", ".join(sorted(s.value for s in agent.shapes))
+            print(f"{agent.name:10} {agent.description:24} [{shapes}]")
+        return 0
+
+    if what == "providers":
+        for provider in PROVIDERS:
+            shapes = ", ".join(sorted(s.value for s in provider.shapes))
+            print(f"{provider.name:10} {provider.description:24} [{shapes}]")
+        return 0
+
+    # Resolve every cell first: the column has to be as wide as the widest
+    # SHAPE it will hold, not the widest provider name, or the values collide.
+    rows: list[tuple[str, list[str]]] = []
+    for agent in AGENTS:
+        cells = []
+        for provider in PROVIDERS:
+            try:
+                cells.append(resolve_shape(agent, provider).value)
+            except CodeHelperError:
+                cells.append("—")  # genuinely impossible, not merely unbuilt
+        rows.append((agent.name, cells))
+
+    label_width = max([len(a.name) for a in AGENTS] + [0]) + 2
+    widths = [
+        max([len(p.name)] + [len(cells[i]) for _, cells in rows]) + 2
+        for i, p in enumerate(PROVIDERS)
+    ]
+
+    header = "".join(p.name.ljust(w) for p, w in zip(PROVIDERS, widths, strict=True))
+    print(" " * label_width + header)
+    for name, cells in rows:
+        print(
+            name.ljust(label_width)
+            + "".join(c.ljust(w) for c, w in zip(cells, widths, strict=True))
+        )
+    return 0
 
 
 def _handle_list(args: argparse.Namespace) -> int:
-    """Show the wrapper registry + whether each is installed."""
+    """Show installed wrappers, or one of the registries behind them."""
     from code_helper.services.paths import Paths
     from code_helper.services.wrappers import list_wrappers
+
+    what = getattr(args, "what", "wrappers")
+    if what != "wrappers":
+        return _handle_list_axes(what)
 
     list_wrappers(Paths.default())
     return 0
 
 
+def _confirm_overwrite(path) -> bool:
+    """Ask before clobbering a foreign file — only when there is a TTY to ask.
+
+    Off a TTY this returns False WITHOUT reading stdin, which is what makes a
+    scripted run fail fast with the ``--force`` hint instead of blocking
+    forever on input that will never arrive. Same ``isatty`` gating as
+    ``menu.press_any_key``.
+    """
+    if not sys.stdin.isatty():
+        return False
+    answer = input(
+        f"{path} exists and was not created by code-helper. Overwrite? [y/N] "
+    )
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _parse_shape(raw: str | None):
+    """``--shape`` string -> ``ConfigShape``, or None when not given.
+
+    Kept out of the argparse layer (no ``choices=``) so the error reads like
+    every other domain error this CLI raises, and so the valid set comes from
+    the enum rather than a hand-maintained list. Without this, a bogus value
+    escaped as a raw ``ValueError`` traceback — and, because ``main`` only
+    catches ``CodeHelperError``, still exited 0.
+    """
+    from code_helper.errors import CodeHelperError
+    from code_helper.services.model import ConfigShape
+
+    if not raw:
+        return None
+    try:
+        return ConfigShape(raw)
+    except ValueError:
+        valid = ", ".join(s.value for s in ConfigShape)
+        raise CodeHelperError(f"unknown shape: {raw} (valid: {valid})") from None
+
+
 def _handle_add(args: argparse.Namespace) -> int:
-    """Install (or update) the named wrapper."""
+    """Install (or update) a wrapper — from a preset, or from the three axes.
+
+    Disambiguation rule (deterministic, so it survives future name overlaps):
+
+    1. ``--agent``/``--provider`` given -> constructor; ``name`` must be absent.
+    2. otherwise ``name`` is a PRESET, even if an agent happens to share
+       the name.
+    3. a bare ``name`` that is not a preset but IS an agent gets a message
+       showing the constructor form rather than a plain "unknown".
+    """
+    from code_helper.errors import CodeHelperError
+    from code_helper.services.model import get_agent, get_provider, resolve_shape
+    from code_helper.services.models_api import list_models
     from code_helper.services.paths import Paths
     from code_helper.services.secrets import resolve_token
-    from code_helper.services.wrappers import get_spec, install_wrapper
+    from code_helper.services.spec import (
+        build_spec,
+        get_preset,
+        spec_from_preset,
+        suggest_alias,
+    )
+    from code_helper.services.wrappers import install_wrapper
 
     paths = Paths.default()
     dry_run = getattr(args, "dry_run", False)
-    spec = get_spec(args.name)
+    agent_name = getattr(args, "agent", None)
+    provider_name = getattr(args, "provider", None)
+    # Read through getattr throughout: the TUI builds this Namespace itself and
+    # only fills the fields its flow uses, so an absent attribute is normal
+    # here, not a bug.
+    name = getattr(args, "name", None)
+    model = getattr(args, "model", None)
+    alias = getattr(args, "alias", None)
+    using_axes = agent_name is not None or provider_name is not None
+
+    if using_axes and name:
+        raise CodeHelperError(
+            "give either a preset name or --agent/--provider, not both"
+        )
+
+    if using_axes:
+        if not agent_name or not provider_name:
+            raise CodeHelperError("--agent and --provider must be given together")
+        agent = get_agent(agent_name)
+        provider = get_provider(provider_name)
+
+        if getattr(args, "list_models", False):
+            result = list_models(provider)
+            if not result.ok:
+                raise CodeHelperError(result.error)
+            for available in result.models:
+                print(available)
+            return 0
+
+        if not model:
+            raise CodeHelperError(
+                f"--model is required (try: code-helper add --agent {agent.name} "
+                f"--provider {provider.name} --list-models)"
+            )
+
+        shape = _parse_shape(getattr(args, "shape", None))
+        # Resolve compatibility BEFORE anything interactive: a bad pairing must
+        # never reach a secret prompt for a wrapper that will not be written.
+        resolve_shape(agent, provider, preferred=shape)
+        spec = build_spec(
+            agent=agent,
+            provider=provider,
+            model=model,
+            alias=alias or suggest_alias(model, agent.name),
+            shape=shape,
+        )
+    else:
+        if not name:
+            raise CodeHelperError("give a preset name, or --agent with --provider")
+        try:
+            preset = get_preset(name)
+        except CodeHelperError as unknown_preset:
+            # A bare agent name is a likely mistake worth teaching, not just
+            # rejecting.
+            try:
+                agent = get_agent(name)
+            except CodeHelperError:
+                # Re-raise get_preset's own message: it names the known
+                # presets, and that hint matters most in exactly this case.
+                raise unknown_preset from None
+            raise CodeHelperError(
+                f"unknown wrapper name: {name} — {name} is an agent; "
+                f"try: code-helper add --agent {name} --provider ollama "
+                f"--model <model>"
+            ) from None
+        spec = spec_from_preset(preset, model_override=model, alias_override=alias)
 
     if spec.auth == "secret":
         token = resolve_token(
@@ -52,10 +227,11 @@ def _handle_add(args: argparse.Namespace) -> int:
 
     wrote = install_wrapper(
         paths,
-        args.name,
+        spec,
         token=token,
-        model_override=args.model,
         dry_run=dry_run,
+        force=getattr(args, "force", False),
+        confirm=_confirm_overwrite,
     )
     if not wrote:
         print("no changes")
@@ -78,18 +254,36 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     from code_helper.services.wrappers import (
         WRAPPERS,
         describe_all,
+        discover_managed,
         get_spec,
         install_wrapper,
         is_installed,
+        spec_from_installed,
     )
 
     paths = Paths.default()
     dry_run = getattr(args, "dry_run", False)
 
+    def _resolve(name: str):
+        """The INSTALLED wrapper's spec, falling back to the preset registry.
+
+        Reading the installed script first is what makes rotation faithful:
+        it preserves a model the user chose with ``--model`` (re-expanding the
+        preset would silently revert it) and it reaches wrappers built from
+        the axes, which have no preset to look up at all.
+        """
+        return spec_from_installed(paths, name) or get_spec(name)
+
     if args.name:
-        spec = get_spec(args.name)
+        spec = _resolve(args.name)
     else:
+        # Presets plus anything the constructor installed — the latter are
+        # first-class wrappers and were previously unreachable from here.
         secret_specs = [w for w in WRAPPERS if w.auth == "secret"]
+        for found in discover_managed(paths):
+            installed = spec_from_installed(paths, found)
+            if installed is not None and installed.auth == "secret":
+                secret_specs.append(installed)
         if not secret_specs:
             raise CodeHelperError("no wrapper has an editable (secret) token")
         items = describe_all(
@@ -114,7 +308,7 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
                 raise
             print("cancelled")
             return 0
-        spec = get_spec(chosen)
+        spec = _resolve(chosen)
 
     if spec.auth != "secret":
         raise CodeHelperError(f"{spec.name} has no editable token (auth={spec.auth})")
@@ -126,7 +320,10 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     if not token:
         raise CodeHelperError("no token entered — aborting")
 
-    wrote = install_wrapper(paths, spec.name, token=token, dry_run=dry_run)
+    # Pass the resolved spec, never the preset NAME: a name re-expands the
+    # preset from scratch and discards whatever model this wrapper was
+    # actually installed with.
+    wrote = install_wrapper(paths, spec, token=token, dry_run=dry_run)
     if not wrote:
         print("no changes")
     return 0
@@ -183,8 +380,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_list = subparsers.add_parser(
         "list",
-        help="show the wrapper registry + install state",
+        help="show wrappers, or the available agents/providers",
         parents=[sub_flags],
+    )
+    p_list.add_argument(
+        "what",
+        nargs="?",
+        default="wrappers",
+        choices=["wrappers", "agents", "providers", "matrix"],
+        help="what to list (default: wrappers)",
     )
     p_list.set_defaults(func=_handle_list)
 
@@ -193,11 +397,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="install (or update) a wrapper script",
         parents=[sub_flags],
     )
-    p_add.add_argument("name", help="wrapper name (see `code-helper list`)")
+    # `name` is ALWAYS a preset. The constructor is selected by --provider,
+    # never by guessing whether `name` looks more like a preset or an agent —
+    # a guess would silently change meaning the day a preset and an agent
+    # share a name. See _handle_add for the full rule.
+    p_add.add_argument(
+        "name",
+        nargs="?",
+        default=None,
+        help="preset name (see `code-helper list`); omit when using --agent",
+    )
+    p_add.add_argument(
+        "--agent",
+        default=None,
+        help="agent to run, e.g. claude or codex (see `code-helper list agents`)",
+    )
+    p_add.add_argument(
+        "--provider",
+        default=None,
+        help="model backend (see `code-helper list providers`)",
+    )
     p_add.add_argument(
         "--model",
         default=None,
-        help="override the wrapper's default model(s)",
+        help="model name; required with --agent, an override for a preset",
+    )
+    p_add.add_argument(
+        "--alias",
+        default=None,
+        help="wrapper file name (default: <model>-<agent>)",
+    )
+    p_add.add_argument(
+        "--shape",
+        default=None,
+        help="force a config mechanism when several are possible",
+    )
+    p_add.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="overwrite a file code-helper did not create",
+    )
+    p_add.add_argument(
+        "--list-models",
+        action="store_true",
+        default=False,
+        help="print the provider's models and exit (writes nothing)",
     )
     p_add.set_defaults(func=_handle_add)
 
