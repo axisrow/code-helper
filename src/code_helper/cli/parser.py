@@ -103,6 +103,27 @@ def _confirm_overwrite(path) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
+def _parse_shape(raw: str | None):
+    """``--shape`` string -> ``ConfigShape``, or None when not given.
+
+    Kept out of the argparse layer (no ``choices=``) so the error reads like
+    every other domain error this CLI raises, and so the valid set comes from
+    the enum rather than a hand-maintained list. Without this, a bogus value
+    escaped as a raw ``ValueError`` traceback — and, because ``main`` only
+    catches ``CodeHelperError``, still exited 0.
+    """
+    from code_helper.errors import CodeHelperError
+    from code_helper.services.model import ConfigShape
+
+    if not raw:
+        return None
+    try:
+        return ConfigShape(raw)
+    except ValueError:
+        valid = ", ".join(s.value for s in ConfigShape)
+        raise CodeHelperError(f"unknown shape: {raw} (valid: {valid})") from None
+
+
 def _handle_add(args: argparse.Namespace) -> int:
     """Install (or update) a wrapper — from a preset, or from the three axes.
 
@@ -115,12 +136,7 @@ def _handle_add(args: argparse.Namespace) -> int:
        showing the constructor form rather than a plain "unknown".
     """
     from code_helper.errors import CodeHelperError
-    from code_helper.services.model import (
-        ConfigShape,
-        get_agent,
-        get_provider,
-        resolve_shape,
-    )
+    from code_helper.services.model import get_agent, get_provider, resolve_shape
     from code_helper.services.models_api import list_models
     from code_helper.services.paths import Paths
     from code_helper.services.secrets import resolve_token
@@ -169,7 +185,7 @@ def _handle_add(args: argparse.Namespace) -> int:
                 f"--provider {provider.name} --list-models)"
             )
 
-        shape = ConfigShape(args.shape) if getattr(args, "shape", None) else None
+        shape = _parse_shape(getattr(args, "shape", None))
         # Resolve compatibility BEFORE anything interactive: a bad pairing must
         # never reach a secret prompt for a wrapper that will not be written.
         resolve_shape(agent, provider, preferred=shape)
@@ -185,13 +201,15 @@ def _handle_add(args: argparse.Namespace) -> int:
             raise CodeHelperError("give a preset name, or --agent with --provider")
         try:
             preset = get_preset(name)
-        except CodeHelperError:
+        except CodeHelperError as unknown_preset:
             # A bare agent name is a likely mistake worth teaching, not just
             # rejecting.
             try:
                 agent = get_agent(name)
             except CodeHelperError:
-                raise CodeHelperError(f"unknown wrapper name: {name}") from None
+                # Re-raise get_preset's own message: it names the known
+                # presets, and that hint matters most in exactly this case.
+                raise unknown_preset from None
             raise CodeHelperError(
                 f"unknown wrapper name: {name} — {name} is an agent; "
                 f"try: code-helper add --agent {name} --provider ollama "
@@ -236,18 +254,36 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     from code_helper.services.wrappers import (
         WRAPPERS,
         describe_all,
+        discover_managed,
         get_spec,
         install_wrapper,
         is_installed,
+        spec_from_installed,
     )
 
     paths = Paths.default()
     dry_run = getattr(args, "dry_run", False)
 
+    def _resolve(name: str):
+        """The INSTALLED wrapper's spec, falling back to the preset registry.
+
+        Reading the installed script first is what makes rotation faithful:
+        it preserves a model the user chose with ``--model`` (re-expanding the
+        preset would silently revert it) and it reaches wrappers built from
+        the axes, which have no preset to look up at all.
+        """
+        return spec_from_installed(paths, name) or get_spec(name)
+
     if args.name:
-        spec = get_spec(args.name)
+        spec = _resolve(args.name)
     else:
+        # Presets plus anything the constructor installed — the latter are
+        # first-class wrappers and were previously unreachable from here.
         secret_specs = [w for w in WRAPPERS if w.auth == "secret"]
+        for found in discover_managed(paths):
+            installed = spec_from_installed(paths, found)
+            if installed is not None and installed.auth == "secret":
+                secret_specs.append(installed)
         if not secret_specs:
             raise CodeHelperError("no wrapper has an editable (secret) token")
         items = describe_all(
@@ -272,7 +308,7 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
                 raise
             print("cancelled")
             return 0
-        spec = get_spec(chosen)
+        spec = _resolve(chosen)
 
     if spec.auth != "secret":
         raise CodeHelperError(f"{spec.name} has no editable token (auth={spec.auth})")
@@ -284,7 +320,10 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     if not token:
         raise CodeHelperError("no token entered — aborting")
 
-    wrote = install_wrapper(paths, spec.name, token=token, dry_run=dry_run)
+    # Pass the resolved spec, never the preset NAME: a name re-expands the
+    # preset from scratch and discards whatever model this wrapper was
+    # actually installed with.
+    wrote = install_wrapper(paths, spec, token=token, dry_run=dry_run)
     if not wrote:
         print("no changes")
     return 0

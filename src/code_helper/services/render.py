@@ -30,7 +30,7 @@ from code_helper.errors import CodeHelperError
 from code_helper.services.model import ConfigShape
 from code_helper.services.spec import WrapperSpec
 
-__all__ = ["render_script", "MARKER_PREFIX"]
+__all__ = ["render_script", "render_legacy_script", "MARKER_PREFIX"]
 
 #: Second line of every generated script. Presence of this prefix is how
 #: ``is_managed`` tells a file this tool wrote from a file it merely found —
@@ -116,6 +116,23 @@ _RENDERERS: dict[ConfigShape, Callable[[WrapperSpec, str], str]] = {
     ConfigShape.ANTHROPIC_ENV: _render_anthropic_env,
     ConfigShape.OLLAMA_LAUNCH: _render_ollama_launch,
 }
+
+
+def render_legacy_script(spec: WrapperSpec, token: str = "") -> str:
+    """The body the PREVIOUS, markerless release would have written for ``spec``.
+
+    Used by the install guard to recognise the tool's own prior output, which
+    predates :data:`MARKER_PREFIX` and would otherwise be classified as a
+    third-party file (see ``wrappers._is_ours``). Every renderer here differs
+    from its pre-marker ancestor by exactly the marker line — verified against
+    the base commit — so this drops that line rather than duplicating the
+    bodies, which would let the two copies drift apart silently.
+
+    Not part of the write path: nothing renders a legacy body to install it.
+    """
+    body = render_script(spec, token)
+    lines = body.split("\n")
+    return "\n".join(line for line in lines if not line.startswith(MARKER_PREFIX))
 
 
 def render_script(spec: WrapperSpec, token: str = "") -> str:

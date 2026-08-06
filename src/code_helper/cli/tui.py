@@ -263,6 +263,11 @@ def run_tui(args: argparse.Namespace) -> int:
         result = list_models(provider)
         if not result.ok:
             print(result.error)
+            # The next menu frame clears the screen on a TTY, so without a
+            # pause this explanation is erased in the same breath it is
+            # printed and the user sees only an empty picker. Every other
+            # error surface in this file pairs its output with _pause().
+            _pause()
         # Only the first MAX_DIGIT_ITEMS get a digit shortcut, and a long list
         # scrolls a normal terminal past the top of the frame. Show that many
         # and say so, rather than printing 20+ rows where half are unreachable

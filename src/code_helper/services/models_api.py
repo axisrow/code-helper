@@ -24,6 +24,7 @@ installed. The ``fetch`` seam follows the project's existing injection pattern
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -140,9 +141,18 @@ def list_models(
 
     try:
         raw = fetch(url, timeout, auth_token)
-    except (TimeoutError, urllib.error.URLError, OSError) as e:
+    except (
+        TimeoutError,
+        urllib.error.URLError,
+        OSError,
+        http.client.HTTPException,
+    ) as e:
         # ConnectionRefusedError (daemon down) arrives here too — either bare
         # or wrapped in URLError depending on the layer that raised it.
+        # ``HTTPException`` is listed separately because it is NOT an
+        # ``OSError`` subclass: a server closing mid-body raises
+        # ``IncompleteRead``, which would otherwise escape and break the
+        # documented never-raises contract every call site relies on.
         return ModelListResult(
             (),
             url,

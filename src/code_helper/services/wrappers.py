@@ -26,6 +26,7 @@ Presets still overwrite freely; only a *foreign* file triggers the guard.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -33,7 +34,11 @@ from code_helper.backends._atomic import atomic_write
 from code_helper.errors import CodeHelperError
 from code_helper.services.model import Agent, Provider
 from code_helper.services.paths import Paths
-from code_helper.services.render import MARKER_PREFIX, render_script
+from code_helper.services.render import (
+    MARKER_PREFIX,
+    render_legacy_script,
+    render_script,
+)
 from code_helper.services.spec import (
     PRESETS,
     Preset,
@@ -64,6 +69,7 @@ __all__ = [
     "install_wrapper",
     "is_installed",
     "is_managed",
+    "spec_from_installed",
     "list_wrappers",
     "describe_wrapper",
     "describe_all",
@@ -131,6 +137,124 @@ def is_managed(paths: Paths, name: str) -> bool:
     return False
 
 
+def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
+    """Reconstruct the spec of an installed wrapper from its own marker line.
+
+    The marker records ``agent``/``provider``/``shape``; the model comes back
+    out of the rendered body. Together that is every axis, which is what lets
+    ``edit-token`` rotate a credential WITHOUT re-expanding a preset from
+    scratch — the bug that silently reverted a user's ``--model`` choice — and
+    what lets it reach a wrapper built from the axes, which no preset lookup
+    can resolve because no preset describes it.
+
+    Returns None when the file is missing, unreadable, unmarked, or records
+    something this version does not recognise: every caller must be able to
+    fall back to the preset path, so this never raises.
+    """
+    body = _read_text_or_none(paths.script_for(name))
+    if body is None:
+        return None
+
+    marker = next(
+        (ln for ln in body.split("\n")[:2] if ln.startswith(MARKER_PREFIX)), None
+    )
+    if marker is None:
+        return None
+
+    fields = dict(re.findall(r"(\w+)=([^,()\s]+)", marker[len(MARKER_PREFIX) :]))
+    model = _model_from_body(body)
+    if not all((fields.get("agent"), fields.get("provider"), model)):
+        return None
+
+    try:
+        return build_spec(
+            agent=fields["agent"],
+            provider=fields["provider"],
+            model=model,
+            alias=name,
+        )
+    except CodeHelperError:
+        # A marker naming an agent/provider this build no longer knows, or a
+        # pairing that is no longer valid. Not our problem to resolve here.
+        return None
+
+
+def _model_from_body(body: str) -> str | None:
+    """The model a rendered wrapper body was written with, or None.
+
+    Reads the sonnet tier for the env shape and the ``--model`` argument for
+    the launch shape — both are single-quoted by the renderer, so the value is
+    recovered by unquoting rather than by re-parsing shell.
+    """
+    for pattern in (
+        r"^export ANTHROPIC_DEFAULT_SONNET_MODEL='(.*)'$",
+        r"--model '(.*?)' --",
+    ):
+        found = re.search(pattern, body, re.MULTILINE)
+        if found:
+            return found.group(1).replace("'\"'\"'", "'")
+    return None
+
+
+def _read_text_or_none(script: Path) -> str | None:
+    """``script``'s text, or None if it is not decodable as UTF-8.
+
+    The idempotence check runs BEFORE the ownership guard, so an undecodable
+    file here must not raise — otherwise the guard it feeds never runs and a
+    binary in the way aborts with a traceback instead of the guard's message
+    (or its ``--force`` override). ``is_managed`` already treats unreadable as
+    "not ours"; this keeps the earlier read consistent with it.
+    """
+    try:
+        return script.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _is_ours(paths: Paths, spec: WrapperSpec, token: str) -> bool:
+    """True iff the file at ``spec.alias`` is one we may replace unasked.
+
+    Two ways to qualify:
+
+    - it carries the marker (:func:`is_managed`) — the normal case; or
+    - it is byte-identical to what the PREVIOUS, markerless release would
+      have written for this same spec.
+
+    The second clause is the migration path. The marker did not exist before
+    this branch, so every already-installed wrapper lacks it, and without this
+    the guard would classify the tool's own prior output as a third-party file
+    — telling users it "was not created by code-helper" about a file it did
+    create, and leaving ``edit-token`` (which has no ``--force``) with no way
+    forward at all. It is deliberately an EXACT body match against a
+    regenerated legacy render, not a heuristic: a file that differs by one
+    byte from what we would have written is not ours, and still needs
+    ``--force`` or a confirm.
+
+    The token is compared structurally rather than by value: a legacy wrapper
+    embeds whatever token it was installed with, and ``edit-token`` — the very
+    command this migration path exists to unblock — is by definition called
+    with a DIFFERENT one. Matching on the token would therefore fail in the
+    single case that matters most. Everything else in the body must still
+    match exactly.
+    """
+    if is_managed(paths, spec.alias):
+        return True
+    existing = _read_text_or_none(paths.script_for(spec.alias))
+    if existing is None:
+        return False
+    return _strip_token(existing) == _strip_token(render_legacy_script(spec, token))
+
+
+def _strip_token(body: str) -> str:
+    """``body`` with the embedded auth token blanked, for structural comparison."""
+    return "\n".join(
+        "export ANTHROPIC_AUTH_TOKEN="
+        if line.startswith("export ANTHROPIC_AUTH_TOKEN=")
+        else line
+        for line in body.split("\n")
+    )
+
+
 def install_wrapper(
     paths: Paths,
     spec: WrapperSpec | str,
@@ -172,12 +296,12 @@ def install_wrapper(
     body = render_script(spec, token)
     script = paths.script_for(spec.alias)
 
-    if script.exists() and script.read_text(encoding="utf-8") == body:
+    if script.exists() and _read_text_or_none(script) == body:
         return False  # identical script already installed
 
     # Ownership check runs only for a file we did not write. Order matters:
     # the idempotence check above means an unchanged reinstall never prompts.
-    if script.exists() and not is_managed(paths, spec.alias):
+    if script.exists() and not _is_ours(paths, spec, token):
         if dry_run:
             print(f"would overwrite UNMANAGED file {script}")
             return True
