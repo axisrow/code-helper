@@ -561,29 +561,34 @@ def _catalog_self_marked(path: Path) -> bool:
 def _is_our_catalog(paths: Paths, alias: str) -> bool:
     """True iff the catalog for ``alias`` is one we wrote.
 
-    Two ways to qualify, checked in order:
-
-    - it carries our own ``managed_by`` field (:func:`_catalog_self_marked`)
-      — the catalog proves its OWN authorship, independent of any other file;
-      or
-    - its SIBLING ``<alias>.config.toml`` profile carries our marker
-      (fallback, for a catalog written by a release before the ``managed_by``
-      field existed — the same "second, migration-path proof" pattern
-      :func:`_is_ours` uses for the wrapper's pre-marker legacy form).
-
-    Without the first clause, losing the sibling profile (a user tidying
-    ``~/.codex``, a partial restore, a sync conflict) stranded a catalog we
-    genuinely wrote as "foreign" on the next install — a real regression a
-    prior, purely-structural version of this check did not have. A foreign
-    catalog that matches NEITHER clause routes to ``OVERWRITE_FOREIGN`` like
-    the other two slots; the byte-identical idempotence case is handled
-    earlier in :func:`_decide` (SKIP), so this only gates non-identical
-    existing catalogs.
+    Proven ONLY by the catalog's own ``managed_by`` field
+    (:func:`_catalog_self_marked`) — no sibling-profile fallback. An earlier
+    version also accepted "the sibling ``<alias>.config.toml`` profile carries
+    our marker" as a second, migration-path proof (mirroring how
+    :func:`_is_ours` accepts a byte-identical legacy render for the wrapper).
+    That fallback could not distinguish a legacy catalog WE wrote (before the
+    ``managed_by`` field existed) from a FOREIGN hand-curated catalog a user
+    simply placed next to our already-installed, marker-carrying profile —
+    both look identical to it: no ``managed_by``, sibling profile marked.
+    Reachable on an ordinary, idempotent re-install (no ``--alias`` typo, no
+    edge case): install once, hand-edit the catalog's ``context_window`` to a
+    researched value, re-run the SAME install command — the profile
+    byte-matches and is skipped, but the catalog no longer byte-matches, so
+    :func:`_decide` re-checks ownership, the fallback fires, and the
+    researched value is silently flattened back to
+    :data:`_DEFAULT_CONTEXT_WINDOW` with no prompt and no ``--force`` (the
+    catalog is classified "ours", so it never reaches the foreign-file guard
+    at all). :func:`_cleanup_openai_toml_siblings` already chose the
+    self-marker-only answer for the DELETE side of this exact ambiguity (see
+    its docstring); this brings the OVERWRITE side in line rather than leaving
+    it more permissive than a plain deletion. A catalog with no self-marker —
+    legacy or foreign, no longer distinguished — now routes to
+    ``OVERWRITE_FOREIGN`` like the other two slots, recoverable with
+    ``--force`` same as any foreign file; the byte-identical idempotence case
+    is handled earlier in :func:`_decide` (SKIP), so this only gates
+    non-identical existing catalogs.
     """
-    catalog_path = paths.codex_catalog_for(alias)
-    if _catalog_self_marked(catalog_path):
-        return True
-    return _marker_at(paths.codex_config_for(alias))
+    return _catalog_self_marked(paths.codex_catalog_for(alias))
 
 
 class _FilePlan(NamedTuple):

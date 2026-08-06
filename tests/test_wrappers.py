@@ -1247,6 +1247,51 @@ def test_openai_catalog_body_carries_managed_by_marker():
     assert payload[CATALOG_MANAGED_BY_KEY] == CATALOG_MANAGED_BY_VALUE
 
 
+@pytest.mark.integration
+def test_install_openai_toml_refuses_foreign_catalog_next_to_our_profile(tmp_path):
+    """Codex adversarial-review finding: a hand-curated catalog sitting next to
+    OUR already-installed, marker-carrying profile must NOT be silently
+    overwritten on a routine re-install.
+
+    Reproduces the exact reported scenario: install once (profile + catalog
+    both ours), hand-edit the catalog to a researched ``context_window`` (no
+    ``managed_by`` field — indistinguishable from a legacy pre-migration
+    catalog we wrote), then re-run the SAME install. Before this fix,
+    ``_is_our_catalog``'s sibling-profile fallback classified the catalog as
+    "ours" purely because the neighbouring profile carried our marker, so
+    ``_decide`` routed straight to WRITE — no ``OVERWRITE_FOREIGN``, no
+    ``--force`` prompt, no confirm — and the researched value was flattened
+    back to :data:`_DEFAULT_CONTEXT_WINDOW`. The catalog's ownership must now
+    be provable on its OWN (:func:`_catalog_self_marked`), matching the
+    guarantee :func:`_cleanup_openai_toml_siblings` already gives on delete
+    (see ``test_shape_switch_cleanup_leaves_a_legacy_catalog_with_no_self_marker``).
+    """
+    paths = Paths.from_home(tmp_path)
+    spec = _toml_spec(model="glm-5.2:cloud", alias="glm-5-codex")
+    install_wrapper(paths, spec)
+    assert paths.codex_config_for("glm-5-codex").exists()  # profile is ours
+
+    # Hand-curate the catalog with a researched context_window — no managed_by.
+    catalog = paths.codex_catalog_for("glm-5-codex")
+    catalog.write_text(
+        '{"version": 1, "models": [{"id": "hand-curated", "context_window": 999999}]}',
+        encoding="utf-8",
+    )
+
+    # A routine re-install of the SAME spec must refuse the catalog, not
+    # silently flatten it — same guard as any other foreign file.
+    with pytest.raises(CodeHelperError, match="refusing to overwrite"):
+        install_wrapper(paths, spec)
+
+    survived = catalog.read_text(encoding="utf-8")
+    assert "hand-curated" in survived
+    assert "999999" in survived
+
+    # --force still recovers the normal way, same as the other two slots.
+    assert install_wrapper(paths, spec, force=True) is True
+    assert "hand-curated" not in catalog.read_text(encoding="utf-8")
+
+
 @pytest.mark.unit
 def test_validate_registries_rejects_openai_toml_provider_without_wire_api():
     """M5: a provider declaring openai-toml with a bad wire_api fails at
