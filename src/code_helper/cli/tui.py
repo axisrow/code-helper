@@ -49,6 +49,7 @@ one lone toggle that does not deserve main-menu real estate.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 
 __all__ = ["run_tui"]
 
@@ -97,7 +98,12 @@ def run_tui(args: argparse.Namespace) -> int:
     from code_helper.services.paths import Paths
     from code_helper.services.wrappers import WRAPPERS, describe_all, get_spec
 
-    def _pick(items, prompt: str, *, exit_word: str = "назад"):
+    def _pick(
+        items: Sequence[tuple[str, str]],
+        prompt: str,
+        *,
+        exit_word: str = "назад",
+    ) -> str:
         """``select_from_menu`` with a soft cancel folded into the ``_BACK`` value.
 
         A soft cancel (Esc/``q``) and picking the visible ``← назад`` item

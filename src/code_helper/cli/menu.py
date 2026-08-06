@@ -32,6 +32,12 @@ __all__ = ["select_from_menu", "MenuCancelled", "press_any_key"]
 #: within this window.
 _ESC_TIMEOUT = 0.05
 
+#: How long to wait for the paired byte of a CRLF/LFCR Enter. Much shorter
+#: than :data:`_ESC_TIMEOUT`: the pair arrives in the SAME burst from the
+#: terminal driver (microseconds apart), so there is nothing to wait 50ms
+#: for — that wait would just add latency to every single Enter keypress.
+_PAIR_TIMEOUT = 0.002
+
 # CSI parameter bytes (0x30-0x3F) and intermediate bytes (0x20-0x2F) per
 # ECMA-48; a CSI sequence ends at the first byte in the final-byte range
 # (0x40-0x7E).
@@ -64,14 +70,26 @@ class MenuCancelled(Exception):
         self.hard = hard
 
 
-def _translate(first: str, read_more: Callable[[float], str | None]) -> str:
+def _translate(
+    first: str,
+    read_more: Callable[[float], str | None],
+    push_back: Callable[[str], None] = lambda _b: None,
+) -> str:
     """Translate one keypress starting with ``first`` into a key name.
 
     ``read_more(timeout)`` returns the next raw byte if one arrives within
-    ``timeout`` seconds, else ``None`` — a non-blocking peek. This is the
-    ONLY seam this function needs to be fully unit-testable without a real
-    TTY: every escape-sequence edge case (lone Esc, CSI, SS3, stray trailing
-    bytes) is a pure function of ``first`` + a fake ``read_more``.
+    ``timeout`` seconds, else ``None`` — a non-blocking peek. ``push_back(b)``
+    returns a byte this call read but did not consume, so the NEXT
+    :func:`_read_key_raw` sees it instead of it being dropped on the floor.
+    Together these are the only seams this function needs to be fully
+    unit-testable without a real TTY: every escape-sequence edge case (lone
+    Esc, CSI, SS3, stray trailing bytes) is a pure function of ``first`` plus
+    a fake ``read_more``/``push_back``.
+
+    ``push_back`` defaults to a no-op discard, which keeps every caller that
+    only cares about key *names* (and every pre-existing test) working
+    unchanged — pushback only matters to a caller reading a continuous byte
+    stream, i.e. :func:`_read_key_raw`.
 
     Returns one of: ``"UP"``, ``"DOWN"``, ``"HOME"``, ``"END"``,
     ``"PAGE_UP"``, ``"PAGE_DOWN"``, ``"ENTER"``, ``"CANCEL"`` (Esc/``q`` — a
@@ -109,12 +127,15 @@ def _translate(first: str, read_more: Callable[[float], str | None]) -> str:
         return "OTHER"
 
     if first in ("\r", "\n"):
-        # CRLF/LFCR: swallow the paired byte (if any arrives) so it doesn't
-        # fire a second ENTER on the next read. Not validated as the actual
-        # \n/\r pair — in practice nothing else legitimately follows Enter in
-        # this position, so dropping whatever byte (if any) shows up here is
-        # an accepted, documented trade-off.
-        read_more(_ESC_TIMEOUT)
+        # CRLF/LFCR: swallow ONLY the actual paired byte, so it doesn't fire a
+        # second ENTER on the next read. Anything else that shows up is a
+        # genuine next keypress the user made within the window (e.g. Enter
+        # then immediately Down) — it is pushed back rather than dropped, or
+        # the navigation move would silently vanish.
+        pair = "\n" if first == "\r" else "\r"
+        nxt = read_more(_PAIR_TIMEOUT)
+        if nxt is not None and nxt != pair:
+            push_back(nxt)
         return "ENTER"
     if first == "\x03":
         return "HARD_CANCEL"
@@ -133,6 +154,20 @@ def _translate(first: str, read_more: Callable[[float], str | None]) -> str:
     return "OTHER"
 
 
+#: One-byte pushback slot, spanning :func:`_read_key_raw` calls.
+#:
+#: :func:`_translate` peeks one byte past a keypress to detect the LF half of
+#: a CRLF Enter. When that byte turns out to be a real next keypress instead,
+#: it cannot be un-read from the fd — so it is parked here and the NEXT call
+#: consumes it before touching the fd again. Module-level (not a local) for
+#: exactly that reason: the byte has to outlive the call that read it.
+#:
+#: Single-byte is sufficient because only the Enter branch ever pushes back,
+#: and it pushes at most one byte per keypress — which the next call drains
+#: before it can read (and therefore push back) anything else.
+_pending_byte: str | None = None
+
+
 def _read_key_raw(stream=sys.stdin) -> str:
     """Read one raw keypress from a real TTY, fully parsed via :func:`_translate`.
 
@@ -145,7 +180,20 @@ def _read_key_raw(stream=sys.stdin) -> str:
     as "ready" again. Reading raw bytes straight from the fd sidesteps this:
     every byte ``select`` reports ready is read immediately, never parked in
     a layer ``select`` can't see.
+
+    A byte :func:`_translate` peeked but did not consume is parked in
+    :data:`_pending_byte` and drained by the next call — see there.
+
+    .. note::
+       Bytes are decoded ONE AT A TIME with ``errors="replace"``, so a
+       multi-byte UTF-8 character (e.g. a Cyrillic letter) decodes to U+FFFD
+       per byte and translates to several ``"OTHER"`` keys. That is harmless
+       here — the menu only acts on ASCII keys and ignores ``"OTHER"`` — but
+       this function is NOT usable as-is for reading text; that would need
+       accumulating continuation bytes into a full character first.
     """
+    global _pending_byte
+
     import select
     import termios
     import tty
@@ -154,15 +202,26 @@ def _read_key_raw(stream=sys.stdin) -> str:
     old = termios.tcgetattr(fd)
 
     def _read_more(timeout: float) -> str | None:
+        global _pending_byte
+        if _pending_byte is not None:
+            b, _pending_byte = _pending_byte, None
+            return b
         ready, _, _ = select.select([fd], [], [], timeout)
         if not ready:
             return None
         return os.read(fd, 1).decode("utf-8", errors="replace")
 
+    def _push_back(b: str) -> None:
+        global _pending_byte
+        _pending_byte = b
+
     try:
         tty.setraw(fd)
-        first = os.read(fd, 1).decode("utf-8", errors="replace")
-        return _translate(first, _read_more)
+        if _pending_byte is not None:
+            first, _pending_byte = _pending_byte, None
+        else:
+            first = os.read(fd, 1).decode("utf-8", errors="replace")
+        return _translate(first, _read_more, _push_back)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 

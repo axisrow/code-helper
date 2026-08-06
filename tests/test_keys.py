@@ -10,9 +10,31 @@ and returns a translated key name.
 
 from __future__ import annotations
 
+import os
+import sys
+
 import pytest
 
-from code_helper.cli.menu import _translate
+from code_helper.cli.menu import _ESC_TIMEOUT, _PAIR_TIMEOUT, _translate
+
+
+class _StubTermios:
+    """Stand-in for ``termios`` — there is no TTY to save/restore under pytest."""
+
+    TCSADRAIN = 0
+
+    def tcgetattr(self, _fd):
+        return None
+
+    def tcsetattr(self, _fd, _when, _attrs):
+        pass
+
+
+class _StubTty:
+    """Stand-in for ``tty`` — a pipe cannot be put into raw mode."""
+
+    def setraw(self, _fd):
+        pass
 
 
 def _fake_read_more(bytes_available):
@@ -125,20 +147,58 @@ def test_unrecognized_escape_second_byte_is_other():
 @pytest.mark.unit
 def test_enter_cr_swallows_paired_lf():
     read_more = _fake_read_more(["\n"])
-    assert _translate("\r", read_more) == "ENTER"
-    # The LF half of CRLF was consumed — nothing left to fire a second ENTER.
+    pushed = []
+    assert _translate("\r", read_more, pushed.append) == "ENTER"
+    # The LF half of CRLF was consumed — nothing left to fire a second ENTER,
+    # and nothing pushed back (the pair byte is genuinely ours to drop).
     assert read_more(0) is None
+    assert pushed == []
 
 
 @pytest.mark.unit
 def test_enter_lf_swallows_paired_cr():
-    read_more = _fake_read_more(["\r"])
-    assert _translate("\n", read_more) == "ENTER"
+    pushed = []
+    assert _translate("\n", _fake_read_more(["\r"]), pushed.append) == "ENTER"
+    assert pushed == []
 
 
 @pytest.mark.unit
 def test_enter_alone_no_pair_byte():
-    assert _translate("\r", _fake_read_more([])) == "ENTER"
+    pushed = []
+    assert _translate("\r", _fake_read_more([]), pushed.append) == "ENTER"
+    assert pushed == []
+
+
+@pytest.mark.unit
+def test_enter_pushes_back_a_non_pair_byte():
+    """Enter then a fast next keypress: that keypress must NOT be eaten.
+
+    Regression: the parser used to swallow whatever byte showed up after
+    Enter. Pressing Enter and immediately an arrow (within the pair window)
+    silently dropped the arrow — the navigation move just vanished.
+    """
+    pushed = []
+    assert _translate("\r", _fake_read_more(["\x1b"]), pushed.append) == "ENTER"
+    assert pushed == ["\x1b"]
+
+
+@pytest.mark.unit
+def test_enter_pair_peek_uses_the_short_timeout():
+    """The CRLF peek must not wait out the 50ms Esc window on every Enter.
+
+    A CRLF pair arrives in one burst from the terminal driver, so the wait
+    only needs to cover microseconds; using ``_ESC_TIMEOUT`` here would add
+    that latency to literally every Enter keypress.
+    """
+    seen = []
+
+    def read_more(timeout):
+        seen.append(timeout)
+        return None
+
+    assert _translate("\r", read_more, lambda _b: None) == "ENTER"
+    assert seen == [_PAIR_TIMEOUT]
+    assert _PAIR_TIMEOUT < _ESC_TIMEOUT
 
 
 @pytest.mark.unit
@@ -187,3 +247,40 @@ def test_digit_keys(digit):
 @pytest.mark.unit
 def test_unrelated_key_is_other():
     assert _translate("x", _fake_read_more([])) == "OTHER"
+
+
+@pytest.mark.unit
+def test_read_key_raw_pushback_survives_into_the_next_call(monkeypatch):
+    """The byte pushed back by one keypress is returned by the NEXT one.
+
+    This is the half of the Enter fix that ``_translate`` alone cannot prove:
+    a byte peeked past a keypress cannot be un-read from the fd, so it is
+    parked in the module-level pending slot and drained by the following
+    call. Without that slot, "Enter then Down" typed fast loses the Down.
+
+    Drives the real ``_read_key_raw`` over a fake fd (a pipe) with the
+    ``termios``/``tty`` calls stubbed out, since there is no TTY under pytest.
+    """
+    import code_helper.cli.menu as menu
+
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"\r\x1b[B")  # Enter, immediately followed by Down
+
+    monkeypatch.setattr(menu, "_pending_byte", None)
+    monkeypatch.setitem(sys.modules, "termios", _StubTermios())
+    monkeypatch.setitem(sys.modules, "tty", _StubTty())
+
+    class _FakeStream:
+        def fileno(self):
+            return read_fd
+
+    try:
+        assert menu._read_key_raw(_FakeStream()) == "ENTER"
+        # The ESC that began the Down sequence was pushed back, not eaten.
+        assert menu._pending_byte == "\x1b"
+        assert menu._read_key_raw(_FakeStream()) == "DOWN"
+        assert menu._pending_byte is None
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+        menu._pending_byte = None

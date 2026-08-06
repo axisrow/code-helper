@@ -338,15 +338,15 @@ def describe_all(
 def list_wrappers(paths: Paths, *, print_fn=print) -> None:
     """Print the wrapper registry + whether each is present on disk.
 
-    Read-only (no write).
+    Read-only (no write). Goes through :func:`describe_all` like the two
+    menus do, rather than re-deriving ``script_for(...).exists()`` inline —
+    that helper exists to share the ``Paths``/:func:`is_installed` wiring,
+    not only the row format.
     """
-    for spec in WRAPPERS:
-        installed = paths.script_for(spec.name).exists()
-        print_fn(
-            describe_wrapper(
-                spec,
-                installed=installed,
-                installed_word="installed",
-                not_installed_word="not installed",
-            )
-        )
+    for _name, label in describe_all(
+        paths,
+        WRAPPERS,
+        installed_word="installed",
+        not_installed_word="not installed",
+    ):
+        print_fn(label)
