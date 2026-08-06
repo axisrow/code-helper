@@ -182,10 +182,9 @@ def run_tui(args: argparse.Namespace) -> int:
         if name == _BACK:
             return
 
-        spec = get_spec(name)
-        default_model = (
-            spec.launch_model if spec.launch_command is not None else spec.sonnet_model
-        )
+        # `spec.model` is the resolved model whatever the config shape — the
+        # old launch_command/sonnet_model branch is gone with the flat spec.
+        default_model = get_spec(name).model
         model_items = [
             ("__default__", f"оставить по умолчанию ({default_model})"),
             ("__custom__", "указать свою модель"),

@@ -1,236 +1,98 @@
-"""The wrapper registry + generated-script lifecycle (install/list).
+"""Generated-script lifecycle: render → install → describe.
 
-A "wrapper" is a small bash script in ``~/.local/bin`` that exports the
-``ANTHROPIC_*`` environment variables Claude Code reads for its model tiers,
-then execs ``claude "$@"`` — redirecting Claude Code at a different backend
-(a local Ollama daemon, Z.ai, or any other Anthropic-API-compatible endpoint)
-without touching Claude Code's own config.
+A "wrapper" is a small bash script in ``~/.local/bin`` that points a coding
+agent at a model backend. What a wrapper *is* now lives in
+``services/spec.py`` (the resolved agent × provider × model combination) and
+``services/render.py`` (how that becomes a script body); this module owns only
+the lifecycle around it — writing the file, reporting what is installed, and
+formatting listings.
 
-Wrappers are DATA, not hand-written strings — one :class:`WrapperSpec` per
-provider in :data:`WRAPPERS`. This mirrors the archived project's
-``services/aliases.py`` design (aliases-as-data), applied to generated scripts
-instead of ``.zshrc`` fence lines.
+The ``auth`` mode (carried by the provider) decides how sensitive the on-disk
+script is:
 
-The ``auth`` field is what makes this generic across providers with wildly
-different trust models:
+- ``"literal"`` / ``"none"`` — no real credential in the file, mode ``0o755``.
+- ``"secret"`` — a real key is embedded in plain text, mode ``0o700``
+  (owner-only).
 
-- ``"literal"`` — the token is a known, non-secret constant (e.g. Ollama's
-  local daemon accepts the literal string ``"ollama"``). No prompt, no env
-  lookup, mode ``0o755``.
-- ``"secret"`` — the token is a real credential (e.g. a Z.ai API key),
-  resolved via :func:`code_helper.services.secrets.resolve_token` and never
-  logged. Mode ``0o700`` (owner-only — the script carries the secret in plain
-  text).
-
-``install_wrapper`` writes ``~/.local/bin/<name>`` unconditionally by name —
-whatever is already there (helper-generated or not) gets overwritten. There
-is no ownership marker and no "foreign file" guard.
+**Ownership.** Every generated script carries a marker comment
+(``render.MARKER_PREFIX``) on its second line, and :func:`is_managed` reads it
+back. This reverses the project's earlier "no ownership guard" position, and
+the reason is that the position's precondition disappeared: overwriting by name
+was safe while the set of names was closed and curated (``get_spec`` admitted
+exactly three), but a user-chosen ``--alias`` can name anything on ``PATH`` —
+including ``~/.local/bin/claude``, a real working symlink on a normal install.
+Presets still overwrite freely; only a *foreign* file triggers the guard.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from pathlib import Path
 
 from code_helper.backends._atomic import atomic_write
 from code_helper.errors import CodeHelperError
+from code_helper.services.model import Agent, Provider
 from code_helper.services.paths import Paths
+from code_helper.services.render import MARKER_PREFIX, render_script
+from code_helper.services.spec import (
+    PRESETS,
+    Preset,
+    TierModels,
+    WrapperSpec,
+    build_spec,
+    get_preset,
+    preset_names,
+    spec_from_preset,
+    suggest_alias,
+)
 
 __all__ = [
+    # re-exported so existing imports keep working
     "WrapperSpec",
-    "WRAPPERS",
+    "TierModels",
+    "Preset",
+    "PRESETS",
+    "Agent",
+    "Provider",
+    "build_spec",
+    "get_preset",
+    "preset_names",
+    "spec_from_preset",
+    "suggest_alias",
     "render_script",
+    # lifecycle
     "install_wrapper",
     "is_installed",
+    "is_managed",
     "list_wrappers",
     "describe_wrapper",
     "describe_all",
+    "discover_managed",
     "get_spec",
+    "WRAPPERS",
 ]
 
 #: Owner-only. A "secret" wrapper carries a real credential in plain text —
-#: group/other must have NO bits. A "literal" wrapper (no real secret) is
-#: 0o755 — a normal executable.
+#: group/other must have NO bits. Anything else is 0o755, a normal executable.
 _MODE_SECRET = 0o700
 _MODE_LITERAL = 0o755
 
 
-@dataclass(frozen=True)
-class WrapperSpec:
-    """One managed wrapper — a generated ``~/.local/bin/<name>`` script.
-
-    Two shapes, discriminated by ``launch_command``:
-
-    - **env-var shape** (``launch_command is None``, the original form): the
-      script exports ``ANTHROPIC_*`` env vars and runs ``claude "$@"``.
-      ``base_url``/``haiku_model``/``sonnet_model``/``opus_model``/
-      ``subagent_model`` describe the endpoint + tier models.
-    - **command shape** (``launch_command`` set): the script ``exec``s a
-      provider's own launcher (e.g. ``ollama launch claude --model {model}``),
-      letting that launcher set up ``ANTHROPIC_*`` itself. ``launch_model`` is
-      the default model substituted into the ``{model}`` placeholder; the
-      env-var fields are unused. ``--model`` overrides ``launch_model``.
-
-    ``auth`` selects how the token is obtained and how sensitive the on-disk
-    script is treated (see module docstring). ``auth_value`` is the literal
-    token when ``auth == "literal"`` and is ignored otherwise. The env-var
-    fields carry defaults so a command-shape spec only names what it uses.
-    """
-
-    name: str
-    base_url: str = ""
-    haiku_model: str = ""
-    sonnet_model: str = ""
-    opus_model: str = ""
-    subagent_model: str | None = None
-    auth: str = "literal"  # "literal" | "secret"
-    auth_value: str = ""
-    token_env_var: str = ""
-    launch_command: str | None = None
-    launch_model: str = ""
-    description: str = ""
-
-
-_DEEPSEEK_MODEL = "deepseek-v4-flash:0731-cloud"
-
-#: The full registry — every wrapper this tool knows how to generate.
-WRAPPERS: list[WrapperSpec] = [
-    WrapperSpec(
-        name="deepseek",
-        base_url="http://127.0.0.1:11434",
-        haiku_model=_DEEPSEEK_MODEL,
-        sonnet_model=_DEEPSEEK_MODEL,
-        opus_model=_DEEPSEEK_MODEL,
-        subagent_model=_DEEPSEEK_MODEL,
-        auth="literal",
-        auth_value="ollama",
-        description="Claude Code → deepseek-v4-flash via the local Ollama daemon",
-    ),
-    WrapperSpec(
-        name="glm",
-        base_url="https://api.z.ai/api/anthropic",
-        haiku_model="glm-4.7",
-        sonnet_model="glm-5-turbo",
-        opus_model="glm-5.2[1m]",
-        subagent_model=None,
-        auth="secret",
-        token_env_var="ZAI_API_KEY",
-        description="Claude Code → Z.ai",
-    ),
-    WrapperSpec(
-        name="glm-ollama",
-        auth="literal",
-        launch_command="ollama launch claude --model {model}",
-        launch_model="glm-5.2:cloud",
-        description="Claude Code → glm-5.2:cloud via `ollama launch claude`",
-    ),
-]
-
-
 def get_spec(name: str) -> WrapperSpec:
-    """Return the :class:`WrapperSpec` for ``name``.
+    """Return the resolved spec for the preset called ``name``.
+
+    Kept as the preset lookup so callers written against the old flat registry
+    keep working.
 
     Raises:
-        CodeHelperError: if ``name`` is not a known wrapper. Fails BEFORE any
-            token is resolved or file is touched — a typo cannot trigger an
-            interactive secret prompt for a name that will never be used.
+        CodeHelperError: unknown name. Fails BEFORE any token is resolved or
+            file touched — a typo must not trigger a secret prompt.
     """
-    for spec in WRAPPERS:
-        if spec.name == name:
-            return spec
-    known = ", ".join(w.name for w in WRAPPERS)
-    raise CodeHelperError(f"unknown wrapper name: {name} (known: {known})")
+    return spec_from_preset(get_preset(name))
 
 
-def _shell_single_quote(value: str) -> str:
-    """POSIX-safe single-quoting: wraps ``value`` so it is always ONE shell word.
-
-    Every value interpolated into the generated script body goes through this
-    — the token, the base URL, and every model name — because ANY of them can
-    now be adversarial input: the token may come from an untrusted env var,
-    and the model name can come straight from the user via ``--model``. A bare
-    ``f"'{value}'"`` is not safe: a value containing a single quote (``'``)
-    closes the string early and lets the rest be interpreted as shell syntax
-    (arbitrary command execution when the generated script later runs). The
-    standard escape is to close the quote, emit an escaped literal quote, and
-    reopen: ``'`` → ``'"'"'``. Applied to a value with none, it is a no-op
-    except for the wrapping quotes.
-    """
-    return "'" + value.replace("'", "'\"'\"'") + "'"
-
-
-def render_script(
-    spec: WrapperSpec, token: str, *, model_override: str | None = None
-) -> str:
-    """Return the bash wrapper body for ``spec`` (pure, no IO).
-
-    Two shapes, discriminated by ``spec.launch_command``:
-
-    - **command shape** (``launch_command`` set): ``exec`` the provider's own
-      launcher (e.g. ``ollama launch claude --model {model} -- "$@"``), which
-      sets up ``ANTHROPIC_*`` itself. ``launch_model`` is the default model
-      substituted into the ``{model}`` placeholder; ``model_override``
-      replaces it. The model is the only user-controlled interpolation and is
-      single-quoted via :func:`_shell_single_quote` BEFORE substitution
-      (``str.replace``, not ``str.format``, so a model can never hijack the
-      template); ``launch_command`` itself is a trusted registry constant.
-      The ``--`` before ``"$@"`` is required: without it, the launcher parses
-      forwarded Claude flags (e.g. ``-p``) as its own and rejects them.
-    - **env-var shape** (``launch_command is None``): a subshell that exports
-      the Anthropic endpoint + auth token + the tier-model envs
-      (haiku/sonnet/opus, and the subagent model if the spec has one), then runs
-      ``claude "$@"``. Every interpolated value is single-quoted via
-      :func:`_shell_single_quote` — including model names, which after
-      ``model_override`` can be arbitrary user input from ``--model``.
-
-    ``ANTHROPIC_API_KEY=` is always emptied in the env-var shape — this mirrors
-    how Ollama's own ``ollama launch claude`` integration does it
-    (``cmd/launch/claude.go``): a real Anthropic key inherited from the
-    caller's environment would otherwise take priority over
-    ``ANTHROPIC_AUTH_TOKEN`` and silently defeat the wrapper.
-
-    Args:
-        spec: The wrapper's provider description (endpoint + tier models, or a
-            launch command).
-        token: The resolved auth token to embed (literal or secret). Ignored by
-            the command shape.
-        model_override: When given, used for ALL tier models AND the subagent
-            model (env-var shape) or for the single ``{model}`` placeholder
-            (command shape), instead of ``spec``'s defaults (the ``--model``
-            flag).
-
-    Returns:
-        The complete script body, including the shebang.
-    """
-    if spec.launch_command is not None:
-        model = model_override or spec.launch_model
-        quoted_model = _shell_single_quote(model)
-        cmd = spec.launch_command.replace("{model}", quoted_model)
-        lines = ["#!/bin/bash", f'exec {cmd} -- "$@"']
-        return "\n".join(lines) + "\n"
-
-    haiku = model_override or spec.haiku_model
-    sonnet = model_override or spec.sonnet_model
-    opus = model_override or spec.opus_model
-    subagent = (model_override or spec.subagent_model) if spec.subagent_model else None
-
-    lines = [
-        "#!/bin/bash",
-        "(",
-        f"export ANTHROPIC_BASE_URL={_shell_single_quote(spec.base_url)}",
-        f"export ANTHROPIC_AUTH_TOKEN={_shell_single_quote(token)}",
-        "export ANTHROPIC_API_KEY=",
-        f"export ANTHROPIC_DEFAULT_HAIKU_MODEL={_shell_single_quote(haiku)}",
-        f"export ANTHROPIC_DEFAULT_SONNET_MODEL={_shell_single_quote(sonnet)}",
-        f"export ANTHROPIC_DEFAULT_OPUS_MODEL={_shell_single_quote(opus)}",
-    ]
-    if subagent is not None:
-        lines.append(
-            f"export CLAUDE_CODE_SUBAGENT_MODEL={_shell_single_quote(subagent)}"
-        )
-    lines.append('claude "$@"')
-    lines.append(")")
-    return "\n".join(lines) + "\n"
+#: Backwards-compatible view of the preset registry as resolved specs.
+WRAPPERS: list[WrapperSpec] = [spec_from_preset(p) for p in PRESETS]
 
 
 def _mode_for(spec: WrapperSpec) -> int:
@@ -238,46 +100,95 @@ def _mode_for(spec: WrapperSpec) -> int:
 
 
 def is_installed(paths: Paths, name: str) -> bool:
-    """True iff ``~/.local/bin/<name>`` currently exists."""
-    get_spec(name)  # validate the name
+    """True iff ``~/.local/bin/<name>`` currently exists.
+
+    Pure existence — says nothing about who wrote it. Use :func:`is_managed`
+    for that. The name is no longer validated against a registry here: an
+    ad-hoc alias has no preset, and ``script_for`` already refuses anything
+    that is not a single path component.
+    """
     return paths.script_for(name).exists()
+
+
+def is_managed(paths: Paths, name: str) -> bool:
+    """True iff ``~/.local/bin/<name>`` exists AND carries our marker.
+
+    Reads only the first couple of lines. Anything unreadable (a binary, a
+    permission error, a dangling symlink) counts as *not* ours — the safe
+    answer, since it makes the guard refuse rather than clobber.
+    """
+    script = paths.script_for(name)
+    try:
+        with script.open("r", encoding="utf-8") as fh:
+            for _ in range(2):
+                line = fh.readline()
+                if not line:
+                    break
+                if line.startswith(MARKER_PREFIX):
+                    return True
+    except (OSError, UnicodeDecodeError):
+        return False
+    return False
 
 
 def install_wrapper(
     paths: Paths,
-    name: str,
+    spec: WrapperSpec | str,
     *,
     token: str = "",
     model_override: str | None = None,
     dry_run: bool = False,
+    force: bool = False,
+    confirm: Callable[[Path], bool] | None = None,
 ) -> bool:
-    """Generate the ``name`` wrapper script. Return True iff it wrote.
+    """Write ``spec``'s script. Return True iff it wrote (or would, in dry-run).
 
-    Overwrites ``~/.local/bin/<name>`` unconditionally — whatever was there
-    before (helper-generated or not) is replaced. Idempotent: a
-    byte-identical re-install is a no-op (returns False).
+    Idempotent: a byte-identical re-install is a no-op.
 
     Args:
-        paths: Resolved :class:`Paths` (``paths.bin_dir``).
-        name: The wrapper name — must be a key in :data:`WRAPPERS`.
-        token: The auth token to embed. The caller resolves this BEFORE
-            calling — ``spec.auth_value`` for ``auth == "literal"`` specs, or
-            :func:`code_helper.services.secrets.resolve_token` for
-            ``auth == "secret"`` specs.
-        model_override: Forwarded to :func:`render_script`.
-        dry_run: When True, print the would-be path and write nothing.
-
-    Returns:
-        True iff a write happened (or would happen, under ``dry_run``).
+        paths: Resolved :class:`Paths`.
+        spec: A :class:`WrapperSpec`, or a preset name (resolved via
+            :func:`get_spec`) for backwards compatibility.
+        token: Auth token to embed. Resolved by the CALLER — ``auth_value`` for
+            literal providers, ``resolve_token`` for secret ones.
+        model_override: Only meaningful with a preset name; ignored when a
+            fully-resolved spec is passed (its model is already decided).
+        dry_run: Print what would happen, write nothing, ask nothing.
+        force: Overwrite a foreign file without asking.
+        confirm: Asked before overwriting a foreign file. ``None`` means "no
+            way to ask" and is treated as refusal — this is what guarantees a
+            non-interactive run FAILS FAST instead of blocking on stdin.
 
     Raises:
-        CodeHelperError: unknown name.
+        CodeHelperError: a foreign file is in the way and was not confirmed.
     """
-    spec = get_spec(name)
-    body = render_script(spec, token, model_override=model_override)
-    script = paths.script_for(name)
+    resolved: WrapperSpec = (
+        spec_from_preset(get_preset(spec), model_override=model_override)
+        if isinstance(spec, str)
+        else spec
+    )
+    spec = resolved
+
+    body = render_script(spec, token)
+    script = paths.script_for(spec.alias)
+
     if script.exists() and script.read_text(encoding="utf-8") == body:
-        return False  # idempotent: identical script already installed
+        return False  # identical script already installed
+
+    # Ownership check runs only for a file we did not write. Order matters:
+    # the idempotence check above means an unchanged reinstall never prompts.
+    if script.exists() and not is_managed(paths, spec.alias):
+        if dry_run:
+            print(f"would overwrite UNMANAGED file {script}")
+            return True
+        if not force:
+            if confirm is None or not confirm(script):
+                raise CodeHelperError(
+                    f"{script} exists and was not created by code-helper — "
+                    f"refusing to overwrite (use --force)"
+                )
+        print(f"overwriting unmanaged file {script}")
+
     if dry_run:
         print(f"would write {script}")
         return True
@@ -350,3 +261,28 @@ def list_wrappers(paths: Paths, *, print_fn=print) -> None:
         not_installed_word="not installed",
     ):
         print_fn(label)
+
+    ad_hoc = discover_managed(paths)
+    if ad_hoc:
+        print_fn("")
+        print_fn("ad-hoc wrappers:")
+        for name in ad_hoc:
+            print_fn(f"{name:12} {'installed':13}")
+
+
+def discover_managed(paths: Paths) -> list[str]:
+    """Names of managed wrappers on disk that are NOT presets.
+
+    Without this, a wrapper built from the axes would be invisible to ``list``
+    — the preset registry cannot know about it, and there is no state file.
+    The marker in the script body is the only record that it is ours.
+    """
+    if not paths.bin_dir.is_dir():
+        return []
+    known = set(preset_names())
+    found = [
+        entry.name
+        for entry in paths.bin_dir.iterdir()
+        if entry.is_file() and entry.name not in known and is_managed(paths, entry.name)
+    ]
+    return sorted(found)
