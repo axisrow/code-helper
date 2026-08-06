@@ -804,14 +804,27 @@ def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) ->
     ever reused for OPENAI_TOML again).
 
     Each sibling is gated by ITS OWN ownership proof, independently —
-    :func:`_is_ours_marker_only` for the profile, :func:`_is_our_catalog` for
-    the catalog. This is deliberately NOT "the profile's marker decides both":
-    an earlier version inferred the catalog's fate from the profile alone,
-    which meant a hand-curated catalog sitting next to OUR profile was deleted
-    with no ``--force`` and no prompt — the exact thing the install-time
-    ownership guard exists to prevent, just reached through a different door.
-    A foreign profile or foreign catalog is left untouched, matching what the
-    install guard would have refused to overwrite.
+    :func:`_is_ours_marker_only` for the profile, :func:`_catalog_self_marked`
+    for the catalog. This is deliberately NOT "the profile's marker decides
+    both": an earlier version inferred the catalog's fate from the profile
+    alone, which meant a hand-curated catalog sitting next to OUR profile was
+    deleted with no ``--force`` and no prompt — the exact thing the
+    install-time ownership guard exists to prevent, just reached through a
+    different door. A foreign profile or foreign catalog is left untouched,
+    matching what the install guard would have refused to overwrite.
+
+    Note this is stricter than :func:`_is_our_catalog` (the install-time
+    check, which also accepts the sibling-marker fallback for a catalog
+    written before :data:`render.CATALOG_MANAGED_BY_KEY` existed): a DELETE
+    has no ``--force`` escape hatch the way an overwrite does, and the
+    sibling-marker proof is fundamentally ambiguous for a delete — "the
+    profile next to this catalog is ours" cannot distinguish a legacy catalog
+    WE wrote from a foreign one a user happened to drop next to our profile.
+    An install-time overwrite gated on that proof is at least reversible by
+    restoring a backup; an unprompted delete is not, so cleanup only removes
+    what the catalog can prove about ITSELF. A legacy catalog with no
+    self-marker is deliberately left as a harmless orphan rather than risking
+    a foreign file's silent deletion — the safe direction to be wrong in.
 
     Best-effort by design: called AFTER the wrapper install already succeeded
     (see ``install_wrapper``), so a failure here must never make a successful
@@ -826,13 +839,20 @@ def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) ->
     """
     import sys
 
+    config_path = paths.codex_config_for(alias)
+    catalog_path = paths.codex_catalog_for(alias)
+
+    to_remove = [
+        path
+        for path, is_ours in (
+            (catalog_path, _catalog_self_marked(catalog_path)),
+            (config_path, _is_ours_marker_only(config_path)),
+        )
+        if path.exists() and is_ours
+    ]
+
     changed = False
-    for path, owns in (
-        (paths.codex_config_for(alias), _is_ours_marker_only),
-        (paths.codex_catalog_for(alias), lambda _p: _is_our_catalog(paths, alias)),
-    ):
-        if not path.exists() or not owns(path):
-            continue
+    for path in to_remove:
         if dry_run:
             print(f"would remove orphaned sibling {path}")
             changed = True

@@ -1098,6 +1098,48 @@ def test_shape_switch_cleanup_refuses_to_delete_a_foreign_catalog(tmp_path):
 
 
 @pytest.mark.integration
+def test_shape_switch_cleanup_leaves_a_legacy_catalog_with_no_self_marker(tmp_path):
+    """A legacy catalog (no ``managed_by`` field — pre-migration, or someone
+    else's file sitting next to our profile) is left as a harmless orphan on
+    a shape switch, rather than deleted on the strength of the sibling
+    profile's marker alone.
+
+    Cleanup deliberately does NOT use ``_is_our_catalog``'s sibling-marker
+    fallback (unlike the install-time overwrite guard, which does, and which
+    a user can override with ``--force``): a delete has no such escape hatch,
+    and "the profile next to this catalog is ours" cannot distinguish a
+    catalog WE wrote before the ``managed_by`` field existed from a foreign
+    one a user happened to drop next to our profile. Left behind rather than
+    silently destroyed — the safe direction to be wrong in.
+    """
+    paths = Paths.from_home(tmp_path)
+    alias = "glm-5-codex"
+    install_wrapper(paths, _toml_spec(model="glm-5.2:cloud", alias=alias))
+
+    # Replace the catalog with a body carrying no self-marker — indistinguishable,
+    # from the catalog's own JSON alone, from a foreign hand-curated file.
+    catalog = paths.codex_catalog_for(alias)
+    catalog.write_text(
+        '{"version": 1, "models": [{"id": "glm-5.2:cloud", "context_window": 128000}]}',
+        encoding="utf-8",
+    )
+
+    launcher_spec = build_spec(
+        agent="claude",
+        provider="ollama",
+        model="glm-5:cloud",
+        alias=alias,
+        shape=ConfigShape.OLLAMA_LAUNCH,
+    )
+    assert install_wrapper(paths, launcher_spec) is True
+
+    # The marked profile IS cleaned up; the unmarked catalog is left behind —
+    # orphaned clutter, not data loss.
+    assert not paths.codex_config_for(alias).exists()
+    assert catalog.exists()
+
+
+@pytest.mark.integration
 def test_spec_from_installed_survives_corrupt_toml_profile(tmp_path):
     """M2: a hand-truncated/corrupt TOML profile degrades to None, never raises.
 
