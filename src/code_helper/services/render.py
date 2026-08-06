@@ -142,10 +142,21 @@ def _render_openai_toml(spec: WrapperSpec, token: str) -> str:
 _DEFAULT_CONTEXT_WINDOW = 128000
 _DEFAULT_MAX_OUTPUT = 32768
 
-#: The ``[model_providers.X]`` table name written into the profile. Stable so
-#: the profile the wrapper points at (via ``--profile <alias>``) and the table
-#: name inside it cannot drift apart.
-_PROVIDER_TABLE = "ollama-launch"
+
+def _openai_base_url(provider_base_url: str) -> str:
+    """Derive the OpenAI-compatible ``base_url`` for the TOML profile.
+
+    A dual-shape provider like ollama serves both the Anthropic protocol and
+    the OpenAI ``/v1`` endpoint off the same root, so its ``base_url`` carries
+    no version segment and the profile needs ``/v1/`` appended. An OpenAI-only
+    provider follows the ``/v1``-suffix convention instead, so appending again
+    would double it (``.../v1/v1/``) and every request 404s. Detect the suffix
+    and append only when it is absent — one renderer serving both shapes.
+    """
+    root = provider_base_url.rstrip("/")
+    if root.endswith("/v1"):
+        return root + "/"
+    return root + "/v1/"
 
 
 def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
@@ -156,32 +167,43 @@ def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
     ``[profiles.X]`` tables inside ``config.toml`` are rejected — so this is a
     whole file, not a fragment. ``config.toml`` is never read or modified.
 
-    ``base_url`` gets ``/v1/`` appended because the provider's ``base_url`` is
-    the Anthropic-protocol root (no version segment), which is what
-    ``ANTHROPIC_ENV`` wants; the OpenAI-compatible endpoint this profile
-    targets lives under ``/v1``. Derived here rather than stored on the
-    provider, so the one field serves both shapes without a conflict.
+    Every provider-specific value derives from ``spec.provider`` so the shape
+    is a real extension point — wiring a second OpenAI-compatible provider is
+    only a ``PROVIDERS`` entry, not a renderer edit:
+
+    - the ``[model_providers.<name>]`` table key and the matching
+      ``model_provider`` value are ``spec.provider.name`` (a registry constant
+      constrained to a bare-key-safe shape at import time by
+      ``model._validate_registries``, so it is interpolated bare like
+      ``agent.binary`` — the one unquoted interpolation);
+    - the display ``name`` is ``spec.provider.description`` (falling back to
+      the provider name);
+    - ``base_url`` is :func:`_openai_base_url` (handles both ``/v1``-suffixed
+      and bare roots);
+    - ``wire_api`` is ``spec.provider.wire_api``.
 
     ``catalog_path`` is the already-resolved ``<alias>.model.json`` location,
     passed in (rather than computed) because this function is pure and has no
     ``Paths`` — the install path owns the resolution.
 
     The marker on line 1 is the same comment the bash wrapper carries, which is
-    what lets the ownership guard recognise this as ours. The profile name
-    inside (``model_provider``) is a fixed registry-style identifier, not user
-    input, so it needs no quoting.
+    what lets the ownership guard recognise this as ours. Every quoted value
+    goes through :func:`_toml_string`; the table key is the only bare
+    interpolation, safe by the import-time check.
     """
-    base_url = spec.provider.base_url.rstrip("/") + "/v1/"
+    table = spec.provider.name
+    display_name = spec.provider.description or spec.provider.name
+    base_url = _openai_base_url(spec.provider.base_url)
     return (
         f"{_marker(spec)}\n"
         f'model = "{_toml_string(spec.model)}"\n'
-        f'model_provider = "{_PROVIDER_TABLE}"\n'
+        f'model_provider = "{_toml_string(table)}"\n'
         f'model_catalog_json = "{_toml_string(catalog_path)}"\n'
         "\n"
-        f"[model_providers.{_PROVIDER_TABLE}]\n"
-        f'name = "Ollama"\n'
+        f"[model_providers.{table}]\n"
+        f'name = "{_toml_string(display_name)}"\n'
         f'base_url = "{_toml_string(base_url)}"\n'
-        f'wire_api = "{spec.provider.wire_api}"\n'
+        f'wire_api = "{_toml_string(spec.provider.wire_api)}"\n'
     )
 
 
@@ -207,12 +229,32 @@ def openai_catalog_body(spec: WrapperSpec) -> str:
 def _toml_string(value: str) -> str:
     """Quote ``value`` for a TOML basic string.
 
-    TOML basic strings are ``"..."`` with ``\\`` and ``"`` escaped; a bare
-    model like ``glm-5.2:cloud`` (``:``/``.``) MUST be quoted or Codex rejects
-    the file. This is the TOML equivalent of the shell ``_shell_single_quote``
-    — a per-target escape for values that originate outside the registry.
+    TOML basic strings are ``"..."`` with ``\\`` and ``"`` escaped, and they
+    forbid literal control characters (U+0000–U+001F except tab) — a ``--model``
+    containing a newline would otherwise produce a profile Codex rejects, while
+    the shell sibling of the same install handles it fine via
+    :func:`_shell_single_quote`. Control characters are emitted as their TOML
+    escapes (``\\uXXXX`` is always valid). This is the per-target equivalent of
+    the shell single-quote escape, applied to every value that originates
+    outside the registry (models, base URLs, ``wire_api``).
     """
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    out: list[str] = []
+    for ch in value:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 #: Shape -> renderer. Each renderer returns the bash WRAPPER body only; the

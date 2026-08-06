@@ -184,7 +184,16 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
         return _spec_from_legacy_body(name, body)
 
     fields = dict(re.findall(r"(\w+)=([^,()\s]+)", marker[len(MARKER_PREFIX) :]))
-    model = _model_from_body(body)
+
+    # The OPENAI_TOML wrapper body embeds no model — it lives in the sibling
+    # TOML profile — so recover it from there rather than the body. The other
+    # shapes carry the model in the rendered script itself.
+    shape_field = fields.get("shape")
+    if shape_field == ConfigShape.OPENAI_TOML.value:
+        model = _model_from_toml_profile(paths, name)
+    else:
+        model = _model_from_body(body)
+
     if not all((fields.get("agent"), fields.get("provider"), model)):
         return None
 
@@ -271,12 +280,94 @@ def _model_from_body(body: str) -> str | None:
     "the model" when tiers differ) and the ``--model`` argument for the launch
     shape. This identifies the wrapper; it does not describe it — see
     :func:`_tiers_from_body` for the full env-shape configuration.
+
+    Returns None for the ``OPENAI_TOML`` shape: its wrapper body is just
+    ``exec codex --profile <alias> "$@"`` and embeds no model — the model lives
+    in the sibling ``~/.codex/<alias>.config.toml`` profile, read by
+    :func:`_model_from_toml_profile`.
     """
     sonnet = _env_value(body, "ANTHROPIC_DEFAULT_SONNET_MODEL")
     if sonnet is not None:
         return sonnet
     found = re.search(r"--model '(.*?)' --", body)
     return found.group(1).replace("'\"'\"'", "'") if found else None
+
+
+def _toml_unescape(value: str) -> str:
+    """Reverse :func:`render._toml_string` for a TOML basic-string body.
+
+    Only the escapes ``_toml_string`` emits are handled (``\\\\``, ``\\"``,
+    ``\\n``, ``\\r``, ``\\t``, ``\\uXXXX``) — the values we write back out are
+    the only values this ever reads. Used to recover the ``model`` from a
+    profile we wrote, so a model containing a quote or a newline round-trips
+    instead of being read back with its escapes still literal.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(value):
+        ch = value[i]
+        if ch == "\\" and i + 1 < len(value):
+            nxt = value[i + 1]
+            if nxt == "\\":
+                out.append("\\")
+                i += 2
+                continue
+            if nxt == '"':
+                out.append('"')
+                i += 2
+                continue
+            if nxt == "n":
+                out.append("\n")
+                i += 2
+                continue
+            if nxt == "r":
+                out.append("\r")
+                i += 2
+                continue
+            if nxt == "t":
+                out.append("\t")
+                i += 2
+                continue
+            if nxt == "u" and i + 5 < len(value) + 1:
+                hexpart = value[i + 2 : i + 6]
+                if len(hexpart) == 4 and all(
+                    c in "0123456789abcdef" for c in hexpart.lower()
+                ):
+                    out.append(chr(int(hexpart, 16)))
+                    i += 6
+                    continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _model_from_toml_profile(paths: Paths, alias: str) -> str | None:
+    """The ``model`` value from the sibling ``<alias>.config.toml`` profile.
+
+    The OPENAI_TOML wrapper body carries no model (it only dispatches
+    ``codex --profile <alias>``), so ``edit-token``/``spec_from_installed``
+    cannot recover the model from the wrapper the way the other shapes do —
+    the model is in the TOML profile written alongside it. ``tomllib`` (3.11+)
+    parses it correctly; on 3.10 (the project's minimum) a line regex reads
+    the ``model = "..."`` key this renderer is the only writer of. Unreadable
+    or absent → None, so the caller falls back to the preset path rather than
+    raising.
+    """
+    profile = _read_text_or_none(paths.codex_config_for(alias))
+    if profile is None:
+        return None
+    try:
+        import tomllib  # py3.11+
+
+        data = tomllib.loads(profile)
+        model = data.get("model")
+        return model if isinstance(model, str) and model else None
+    except ModuleNotFoundError:
+        # 3.10 fallback: this renderer is the only writer of the profile, so a
+        # plain ``^model = "..."`` line match is sufficient — tomllib's
+        # validation is not needed for a file we authored.
+        found = re.search(r'^model = "(.*)"$', profile, re.MULTILINE)
+        return _toml_unescape(found.group(1)) if found else None
 
 
 def _read_text_or_none(script: Path) -> str | None:
@@ -423,30 +514,23 @@ def _is_ours_marker_only(path: Path) -> bool:
     return _marker_at(path)
 
 
-def _is_our_catalog(path: Path) -> bool:
-    """True iff ``path`` is a model catalog in the format we generate.
+def _is_our_catalog(paths: Paths, alias: str) -> bool:
+    """True iff the catalog for ``alias`` is one we wrote.
 
     The catalog is JSON, and JSON has no comments — so the marker the wrapper
-    and the TOML profile carry cannot ride along. Authorship is recognised by
-    structure instead: a ``{"version": 1, "models": [...]}`` body is the shape
-    :func:`openai_catalog_body` writes. Anything else (an unrelated JSON file,
-    a hand-written catalog, a TOML) is not ours, so the guard refuses rather
-    than clobbers — the same safe answer the marker-based checks give. A
-    foreign file that *happened* to match this shape would still only be
-    overwritten with the same kind of derived data, so the structural test is
-    safe in the way a marker is: it never recognises content with real value.
+    and TOML profile carry cannot ride along. A purely structural test
+    (``{"version": 1, "models": [...]}``) is too permissive: that is a generic
+    shape a hand-curated or third-party catalog plausibly uses, and treating it
+    as proof of authorship clobbers a researched ``context_window`` with the
+    :data:`_DEFAULT_CONTEXT_WINDOW` floor — silent data loss without
+    ``--force``. Instead the catalog is proven ours by its SIBLING: the
+    ``<alias>.config.toml`` profile is written alongside it and carries our
+    marker, so the catalog is ours iff the profile is. A foreign catalog with
+    no (or a foreign) profile routes to ``OVERWRITE_FOREIGN`` like the other
+    two slots. The byte-identical idempotence case is handled earlier in
+    :func:`_decide` (SKIP), so this only gates non-identical existing catalogs.
     """
-    import json
-
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):
-        return False
-    return (
-        isinstance(data, dict)
-        and data.get("version") == 1
-        and isinstance(data.get("models"), list)
-    )
+    return _marker_at(paths.codex_config_for(alias))
 
 
 class _FilePlan(NamedTuple):
@@ -578,7 +662,17 @@ def _install_plan(
             print(f"overwriting unmanaged file {f.path}")
         elif action is _Action.DISCARD_SECRET:
             print(f"discarding the only copy of {f.path}'s token")
-        atomic_write(f.path, f.body, mode=f.mode)
+        try:
+            atomic_write(f.path, f.body, mode=f.mode)
+        except OSError as exc:
+            # A mid-sequence write failure (disk full, a read-only parent, a
+            # broken symlink) surfaces as a clean CodeHelperError instead of a
+            # raw traceback. The plan is ordered catalog → profile → wrapper so
+            # the on-PATH executable lands LAST: a failure on a sibling never
+            # leaves a broken wrapper pointing at a missing profile/catalog,
+            # only harmless orphaned siblings the next idempotent install
+            # repairs.
+            raise CodeHelperError(f"failed to write {f.path}: {exc}") from exc
         print(f"wrote {f.path}")
         wrote = True
     return wrote
@@ -598,42 +692,101 @@ def _wrapper_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_FilePlan
 
 
 def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_FilePlan]:
-    """The three-file plan: bash wrapper + TOML profile + model catalog.
+    """The three-file plan: model catalog + TOML profile + bash wrapper.
 
-    Each slot carries its own ownership check — :func:`_is_ours` (marker OR
-    legacy byte-match) for the wrapper, :func:`_is_ours_marker_only` for the
-    TOML profile (carries the marker comment, no legacy form), and
-    :func:`_is_our_catalog` for the catalog (JSON cannot carry a comment
-    marker, so authorship is structural). Modes: the wrapper follows
-    :func:`_mode_for` (``0o700`` for a secret, else ``0o755``); the profile and
-    catalog are ``0o600`` owner-only.
+    Ordered so the on-PATH executable lands LAST: if a sibling write fails
+    mid-sequence (disk full, permission), no invocable wrapper is left
+    pointing at a missing profile/catalog — only harmless orphaned siblings
+    that the next idempotent install repairs. The wrapper-first order this
+    replaced could leave a broken executable on ``PATH`` during the failure
+    window.
+
+    Each slot carries its own ownership check — :func:`_is_ours_marker_only`
+    for the wrapper AND the TOML profile (both carry the marker comment;
+    OPENAI_TOML is a new shape with no pre-marker legacy form, so the
+    legacy byte-match clause :func:`_is_ours` uses for the other shapes would
+    only ever match a third-party hand-written ``exec codex --profile`` script
+    and adopt it as ours), and :func:`_is_our_catalog` for the catalog (JSON
+    cannot carry a comment marker, so authorship is proven by the sibling
+    profile's marker). Modes: the wrapper follows :func:`_mode_for` (``0o700``
+    for a secret, else ``0o755``); the profile and catalog are ``0o600``
+    owner-only.
     """
     from code_helper.services.render import openai_catalog_body, openai_toml_body
 
     catalog_path = paths.codex_catalog_for(spec.alias)
+    config_path = paths.codex_config_for(spec.alias)
     return [
         _FilePlan(
-            paths.script_for(spec.alias),
-            render_script(spec, token),
-            _mode_for(spec),
-            lambda _p: _is_ours(paths, spec, token),
-            True,
+            catalog_path,
+            openai_catalog_body(spec),
+            0o600,
+            lambda _p: _is_our_catalog(paths, spec.alias),
+            False,
         ),
         _FilePlan(
-            paths.codex_config_for(spec.alias),
+            config_path,
             openai_toml_body(spec, str(catalog_path)),
             0o600,
             _is_ours_marker_only,
             False,
         ),
         _FilePlan(
-            catalog_path,
-            openai_catalog_body(spec),
-            0o600,
-            _is_our_catalog,
-            False,
+            paths.script_for(spec.alias),
+            render_script(spec, token),
+            _mode_for(spec),
+            _is_ours_marker_only,
+            True,
         ),
     ]
+
+
+def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) -> None:
+    """Remove the ``~/.codex/<alias>.config.toml`` + ``<alias>.model.json`` we wrote.
+
+    Only run when a PREVIOUS install under ``alias`` was OPENAI_TOML and the new
+    one is not: the old profile/catalog no longer match anything the new wrapper
+    dispatches to, so leaving them is silent clutter (and a stale catalog could
+    mislead a later ``codex --profile <alias>`` if the alias is ever reused for
+    OPENAI_TOML again). Only OUR siblings are removed — proven the same way the
+    install guard proves them: the profile by its marker, the catalog by its
+    sibling profile's marker. A foreign profile/catalog under the alias is left
+    untouched, exactly as the install guard would refuse to overwrite it.
+    """
+    config_path = paths.codex_config_for(alias)
+    catalog_path = paths.codex_catalog_for(alias)
+
+    # The profile marker is the single proof both siblings share (the catalog
+    # is JSON — no comment marker; see ``_is_our_catalog``). Decide once, BEFORE
+    # removing anything: unlinking the profile first would make the re-check
+    # false and strand the catalog.
+    profile_is_ours = _marker_at(config_path)
+    if not profile_is_ours:
+        return
+
+    if config_path.exists():
+        if dry_run:
+            print(f"would remove orphaned sibling {config_path}")
+        else:
+            try:
+                config_path.unlink()
+            except OSError as exc:
+                raise CodeHelperError(
+                    f"failed to remove orphaned sibling {config_path}: {exc}"
+                ) from exc
+            print(f"removed orphaned sibling {config_path}")
+
+    if catalog_path.exists():
+        if dry_run:
+            print(f"would remove orphaned sibling {catalog_path}")
+        else:
+            try:
+                catalog_path.unlink()
+            except OSError as exc:
+                raise CodeHelperError(
+                    f"failed to remove orphaned sibling {catalog_path}: {exc}"
+                ) from exc
+            print(f"removed orphaned sibling {catalog_path}")
 
 
 def install_wrapper(
@@ -686,9 +839,20 @@ def install_wrapper(
         if spec.shape is ConfigShape.OPENAI_TOML
         else _wrapper_plan(paths, spec, token)
     )
-    return _install_plan(
+    wrote = _install_plan(
         paths, spec, plan, dry_run=dry_run, force=force, confirm=confirm
     )
+
+    # A non-OPENAI_TOML install under an alias that previously held an
+    # OPENAI_TOML install leaves the ``~/.codex/<alias>.*`` siblings orphaned
+    # — the new wrapper no longer dispatches ``codex --profile <alias>``. Only
+    # clean up AFTER a successful (non-dry-run) write or a dry-run that would
+    # have written, and only for OUR siblings; a refusal above already raised
+    # before reaching here.
+    if spec.shape is not ConfigShape.OPENAI_TOML:
+        _cleanup_openai_toml_siblings(paths, spec.alias, dry_run=dry_run)
+
+    return wrote
 
 
 def describe_wrapper(

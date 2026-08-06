@@ -14,7 +14,11 @@ import stat
 import pytest
 
 from code_helper.errors import CodeHelperError
-from code_helper.services.model import ConfigShape
+from code_helper.services.model import (
+    ConfigShape,
+    ModelListAPI,
+    Provider,
+)
 from code_helper.services.paths import Paths
 from code_helper.services.render import (
     openai_catalog_body,
@@ -35,6 +39,7 @@ from code_helper.services.wrappers import (
     is_installed,
     is_managed,
     list_wrappers,
+    spec_from_installed,
 )
 
 
@@ -596,9 +601,14 @@ def test_openai_toml_body_carries_marker_model_base_url_wire_api():
     # Marker on line 1 — what the ownership guard keys off.
     assert body.startswith("# code-helper: managed wrapper")
     assert 'model = "glm-5.2:cloud"' in body  # `:` and `.` => must be quoted
-    assert 'model_provider = "ollama-launch"' in body
+    # Data-driven: table key + model_provider derive from spec.provider.name,
+    # not a hardcoded "ollama-launch" — that is what makes a second
+    # OpenAI-compatible provider a PROVIDERS entry rather than a renderer edit.
+    assert 'model_provider = "ollama"' in body
     assert 'model_catalog_json = "/home/u/.codex/glm-5-codex.model.json"' in body
-    assert "[model_providers.ollama-launch]" in body
+    assert "[model_providers.ollama]" in body
+    # The display name is the provider's description (falling back to its name).
+    assert 'name = "local Ollama daemon"' in body
     # base_url derives /v1/ from the provider's Anthropic-root base_url.
     assert 'base_url = "http://127.0.0.1:11434/v1/"' in body
     assert 'wire_api = "responses"' in body
@@ -733,3 +743,309 @@ def test_paths_codex_accessors_reject_non_single_component():
             paths.codex_config_for(bad)
         with pytest.raises(CodeHelperError, match="single path component"):
             paths.codex_catalog_for(bad)
+
+
+# --------------------------------------------------------------------------- #
+# OPENAI_TOML extension point, ownership, recovery, and shape-switch — the
+# round-2 review findings (F1/F2/F4/F1-own/F7/F8/F9).
+# --------------------------------------------------------------------------- #
+
+
+# A second OpenAI-compatible provider, deliberately NOT in the registry (like
+# test_model._OPENAI_ONLY but non-secret so build_spec accepts it). This is the
+# proof the renderer is data-driven: wiring a new provider reuses the shape with
+# no renderer edit, and its own name/base_url/wire_api land in the profile.
+_OPENAI_LITERAL = Provider(
+    name="acme-openai",
+    shapes=frozenset({ConfigShape.OPENAI_TOML}),
+    base_url="https://api.acme.invalid/v1",
+    auth="literal",
+    auth_value="acme",
+    model_list_api=ModelListAPI.OPENAI_V1,
+    wire_api="chat",
+    description="Acme OpenAI-compatible",
+)
+
+
+def _acme_spec(model: str = "acme-7b", alias: str = "acme-codex") -> WrapperSpec:
+    return build_spec(agent="codex", provider=_OPENAI_LITERAL, model=model, alias=alias)
+
+
+@pytest.mark.unit
+def test_openai_toml_body_for_non_ollama_provider_pins_extension_point():
+    """A second OpenAI-compatible provider reuses the renderer with NO edit.
+
+    The profile carries the provider's OWN name/table/base_url/wire_api (F4:
+    data-driven, not the hardcoded ``ollama``/``ollama-launch`` the original
+    shipped), and a ``/v1``-suffixed ``base_url`` is NOT doubled (F1: the
+    renderer appends ``/`` only, so ``.../v1`` -> ``.../v1/`` not ``.../v1/v1/``).
+    """
+    spec = _acme_spec(model="acme-7b")
+    body = openai_toml_body(spec, "/home/u/.codex/acme-codex.model.json")
+    assert 'model = "acme-7b"' in body
+    assert 'model_provider = "acme-openai"' in body
+    assert "[model_providers.acme-openai]" in body
+    assert 'name = "Acme OpenAI-compatible"' in body
+    # F1: /v1-suffixed base_url gets a trailing slash only — no /v1/v1/.
+    assert 'base_url = "https://api.acme.invalid/v1/"' in body
+    assert "/v1/v1/" not in body
+    assert 'wire_api = "chat"' in body
+
+
+@pytest.mark.unit
+def test_openai_toml_body_quotes_wire_api():
+    """wire_api is a quoted TOML string, never a bare token (F2).
+
+    The original renderer wrote ``wire_api = responses`` unquoted; that is
+    invalid TOML. Pin the quotes so a regression to a bare value is caught.
+    """
+    spec = _toml_spec()
+    body = openai_toml_body(spec, "/x.json")
+    assert 'wire_api = "responses"' in body
+    # The bare form must NOT appear anywhere.
+    assert "wire_api = responses" not in body
+
+
+@pytest.mark.unit
+def test_openai_toml_body_escapes_control_chars_and_stays_parseable():
+    """A model with control characters is escaped, not emitted raw (F2).
+
+    TOML basic strings forbid literal U+0000–U+001F (except tab); a raw newline
+    in the model would make Codex reject the profile. The escapes must produce
+    a profile tomllib can parse back to the original model.
+    """
+    try:
+        import tomllib  # py3.11+
+    except ModuleNotFoundError:
+        pytest.skip(
+            "tomllib unavailable on 3.10; escape correctness is exercised by the body assertions"
+        )
+
+    model = "weird\tname\nx"
+    spec = _toml_spec(model=model)
+    body = openai_toml_body(spec, "/x.json")
+    # No literal control chars inside the model string line.
+    model_line = next(ln for ln in body.splitlines() if ln.startswith("model = "))
+    assert "\n" not in model_line and "\t" not in model_line
+    # The escaped profile round-trips through tomllib to the original model.
+    parsed = tomllib.loads(body)
+    assert parsed["model"] == model
+
+
+@pytest.mark.integration
+def test_install_openai_toml_refuses_foreign_catalog(tmp_path):
+    """A foreign catalog (no sibling profile marker) is not clobbered (F1-own).
+
+    The catalog is JSON with no comment marker; authorship is proven by the
+    sibling profile's marker. A catalog with no (or foreign) profile is NOT
+    ours, so the guard refuses without --force — closing the permissive
+    structural-JSON check the original shipped.
+    """
+    paths = Paths.from_home(tmp_path)
+    spec = _toml_spec()
+    catalog = paths.codex_catalog_for("glm-5-codex")
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(
+        '{"version": 1, "models": [{"id": "hand-curated", "context_window": 200000}]}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CodeHelperError, match="refusing to overwrite"):
+        install_wrapper(paths, spec)
+
+    # Untouched — a hand-curated context_window was not silently flattened.
+    assert "hand-curated" in catalog.read_text(encoding="utf-8")
+    assert not paths.script_for("glm-5-codex").exists()
+
+
+@pytest.mark.integration
+def test_install_openai_toml_refuses_handwritten_wrapper_without_marker(tmp_path):
+    """A hand-written ``exec codex --profile`` script is NOT adopted as ours (F1-own).
+
+    OPENAI_TOML is a new shape with no pre-marker legacy form, so the wrapper
+    slot keys off the marker ALONE (no byte-identical-to-legacy clause). A
+    third-party script that happens to dispatch ``codex --profile`` must still
+    route to OVERWRITE_FOREIGN, or a user's hand-maintained dispatch would be
+    silently replaced.
+    """
+    paths = Paths.from_home(tmp_path)
+    spec = _toml_spec()
+    script = paths.script_for("glm-5-codex")
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        '#!/bin/bash\n# my own dispatch\nexec codex --profile glm-5-codex "$@"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CodeHelperError, match="refusing to overwrite"):
+        install_wrapper(paths, spec)
+
+    assert "my own dispatch" in script.read_text(encoding="utf-8")
+
+
+@pytest.mark.integration
+def test_spec_from_installed_recovers_model_from_toml_profile(tmp_path):
+    """edit-token reaches a codex × ollama wrapper and recovers its model (F7).
+
+    The OPENAI_TOML wrapper body carries no model — it lives in the sibling
+    TOML profile. spec_from_installed must read it from there, else edit-token
+    falls back to the preset path and silently reverts a ``--model`` choice
+    (the very bug the installed-spec lookup exists to prevent).
+    """
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(model="glm-5.2:cloud"))
+
+    spec = spec_from_installed(paths, "glm-5-codex")
+    assert spec is not None
+    assert spec.model == "glm-5.2:cloud"
+    assert spec.agent.name == "codex"
+    assert spec.provider.name == "ollama"
+    assert spec.shape is ConfigShape.OPENAI_TOML
+
+
+@pytest.mark.integration
+def test_spec_from_installed_returns_none_when_profile_missing(tmp_path):
+    """A marked wrapper whose sibling profile is gone recovers no model (F7).
+
+    The model is unrecoverable, so the caller falls back to the preset path
+    rather than raising — mirroring every other None return in
+    spec_from_installed.
+    """
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(model="glm-5.2:cloud"))
+    # Strip the sibling profile away — simulate a user who deleted it.
+    paths.codex_config_for("glm-5-codex").unlink()
+
+    assert spec_from_installed(paths, "glm-5-codex") is None
+
+
+@pytest.mark.integration
+def test_shape_switch_cleans_up_orphaned_openai_toml_siblings(tmp_path):
+    """Reusing an alias for a non-OPENAI_TOML shape removes the old siblings (F8).
+
+    A previous OPENAI_TOML install leaves ``~/.codex/<alias>.*`` behind; the
+    new wrapper no longer dispatches ``codex --profile <alias>``, so those
+    files are orphans. Only OUR siblings (marker on the profile) are removed.
+    """
+    paths = Paths.from_home(tmp_path)
+    alias = "glm-5-codex"
+    install_wrapper(paths, _toml_spec(model="glm-5.2:cloud", alias=alias))
+    assert paths.codex_config_for(alias).exists()
+    assert paths.codex_catalog_for(alias).exists()
+
+    # Switch the alias to the launcher shape (claude × ollama via ollama-launch).
+    launcher_spec = build_spec(
+        agent="claude",
+        provider="ollama",
+        model="glm-5:cloud",
+        alias=alias,
+        shape=ConfigShape.OLLAMA_LAUNCH,
+    )
+    assert install_wrapper(paths, launcher_spec) is True
+
+    # The wrapper was rewritten; the orphaned siblings are gone.
+    assert paths.script_for(alias).exists()
+    assert not paths.codex_config_for(alias).exists()
+    assert not paths.codex_catalog_for(alias).exists()
+
+
+@pytest.mark.integration
+def test_shape_switch_leaves_foreign_siblings(tmp_path):
+    """A foreign profile under the alias is NOT removed on shape switch (F8).
+
+    The cleanup proves authorship the same way the install guard does — the
+    profile marker. A foreign profile (no marker) is left alone, exactly as
+    the guard would refuse to overwrite it.
+    """
+    paths = Paths.from_home(tmp_path)
+    alias = "glm-5-codex"
+    # A foreign profile + catalog the user hand-curated, no marker.
+    config = paths.codex_config_for(alias)
+    catalog = paths.codex_catalog_for(alias)
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text('# my codex profile\nmodel = "gpt-4o"\n', encoding="utf-8")
+    catalog.write_text('{"version": 1, "models": []}', encoding="utf-8")
+
+    launcher_spec = build_spec(
+        agent="claude",
+        provider="ollama",
+        model="glm-5:cloud",
+        alias=alias,
+        shape=ConfigShape.OLLAMA_LAUNCH,
+    )
+    # The launcher wrapper itself lands fine (the alias path was free); the
+    # foreign siblings stay put.
+    assert install_wrapper(paths, launcher_spec) is True
+    assert (
+        config.read_text(encoding="utf-8") == '# my codex profile\nmodel = "gpt-4o"\n'
+    )
+    assert catalog.read_text(encoding="utf-8") == '{"version": 1, "models": []}'
+
+
+@pytest.mark.unit
+def test_build_spec_refuses_secret_auth_with_openai_toml():
+    """secret + OPENAI_TOML is rejected before any token prompt (F9).
+
+    The OPENAI_TOML wrapper carries no token (it dispatches
+    ``codex --profile``) and the profile has no env_key field this renderer
+    writes, so a secret-auth provider would silently produce a wrapper with no
+    way to pass its credential — and edit-token would be a no-op. Refuse at
+    build_spec, before resolve_token is ever called.
+    """
+    secret_provider = Provider(
+        name="secret-openai",
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        base_url="https://api.secret.invalid/v1",
+        auth="secret",
+        token_env_var="SECRET_API_KEY",
+        model_list_api=ModelListAPI.OPENAI_V1,
+        wire_api="chat",
+    )
+    with pytest.raises(CodeHelperError, match="no way to carry a token"):
+        build_spec(agent="codex", provider=secret_provider, model="m")
+
+
+@pytest.mark.integration
+def test_add_secret_auth_openai_toml_refuses_before_token_prompt(tmp_path, monkeypatch):
+    """The F9 refusal fires in the CLI flow BEFORE resolve_token runs.
+
+    Mirrors the existing validate-before-prompt pin for incompatible pairings:
+    a secret + OPENAI_TOML provider must never trigger an interactive prompt
+    for a wrapper that will not be written. resolve_token is patched to explode
+    so any reach is a hard failure.
+    """
+    secret_provider = Provider(
+        name="secret-openai",
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        base_url="https://api.secret.invalid/v1",
+        auth="secret",
+        token_env_var="SECRET_API_KEY",
+        model_list_api=ModelListAPI.OPENAI_V1,
+        wire_api="chat",
+    )
+    # Register the out-of-registry provider so the CLI can look it up by name.
+    import code_helper.services.model as model_mod
+
+    monkeypatch.setattr(
+        model_mod, "PROVIDERS", model_mod.PROVIDERS + (secret_provider,)
+    )
+
+    def _explode(*_a, **_kw):  # pragma: no cover - must not be reached
+        raise AssertionError("resolve_token must not run for a refused spec")
+
+    monkeypatch.setattr("code_helper.services.secrets.resolve_token", _explode)
+
+    from code_helper.__main__ import main
+
+    code = main(
+        [
+            "add",
+            "--agent",
+            "codex",
+            "--provider",
+            "secret-openai",
+            "--model",
+            "m",
+        ]
+    )
+    assert code != 0  # refused, not prompted

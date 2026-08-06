@@ -230,6 +230,10 @@ def _validate_registries() -> None:
         if not agent.shapes:
             raise CodeHelperError(f"agent {agent.name!r} declares no config shapes")
     for provider in PROVIDERS:
+        if not _BINARY_RE.match(provider.name):
+            raise CodeHelperError(
+                f"invalid provider name in registry: {provider.name!r}"
+            )
         if not provider.shapes:
             raise CodeHelperError(
                 f"provider {provider.name!r} declares no config shapes"
