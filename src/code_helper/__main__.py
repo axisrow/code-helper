@@ -26,5 +26,26 @@ def main(argv: list[str] | None = None) -> int:
         return emit_error(e, getattr(args, "debug", False))
 
 
+def cli() -> int:
+    """Console-script wrapper: :func:`main` plus the interrupt contract.
+
+    ``MenuCancelled`` must keep propagating out of :func:`main` — that is how
+    ``edit-token``'s picker lets a TUI caller tell "go back" from "leave the
+    whole TUI", and it is pinned by a test. But at the PROCESS boundary there
+    is no such caller, so letting it out prints a raw traceback instead of
+    this module's one-line contract. Translating it here, one level above
+    ``main``, satisfies both: the exception still escapes ``main`` for the
+    TUI, and the plain CLI exits cleanly. 130 is the conventional
+    SIGINT-terminated code, matching a real Ctrl-C.
+    """
+    from code_helper.cli.menu import MenuCancelled
+
+    try:
+        return main()
+    except (MenuCancelled, KeyboardInterrupt):
+        print("cancelled", file=sys.stderr)
+        return 130
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(cli())

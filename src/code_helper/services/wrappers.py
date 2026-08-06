@@ -32,7 +32,8 @@ from pathlib import Path
 
 from code_helper.backends._atomic import atomic_write
 from code_helper.errors import CodeHelperError
-from code_helper.services.model import Agent, Provider
+from code_helper.services.model import Agent, ConfigShape, Provider
+from code_helper.services.naming import validate_alias
 from code_helper.services.paths import Paths
 from code_helper.services.render import (
     MARKER_PREFIX,
@@ -184,12 +185,19 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
             provider=fields["provider"],
             model=model,
             alias=name,
+            # The RECORDED shape, not a re-derived one. `claude × ollama` is
+            # compatible with both shapes and `resolve_shape` prefers the env
+            # one, so dropping this turns a wrapper installed as
+            # `ollama launch` into an `ANTHROPIC_*` block — not a changed
+            # model but a changed mechanism.
+            shape=ConfigShape(fields["shape"]) if fields.get("shape") else None,
             tier_models=tiers,
             subagent_model=_env_value(body, "CLAUDE_CODE_SUBAGENT_MODEL"),
         )
-    except CodeHelperError:
-        # A marker naming an agent/provider this build no longer knows, or a
-        # pairing that is no longer valid. Not our problem to resolve here.
+    except (CodeHelperError, ValueError):
+        # A marker naming an agent/provider/shape this build no longer knows,
+        # or a pairing that is no longer valid (ValueError comes from the
+        # ConfigShape lookup). Not our problem to resolve here.
         return None
 
 
@@ -503,6 +511,11 @@ def discover_managed(paths: Paths) -> list[str]:
     Without this, a wrapper built from the axes would be invisible to ``list``
     — the preset registry cannot know about it, and there is no state file.
     The marker in the script body is the only record that it is ours.
+
+    A marked file whose name is not a usable alias (a reserved name like
+    ``claude``, or anything ``validate_alias`` rejects) is skipped: no command
+    in the tool can act on it, so listing it advertises a wrapper the user
+    cannot then edit or reinstall.
     """
     if not paths.bin_dir.is_dir():
         return []
@@ -510,6 +523,18 @@ def discover_managed(paths: Paths) -> list[str]:
     found = [
         entry.name
         for entry in paths.bin_dir.iterdir()
-        if entry.is_file() and entry.name not in known and is_managed(paths, entry.name)
+        if entry.is_file()
+        and entry.name not in known
+        and is_managed(paths, entry.name)
+        and _is_usable_alias(entry.name)
     ]
     return sorted(found)
+
+
+def _is_usable_alias(name: str) -> bool:
+    """True iff ``name`` is one the rest of the tool can still act on."""
+    try:
+        validate_alias(name)
+    except CodeHelperError:
+        return False
+    return True

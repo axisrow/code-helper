@@ -298,5 +298,9 @@ def spec_from_preset(
         shape=preset.shape,
         tier_models=tier_models,
         subagent_model=subagent,
-        description=preset.description,
+        # The preset's description names the preset's model, so it is wrong
+        # the moment --model replaces it. Passing "" lets build_spec generate
+        # one for the model actually installed — `list` is the only place a
+        # user sees what a wrapper points at, so a stale line misinforms.
+        description="" if model_override else preset.description,
     )

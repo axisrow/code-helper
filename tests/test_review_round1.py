@@ -256,6 +256,81 @@ def test_edit_token_reaches_an_axes_built_wrapper(tmp_path, monkeypatch):
     assert "tok2" in (paths.bin_dir / "mytok").read_text()
 
 
+# --- cycle 3 ---------------------------------------------------------------
+
+
+def test_spec_from_installed_keeps_the_recorded_shape(tmp_path):
+    """The marker records the mechanism; re-deriving it can pick a different one.
+
+    ``claude × ollama`` is compatible with BOTH shapes, and ``resolve_shape``
+    prefers ``ANTHROPIC_ENV``. Dropping the marker's ``shape=`` therefore turns
+    a wrapper installed as ``ollama launch`` into an ``ANTHROPIC_*`` env block
+    — not a changed model but a changed mechanism.
+    """
+    from code_helper.services.model import ConfigShape
+    from code_helper.services.render import render_script
+    from code_helper.services.wrappers import spec_from_installed
+
+    paths = _bin(tmp_path)
+    install_wrapper(paths, "glm-ollama")
+    before = (paths.bin_dir / "glm-ollama").read_text()
+
+    spec = spec_from_installed(paths, "glm-ollama")
+    assert spec is not None
+    assert spec.shape is ConfigShape.OLLAMA_LAUNCH
+    assert render_script(spec, "") == before, "re-render changed the mechanism"
+
+
+def test_hard_cancel_at_the_picker_is_not_a_raw_traceback(monkeypatch, capsys):
+    """Ctrl-C must not reach the terminal as a ``MenuCancelled`` dump.
+
+    The exception still has to escape ``main`` — that is how a TUI caller
+    tells "go back" from "leave the whole TUI", pinned by
+    ``test_edit_token_hard_cancel_propagates``. So the translation belongs at
+    the process boundary (``cli``), which is what the console script runs.
+    """
+    from code_helper.__main__ import cli
+    from code_helper.cli.menu import MenuCancelled
+
+    def _hard(*a, **k):
+        raise MenuCancelled(hard=True)
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _hard)
+    monkeypatch.setattr("sys.argv", ["code-helper", "edit-token"])
+
+    assert cli() == 130
+    assert "Traceback" not in capsys.readouterr().err
+
+    # ...and main() still lets it out, so the TUI contract is intact.
+    with pytest.raises(MenuCancelled):
+        main(["edit-token"])
+
+
+def test_model_override_refreshes_the_description(tmp_path):
+    """``list`` is the only place a user sees what a wrapper points at."""
+    from code_helper.services.spec import get_preset, spec_from_preset
+
+    spec = spec_from_preset(get_preset("deepseek"), model_override="qwen3")
+    assert "deepseek-v4-flash" not in spec.description
+    assert "qwen3" in spec.description
+
+
+def test_discover_managed_skips_unusable_names(tmp_path):
+    """Don't advertise a wrapper no command in the tool can act on."""
+    from code_helper.services.render import MARKER_PREFIX
+    from code_helper.services.wrappers import discover_managed
+
+    paths = _bin(tmp_path)
+    for reserved in ("claude", "code-helper"):
+        (paths.bin_dir / reserved).write_text(
+            f"#!/bin/bash\n{MARKER_PREFIX} "
+            f"(agent=claude, provider=ollama, shape=anthropic-env)\n"
+            f'claude "$@"\n'
+        )
+
+    assert discover_managed(paths) == []
+
+
 # --- models_api ------------------------------------------------------------
 
 
