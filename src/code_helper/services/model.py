@@ -29,7 +29,9 @@ That is worth the indirection because it makes the impossible combinations fall
 out of the data rather than being enumerated:
 
 - ``claude × ollama``  → ``{ANTHROPIC_ENV, OLLAMA_LAUNCH}`` — two ways, pick by priority
-- ``codex  × ollama``  → ``{OLLAMA_LAUNCH}``
+- ``codex  × ollama``  → ``{OLLAMA_LAUNCH, OPENAI_TOML}`` — priority picks the TOML
+  profile (no extra binary on ``PATH``); the launcher remains reachable via
+  ``--shape ollama-launch``.
 - ``claude × z.ai``    → ``{ANTHROPIC_ENV}``
 - ``claude × <openai-only provider>`` → ``∅`` → **rejected with no special-case code**
 
@@ -84,12 +86,13 @@ class ConfigShape(str, Enum):
     #: Codex's ``[model_providers.X]`` TOML profile (``base_url`` +
     #: ``wire_api`` + ``env_key``) plus ``-c`` overrides.
     #:
-    #: **Declared but deliberately not implemented.** It is named here so that
-    #: ``codex × <openai provider>`` resolves to a *recognised but unsupported*
-    #: shape ("not implemented yet") rather than to "incompatible" — a
-    #: different, honest error. Implementing it is: one entry in
-    #: :data:`PROVIDERS` plus one renderer; no change to this model, the CLI,
-    #: or the TUI.
+    #: Implemented for ``codex × ollama`` (see ``render.openai_toml_body`` /
+    #: ``openai_catalog_body``): the renderer writes its own
+    #: ``~/.codex/<alias>.config.toml`` and launches ``codex --profile <alias>``
+    #: — ``~/.codex/config.toml`` is never read or modified. A provider
+    #: declaring this shape but with no renderer entry still resolves here and
+    #: surfaces as "not implemented yet" from ``render_script`` — distinct from
+    #: "incompatible", a different, honest error.
     OPENAI_TOML = "openai-toml"
 
 
@@ -180,15 +183,25 @@ AGENTS: tuple[Agent, ...] = (
 PROVIDERS: tuple[Provider, ...] = (
     Provider(
         name="ollama",
-        # Both shapes: the daemon serves the Anthropic protocol directly (so
+        # Three shapes: the daemon serves the Anthropic protocol directly (so
         # `claude` can point straight at it — this is the `deepseek` preset),
-        # AND `ollama launch` can configure an agent for us (the `glm-ollama`
-        # preset). Same provider, two connection mechanisms.
-        shapes=frozenset({ConfigShape.ANTHROPIC_ENV, ConfigShape.OLLAMA_LAUNCH}),
+        # `ollama launch` can configure an agent for us (the `glm-ollama`
+        # preset), and an OpenAI-compatible `/v1` endpoint feeds Codex's own
+        # TOML profile (codex × ollama via OPENAI_TOML — no launcher binary
+        # needed). Same provider, three connection mechanisms.
+        shapes=frozenset(
+            {
+                ConfigShape.ANTHROPIC_ENV,
+                ConfigShape.OLLAMA_LAUNCH,
+                ConfigShape.OPENAI_TOML,
+            }
+        ),
         base_url="http://127.0.0.1:11434",
         auth="literal",
         auth_value="ollama",
         model_list_api=ModelListAPI.OLLAMA_TAGS,
+        # Consumed by the OPENAI_TOML renderer (`wire_api` in the profile).
+        wire_api="responses",
         description="local Ollama daemon",
     ),
     Provider(
@@ -217,6 +230,10 @@ def _validate_registries() -> None:
         if not agent.shapes:
             raise CodeHelperError(f"agent {agent.name!r} declares no config shapes")
     for provider in PROVIDERS:
+        if not _BINARY_RE.match(provider.name):
+            raise CodeHelperError(
+                f"invalid provider name in registry: {provider.name!r}"
+            )
         if not provider.shapes:
             raise CodeHelperError(
                 f"provider {provider.name!r} declares no config shapes"
@@ -224,6 +241,22 @@ def _validate_registries() -> None:
         if provider.auth not in ("none", "literal", "secret"):
             raise CodeHelperError(
                 f"provider {provider.name!r} has invalid auth {provider.auth!r}"
+            )
+        # openai_toml_body (render.py) consumes wire_api unconditionally for
+        # every provider that can resolve to OPENAI_TOML — an empty or
+        # unrecognised value renders a profile Codex rejects at runtime rather
+        # than a registry error at import time. The whole selling point of the
+        # shape is "a second OpenAI-compatible provider is just a PROVIDERS
+        # entry"; catching a missing wire_api here, not at `codex` runtime, is
+        # what keeps that promise honest.
+        if ConfigShape.OPENAI_TOML in provider.shapes and provider.wire_api not in (
+            "responses",
+            "chat",
+        ):
+            raise CodeHelperError(
+                f"provider {provider.name!r} declares openai-toml but has "
+                f"invalid wire_api {provider.wire_api!r} (must be 'responses' "
+                f"or 'chat')"
             )
     for label, names in (
         ("agent", [a.name for a in AGENTS]),

@@ -23,12 +23,48 @@ def _body(tmp_path, name: str) -> str:
 
 @pytest.mark.integration
 def test_add_agent_provider_model_creates_wrapper(tmp_path):
+    """codex × ollama resolves to OPENAI_TOML by priority now: the wrapper runs
+    ``codex --profile <alias>``, and the TOML profile + model catalog are
+    written alongside it.
+    """
     code = main(
         ["add", "--agent", "codex", "--provider", "ollama", "--model", "glm-5:cloud"]
     )
     assert code == 0
-    body = _body(tmp_path, "glm-5-codex")  # alias derived from model + agent
-    assert "exec ollama launch codex --model 'glm-5:cloud' -- \"$@\"" in body
+    paths = Paths.from_home(tmp_path)
+    alias = "glm-5-codex"  # alias derived from model + agent
+    assert f"exec codex --profile '{alias}' \"$@\"" in _body(tmp_path, alias)
+    config = paths.codex_config_for(alias).read_text(encoding="utf-8")
+    assert config.startswith("# code-helper: managed wrapper")
+    assert 'model = "glm-5:cloud"' in config
+    assert 'base_url = "http://127.0.0.1:11434/v1/"' in config
+    assert 'wire_api = "responses"' in config
+    assert paths.codex_catalog_for(alias).exists()
+
+
+@pytest.mark.integration
+def test_add_codex_ollama_with_explicit_launcher_shape(tmp_path):
+    """The launcher path is still reachable via --shape ollama-launch."""
+    code = main(
+        [
+            "add",
+            "--agent",
+            "codex",
+            "--provider",
+            "ollama",
+            "--model",
+            "glm-5:cloud",
+            "--shape",
+            "ollama-launch",
+        ]
+    )
+    assert code == 0
+    assert "exec ollama launch codex --model 'glm-5:cloud'" in _body(
+        tmp_path, "glm-5-codex"
+    )
+    # The launcher shape writes ONLY the wrapper — no TOML/catalog siblings.
+    paths = Paths.from_home(tmp_path)
+    assert not paths.codex_config_for("glm-5-codex").exists()
 
 
 @pytest.mark.integration
@@ -160,8 +196,26 @@ def test_dry_run_in_constructor_mode_writes_nothing(tmp_path):
 
 @pytest.mark.integration
 def test_two_agents_on_one_model_coexist(tmp_path):
-    """The point of the feature: same model, different agents, no collision."""
-    main(["add", "--agent", "codex", "--provider", "ollama", "--model", "glm-5:cloud"])
+    """The point of the feature: same model, different agents, no collision.
+
+    The codex wrapper forces ``--shape ollama-launch`` so the assertion stays
+    about coexistence (a shape-agnostic property) rather than which shape the
+    default priority picked — that is covered by
+    ``test_add_agent_provider_model_creates_wrapper``.
+    """
+    main(
+        [
+            "add",
+            "--agent",
+            "codex",
+            "--provider",
+            "ollama",
+            "--model",
+            "glm-5:cloud",
+            "--shape",
+            "ollama-launch",
+        ]
+    )
     main(
         [
             "add",
@@ -261,7 +315,8 @@ def test_list_matrix_shows_a_gap_for_incompatible_pairs(tmp_path, capsys):
     lines = capsys.readouterr().out.splitlines()
     codex_row = next(line for line in lines if line.startswith("codex"))
     assert "—" in codex_row  # codex × zai is impossible
-    assert "ollama-launch" in codex_row
+    # codex × ollama now resolves to the TOML profile by priority.
+    assert "openai-toml" in codex_row
 
 
 @pytest.mark.integration

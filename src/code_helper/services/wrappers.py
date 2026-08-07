@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
+from enum import Enum
 from pathlib import Path
+from typing import NamedTuple
 
 from code_helper.backends._atomic import atomic_write
 from code_helper.errors import CodeHelperError
@@ -36,6 +38,8 @@ from code_helper.services.model import Agent, ConfigShape, Provider
 from code_helper.services.naming import validate_alias
 from code_helper.services.paths import Paths
 from code_helper.services.render import (
+    CATALOG_MANAGED_BY_KEY,
+    CATALOG_MANAGED_BY_VALUE,
     MARKER_PREFIX,
     render_legacy_script,
     render_script,
@@ -117,16 +121,19 @@ def is_installed(paths: Paths, name: str) -> bool:
     return paths.script_for(name).exists()
 
 
-def is_managed(paths: Paths, name: str) -> bool:
-    """True iff ``~/.local/bin/<name>`` exists AND carries our marker.
+def _marker_at(path: Path) -> bool:
+    """True iff ``path`` carries our marker on its first or second line.
 
     Reads only the first couple of lines. Anything unreadable (a binary, a
     permission error, a dangling symlink) counts as *not* ours — the safe
-    answer, since it makes the guard refuse rather than clobber.
+    answer, since it makes the guard refuse rather than clobber. The single
+    marker-sniff behind :func:`is_managed` (which resolves the path from a
+    wrapper name) and :func:`_is_ours_marker_only` (which takes a raw path for
+    the OPENAI_TOML siblings), so the read order and the "unreadable = not
+    ours" exception tuple live in one place.
     """
-    script = paths.script_for(name)
     try:
-        with script.open("r", encoding="utf-8") as fh:
+        with path.open("r", encoding="utf-8") as fh:
             for _ in range(2):
                 line = fh.readline()
                 if not line:
@@ -136,6 +143,16 @@ def is_managed(paths: Paths, name: str) -> bool:
     except (OSError, UnicodeDecodeError):
         return False
     return False
+
+
+def is_managed(paths: Paths, name: str) -> bool:
+    """True iff ``~/.local/bin/<name>`` exists AND carries our marker.
+
+    Reads only the first couple of lines. Anything unreadable (a binary, a
+    permission error, a dangling symlink) counts as *not* ours — the safe
+    answer, since it makes the guard refuse rather than clobber.
+    """
+    return _marker_at(paths.script_for(name))
 
 
 def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
@@ -169,7 +186,16 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
         return _spec_from_legacy_body(name, body)
 
     fields = dict(re.findall(r"(\w+)=([^,()\s]+)", marker[len(MARKER_PREFIX) :]))
-    model = _model_from_body(body)
+
+    # The OPENAI_TOML wrapper body embeds no model — it lives in the sibling
+    # TOML profile — so recover it from there rather than the body. The other
+    # shapes carry the model in the rendered script itself.
+    shape_field = fields.get("shape")
+    if shape_field == ConfigShape.OPENAI_TOML.value:
+        model = _model_from_toml_profile(paths, name)
+    else:
+        model = _model_from_body(body)
+
     if not all((fields.get("agent"), fields.get("provider"), model)):
         return None
 
@@ -256,12 +282,108 @@ def _model_from_body(body: str) -> str | None:
     "the model" when tiers differ) and the ``--model`` argument for the launch
     shape. This identifies the wrapper; it does not describe it — see
     :func:`_tiers_from_body` for the full env-shape configuration.
+
+    Returns None for the ``OPENAI_TOML`` shape: its wrapper body is just
+    ``exec codex --profile <alias> "$@"`` and embeds no model — the model lives
+    in the sibling ``~/.codex/<alias>.config.toml`` profile, read by
+    :func:`_model_from_toml_profile`.
     """
     sonnet = _env_value(body, "ANTHROPIC_DEFAULT_SONNET_MODEL")
     if sonnet is not None:
         return sonnet
     found = re.search(r"--model '(.*?)' --", body)
     return found.group(1).replace("'\"'\"'", "'") if found else None
+
+
+def _toml_unescape(value: str) -> str:
+    """Reverse :func:`render._toml_string` for a TOML basic-string body.
+
+    Only the escapes ``_toml_string`` emits are handled (``\\\\``, ``\\"``,
+    ``\\n``, ``\\r``, ``\\t``, ``\\uXXXX``) — the values we write back out are
+    the only values this ever reads. Used to recover the ``model`` from a
+    profile we wrote, so a model containing a quote or a newline round-trips
+    instead of being read back with its escapes still literal.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(value):
+        ch = value[i]
+        if ch == "\\" and i + 1 < len(value):
+            nxt = value[i + 1]
+            if nxt == "\\":
+                out.append("\\")
+                i += 2
+                continue
+            if nxt == '"':
+                out.append('"')
+                i += 2
+                continue
+            if nxt == "n":
+                out.append("\n")
+                i += 2
+                continue
+            if nxt == "r":
+                out.append("\r")
+                i += 2
+                continue
+            if nxt == "t":
+                out.append("\t")
+                i += 2
+                continue
+            if nxt == "u" and i + 5 < len(value) + 1:
+                hexpart = value[i + 2 : i + 6]
+                if len(hexpart) == 4 and all(
+                    c in "0123456789abcdef" for c in hexpart.lower()
+                ):
+                    out.append(chr(int(hexpart, 16)))
+                    i += 6
+                    continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _model_from_toml_profile(paths: Paths, alias: str) -> str | None:
+    """The ``model`` value from the sibling ``<alias>.config.toml`` profile.
+
+    The OPENAI_TOML wrapper body carries no model (it only dispatches
+    ``codex --profile <alias>``), so ``edit-token``/``spec_from_installed``
+    cannot recover the model from the wrapper the way the other shapes do —
+    the model is in the TOML profile written alongside it. ``tomllib`` (3.11+)
+    parses it correctly; on 3.10 (the project's minimum) a line regex reads
+    the ``model = "..."`` key this renderer is the only writer of. Unreadable,
+    absent, or UNPARSEABLE → None, so the caller falls back to the preset path
+    rather than raising — this function's whole contract, inherited by
+    :func:`spec_from_installed`, is that it never raises. A hand-edited or
+    truncated profile (reachable the moment a user touches ``~/.codex`` by
+    hand) makes ``tomllib.loads`` raise ``TOMLDecodeError``, a ``ValueError``
+    subclass and NOT a :class:`CodeHelperError` — left uncaught it used to
+    escape all the way to ``edit-token``/``add --alias`` as a raw traceback,
+    bypassing the ownership guard whose entire job is to handle a bad file in
+    the way (and which ``--force`` could otherwise rescue).
+    """
+    profile = _read_text_or_none(paths.codex_config_for(alias))
+    if profile is None:
+        return None
+    try:
+        import tomllib  # py3.11+
+    except ModuleNotFoundError:
+        # 3.10 fallback: this renderer is the only writer of the profile, so a
+        # plain ``^model = "..."`` line match is sufficient — tomllib's
+        # validation is not needed for a file we authored. A malformed line
+        # simply fails to match, which is the same "unrecoverable → None"
+        # outcome the 3.11+ branch gives for a ValueError.
+        found = re.search(r'^model = "(.*)"$', profile, re.MULTILINE)
+        return _toml_unescape(found.group(1)) if found else None
+
+    try:
+        data = tomllib.loads(profile)
+    except ValueError:
+        # tomllib.TOMLDecodeError is a ValueError subclass — a hand-edited or
+        # truncated profile, not this module's problem to resolve here.
+        return None
+    model = data.get("model")
+    return model if isinstance(model, str) and model else None
 
 
 def _read_text_or_none(script: Path) -> str | None:
@@ -394,6 +516,365 @@ def _strip_token(body: str) -> str:
     )
 
 
+def _is_ours_marker_only(path: Path) -> bool:
+    """True iff ``path`` carries our marker on its first or second line.
+
+    The OPENAI_TOML TOML profile carries the same marker comment the bash
+    wrapper does, which is what lets the ownership guard recognise it as ours.
+    That file has NO pre-marker legacy form (the shape is new), so unlike
+    :func:`_is_ours` there is no byte-identical-to-legacy migration clause —
+    the marker alone is the proof of authorship. Unreadable (binary, perms, a
+    dangling symlink) counts as not ours, so the guard refuses rather than
+    clobbers — the same safe answer :func:`is_managed` gives.
+    """
+    return _marker_at(path)
+
+
+def _catalog_self_marked(path: Path) -> bool:
+    """True iff ``path`` is JSON carrying our own ``managed_by`` field.
+
+    The catalog's own proof of authorship (see ``render.CATALOG_MANAGED_BY_KEY``)
+    — independent of any sibling file. A purely structural test
+    (``{"version": 1, "models": [...]}`` alone) is too permissive: that shape
+    is generic enough that a hand-curated or third-party catalog plausibly
+    uses it too, and treating it as proof clobbers a researched
+    ``context_window`` with the :data:`_DEFAULT_CONTEXT_WINDOW` floor — silent
+    data loss without ``--force``. Requiring our specific marker field closes
+    that. Unreadable/non-JSON/missing key → False, the same safe-refuse answer
+    every other ownership check in this module gives.
+    """
+    body = _read_text_or_none(path)
+    if body is None:
+        return False
+    try:
+        import json
+
+        data = json.loads(body)
+    except ValueError:
+        return False
+    return (
+        isinstance(data, dict)
+        and data.get(CATALOG_MANAGED_BY_KEY) == CATALOG_MANAGED_BY_VALUE
+    )
+
+
+def _is_our_catalog(paths: Paths, alias: str) -> bool:
+    """True iff the catalog for ``alias`` is one we wrote.
+
+    Proven ONLY by the catalog's own ``managed_by`` field
+    (:func:`_catalog_self_marked`) — no sibling-profile fallback. An earlier
+    version also accepted "the sibling ``<alias>.config.toml`` profile carries
+    our marker" as a second, migration-path proof (mirroring how
+    :func:`_is_ours` accepts a byte-identical legacy render for the wrapper).
+    That fallback could not distinguish a legacy catalog WE wrote (before the
+    ``managed_by`` field existed) from a FOREIGN hand-curated catalog a user
+    simply placed next to our already-installed, marker-carrying profile —
+    both look identical to it: no ``managed_by``, sibling profile marked.
+    Reachable on an ordinary, idempotent re-install (no ``--alias`` typo, no
+    edge case): install once, hand-edit the catalog's ``context_window`` to a
+    researched value, re-run the SAME install command — the profile
+    byte-matches and is skipped, but the catalog no longer byte-matches, so
+    :func:`_decide` re-checks ownership, the fallback fires, and the
+    researched value is silently flattened back to
+    :data:`_DEFAULT_CONTEXT_WINDOW` with no prompt and no ``--force`` (the
+    catalog is classified "ours", so it never reaches the foreign-file guard
+    at all). :func:`_cleanup_openai_toml_siblings` already chose the
+    self-marker-only answer for the DELETE side of this exact ambiguity (see
+    its docstring); this brings the OVERWRITE side in line rather than leaving
+    it more permissive than a plain deletion. A catalog with no self-marker —
+    legacy or foreign, no longer distinguished — now routes to
+    ``OVERWRITE_FOREIGN`` like the other two slots, recoverable with
+    ``--force`` same as any foreign file; the byte-identical idempotence case
+    is handled earlier in :func:`_decide` (SKIP), so this only gates
+    non-identical existing catalogs.
+    """
+    return _catalog_self_marked(paths.codex_catalog_for(alias))
+
+
+class _FilePlan(NamedTuple):
+    """One file a wrapper install writes, and how to treat an existing copy.
+
+    The plan is the shape-driven answer to "which files does this install
+    write?" — one entry for a single-shape wrapper, three for ``OPENAI_TOML``
+    (wrapper + TOML profile + catalog). Pairing each file with its own
+    ``managed_check`` and ``is_wrapper`` flag as data is what lets one
+    orchestrator (:func:`_install_plan`) handle every shape: the per-file
+    ownership predicate varies (marker+legacy for the wrapper, marker-only for
+    the TOML profile, structural-JSON for the catalog) without the orchestrator
+    knowing which shape it is looking at.
+    """
+
+    path: Path
+    body: str
+    mode: int
+    managed_check: Callable[[Path], bool]
+    # Only the bash wrapper can carry a secret, so only it participates in the
+    # discard-only-secret check.
+    is_wrapper: bool
+
+
+class _Action(str, Enum):
+    """What :func:`_decide` resolved for one plan entry."""
+
+    SKIP = "skip"  # byte-identical file already installed — write nothing
+    WRITE = "write"  # no existing file, or ours and not a secret-discard
+    OVERWRITE_FOREIGN = "overwrite_foreign"  # an existing file that is not ours
+    DISCARD_SECRET = "discard_secret"  # ours, but holds the only copy of a token
+
+
+#: The refusal message for each guarding action. One place so the ``--force``
+#: hint and the "refusing to …" wording cannot drift between code paths.
+_REFUSAL: dict[_Action, str] = {
+    _Action.OVERWRITE_FOREIGN: (
+        "{path} exists and was not created by code-helper — "
+        "refusing to overwrite (use --force)"
+    ),
+    _Action.DISCARD_SECRET: (
+        "{path} holds a wrapper whose token exists nowhere else, "
+        "and the replacement does not use one — refusing to discard "
+        "the only copy of its token (use --force)"
+    ),
+}
+
+
+def _decide(paths: Paths, spec: WrapperSpec, f: _FilePlan) -> _Action:
+    """Resolve what an install would do with one plan entry.
+
+    Reads the existing file once and runs that file's ownership check once,
+    returning the action. The orchestrator consumes the action without
+    re-reading or re-checking, which is what keeps a multi-file install from
+    reading and re-rendering each file twice — the refusal pass and the write
+    pass share the one decision.
+
+    Order matters and mirrors the old single-file lifecycle: an identical file
+    short-circuits to SKIP before the ownership check runs (a foreign file that
+    *happens* to be byte-identical to what we would write needs no write and no
+    prompt), and the discard-only-secret check runs only for the wrapper slot.
+    """
+    if not f.path.exists():
+        return _Action.WRITE
+    if _read_text_or_none(f.path) == f.body:
+        return _Action.SKIP
+    if not f.managed_check(f.path):
+        return _Action.OVERWRITE_FOREIGN
+    if f.is_wrapper and _discards_only_secret(paths, spec, f.path):
+        return _Action.DISCARD_SECRET
+    return _Action.WRITE
+
+
+def _install_plan(
+    paths: Paths,
+    spec: WrapperSpec,
+    plan: list[_FilePlan],
+    *,
+    dry_run: bool,
+    force: bool,
+    confirm: Callable[[Path], bool] | None,
+) -> bool:
+    """Write every file in ``plan``. Return True iff any changed (or would, dry-run).
+
+    One orchestrator for every shape: a single-file wrapper passes a one-entry
+    plan, ``OPENAI_TOML`` passes three. The per-file lifecycle — idempotence,
+    the ownership guard, the discard-only-secret check, dry-run print or atomic
+    write — lives here once, not triplicated per shape.
+
+    Atomic w.r.t. the ownership guard: in a non-dry-run install every foreign
+    / discard-only-secret refusal is decided BEFORE any file is written, so a
+    refusal in one slot never leaves another slot's file half-written. Each
+    file's fate is decided once by :func:`_decide` (which does the reads and
+    checks); the dry-run, refusal, and write passes below only consume those
+    decisions, so nothing is re-read.
+
+    Raises:
+        CodeHelperError: a foreign or secret-discard file is in the way and was
+            not confirmed (``force`` / ``confirm``).
+    """
+    decisions = [(f, _decide(paths, spec, f)) for f in plan]
+
+    if dry_run:
+        wrote = False
+        for f, action in decisions:
+            if action is _Action.SKIP:
+                continue
+            if action is _Action.OVERWRITE_FOREIGN:
+                print(f"would overwrite UNMANAGED file {f.path}")
+            elif action is _Action.DISCARD_SECRET:
+                print(f"would discard the only copy of {f.path}'s token")
+            else:
+                print(f"would write {f.path}")
+            wrote = True
+        return wrote
+
+    # Resolve EVERY refusal before writing ANY file — a foreign file in one
+    # slot never leaves another slot's file half-written.
+    for f, action in decisions:
+        if action in (_Action.OVERWRITE_FOREIGN, _Action.DISCARD_SECRET):
+            if not force and (confirm is None or not confirm(f.path)):
+                raise CodeHelperError(_REFUSAL[action].format(path=f.path))
+
+    wrote = False
+    for f, action in decisions:
+        if action is _Action.SKIP:
+            continue
+        if action is _Action.OVERWRITE_FOREIGN:
+            print(f"overwriting unmanaged file {f.path}")
+        elif action is _Action.DISCARD_SECRET:
+            print(f"discarding the only copy of {f.path}'s token")
+        try:
+            atomic_write(f.path, f.body, mode=f.mode)
+        except OSError as exc:
+            # A mid-sequence write failure (disk full, a read-only parent, a
+            # broken symlink) surfaces as a clean CodeHelperError instead of a
+            # raw traceback. The plan is ordered catalog → profile → wrapper so
+            # the on-PATH executable lands LAST: a failure on a sibling never
+            # leaves a broken wrapper pointing at a missing profile/catalog,
+            # only harmless orphaned siblings the next idempotent install
+            # repairs.
+            raise CodeHelperError(f"failed to write {f.path}: {exc}") from exc
+        print(f"wrote {f.path}")
+        wrote = True
+    return wrote
+
+
+def _wrapper_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_FilePlan]:
+    """The one-file plan every non-``OPENAI_TOML`` shape installs."""
+    return [
+        _FilePlan(
+            paths.script_for(spec.alias),
+            render_script(spec, token),
+            _mode_for(spec),
+            lambda _p: _is_ours(paths, spec, token),
+            True,
+        )
+    ]
+
+
+def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_FilePlan]:
+    """The three-file plan: model catalog + TOML profile + bash wrapper.
+
+    Ordered so the on-PATH executable lands LAST: if a sibling write fails
+    mid-sequence (disk full, permission), no invocable wrapper is left
+    pointing at a missing profile/catalog — only harmless orphaned siblings
+    that the next idempotent install repairs. The wrapper-first order this
+    replaced could leave a broken executable on ``PATH`` during the failure
+    window.
+
+    Each slot carries its own ownership check — :func:`_is_ours_marker_only`
+    for the wrapper AND the TOML profile (both carry the marker comment;
+    OPENAI_TOML is a new shape with no pre-marker legacy form, so the
+    legacy byte-match clause :func:`_is_ours` uses for the other shapes would
+    only ever match a third-party hand-written ``exec codex --profile`` script
+    and adopt it as ours), and :func:`_is_our_catalog` for the catalog (JSON
+    cannot carry a comment marker, so authorship is proven by the sibling
+    profile's marker). Modes: the wrapper follows :func:`_mode_for` (``0o700``
+    for a secret, else ``0o755``); the profile and catalog are ``0o600``
+    owner-only.
+    """
+    from code_helper.services.render import openai_catalog_body, openai_toml_body
+
+    catalog_path = paths.codex_catalog_for(spec.alias)
+    config_path = paths.codex_config_for(spec.alias)
+    return [
+        _FilePlan(
+            catalog_path,
+            openai_catalog_body(spec),
+            0o600,
+            lambda _p: _is_our_catalog(paths, spec.alias),
+            False,
+        ),
+        _FilePlan(
+            config_path,
+            openai_toml_body(spec, str(catalog_path)),
+            0o600,
+            _is_ours_marker_only,
+            False,
+        ),
+        _FilePlan(
+            paths.script_for(spec.alias),
+            render_script(spec, token),
+            _mode_for(spec),
+            _is_ours_marker_only,
+            True,
+        ),
+    ]
+
+
+def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) -> bool:
+    """Remove the ``~/.codex/<alias>.config.toml`` + ``<alias>.model.json`` we wrote.
+
+    Only meaningful when a PREVIOUS install under ``alias`` was OPENAI_TOML and
+    the new one is not: the old profile/catalog no longer match anything the
+    new wrapper dispatches to, so leaving them is silent clutter (and a stale
+    catalog could mislead a later ``codex --profile <alias>`` if the alias is
+    ever reused for OPENAI_TOML again).
+
+    Each sibling is gated by ITS OWN ownership proof, independently —
+    :func:`_is_ours_marker_only` for the profile, :func:`_catalog_self_marked`
+    for the catalog. This is deliberately NOT "the profile's marker decides
+    both": an earlier version inferred the catalog's fate from the profile
+    alone, which meant a hand-curated catalog sitting next to OUR profile was
+    deleted with no ``--force`` and no prompt — the exact thing the
+    install-time ownership guard exists to prevent, just reached through a
+    different door. A foreign profile or foreign catalog is left untouched,
+    matching what the install guard would have refused to overwrite.
+
+    Note this is stricter than :func:`_is_our_catalog` (the install-time
+    check, which also accepts the sibling-marker fallback for a catalog
+    written before :data:`render.CATALOG_MANAGED_BY_KEY` existed): a DELETE
+    has no ``--force`` escape hatch the way an overwrite does, and the
+    sibling-marker proof is fundamentally ambiguous for a delete — "the
+    profile next to this catalog is ours" cannot distinguish a legacy catalog
+    WE wrote from a foreign one a user happened to drop next to our profile.
+    An install-time overwrite gated on that proof is at least reversible by
+    restoring a backup; an unprompted delete is not, so cleanup only removes
+    what the catalog can prove about ITSELF. A legacy catalog with no
+    self-marker is deliberately left as a harmless orphan rather than risking
+    a foreign file's silent deletion — the safe direction to be wrong in.
+
+    Best-effort by design: called AFTER the wrapper install already succeeded
+    (see ``install_wrapper``), so a failure here must never make a successful
+    install look failed. An unlink failure is reported on stderr and skipped,
+    not raised — unlike the install-time write path, where a failure aborts
+    before anything user-visible has changed.
+
+    Returns:
+        True iff anything was removed (or, in dry-run, would be) — folded into
+        ``install_wrapper``'s own return value so a run whose only effect was
+        deleting orphaned siblings is not reported as "no changes".
+    """
+    import sys
+
+    config_path = paths.codex_config_for(alias)
+    catalog_path = paths.codex_catalog_for(alias)
+
+    to_remove = [
+        path
+        for path, is_ours in (
+            (catalog_path, _catalog_self_marked(catalog_path)),
+            (config_path, _is_ours_marker_only(config_path)),
+        )
+        if path.exists() and is_ours
+    ]
+
+    changed = False
+    for path in to_remove:
+        if dry_run:
+            print(f"would remove orphaned sibling {path}")
+            changed = True
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            print(
+                f"warning: failed to remove orphaned sibling {path}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        print(f"removed orphaned sibling {path}")
+        changed = True
+    return changed
+
+
 def install_wrapper(
     paths: Paths,
     spec: WrapperSpec | str,
@@ -407,6 +888,13 @@ def install_wrapper(
     """Write ``spec``'s script. Return True iff it wrote (or would, in dry-run).
 
     Idempotent: a byte-identical re-install is a no-op.
+
+    The shape selects the file plan — one file for most shapes
+    (:func:`_wrapper_plan`), three for ``OPENAI_TOML``
+    (:func:`_openai_toml_plan`: bash wrapper + TOML profile + model catalog) —
+    and one orchestrator (:func:`_install_plan`) writes whichever plan it was
+    handed, so the ownership guard, dry-run, force, and confirm behaviour are
+    identical per file regardless of how many files a shape writes.
 
     Args:
         paths: Resolved :class:`Paths`.
@@ -432,45 +920,30 @@ def install_wrapper(
     )
     spec = resolved
 
-    body = render_script(spec, token)
-    script = paths.script_for(spec.alias)
+    plan = (
+        _openai_toml_plan(paths, spec, token)
+        if spec.shape is ConfigShape.OPENAI_TOML
+        else _wrapper_plan(paths, spec, token)
+    )
+    wrote = _install_plan(
+        paths, spec, plan, dry_run=dry_run, force=force, confirm=confirm
+    )
 
-    if script.exists() and _read_text_or_none(script) == body:
-        return False  # identical script already installed
+    # A non-OPENAI_TOML install under an alias that previously held an
+    # OPENAI_TOML install leaves the ``~/.codex/<alias>.*`` siblings orphaned
+    # — the new wrapper no longer dispatches ``codex --profile <alias>``. Runs
+    # regardless of whether the wrapper slot itself changed (a SKIP re-install
+    # under an alias that still carries stale siblings must still clean them
+    # up — the siblings are the whole point, not a side effect of the wrapper
+    # write), but only for OUR siblings; a refusal above already raised before
+    # reaching here, so nothing here is racing an unresolved guard decision.
+    # Its own return value is folded into ``wrote`` so a run whose only effect
+    # was deleting orphaned siblings is not reported as "no changes".
+    if spec.shape is not ConfigShape.OPENAI_TOML:
+        cleaned = _cleanup_openai_toml_siblings(paths, spec.alias, dry_run=dry_run)
+        wrote = wrote or cleaned
 
-    # Ownership check runs only for a file we did not write. Order matters:
-    # the idempotence check above means an unchanged reinstall never prompts.
-    if script.exists() and not _is_ours(paths, spec, token):
-        if dry_run:
-            print(f"would overwrite UNMANAGED file {script}")
-            return True
-        if not force:
-            if confirm is None or not confirm(script):
-                raise CodeHelperError(
-                    f"{script} exists and was not created by code-helper — "
-                    f"refusing to overwrite (use --force)"
-                )
-        print(f"overwriting unmanaged file {script}")
-    elif script.exists() and _discards_only_secret(paths, spec, script):
-        # Ours, but a DIFFERENT wrapper whose token exists nowhere else.
-        if dry_run:
-            print(f"would discard the only copy of {script}'s token")
-            return True
-        if not force:
-            if confirm is None or not confirm(script):
-                raise CodeHelperError(
-                    f"{script} holds a wrapper whose token exists nowhere else, "
-                    f"and the replacement does not use one — refusing to discard "
-                    f"the only copy of its token (use --force)"
-                )
-        print(f"discarding the only copy of {script}'s token")
-
-    if dry_run:
-        print(f"would write {script}")
-        return True
-    atomic_write(script, body, mode=_mode_for(spec))
-    print(f"wrote {script}")
-    return True
+    return wrote
 
 
 def describe_wrapper(

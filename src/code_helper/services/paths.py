@@ -1,10 +1,11 @@
 """Pure-domain ``Paths`` object: the root configuration object of the project.
 
 Every filesystem path the tool touches is resolved from a single injected
-``home`` through ``Paths.from_home`` — just ``~/.local/bin`` (the XDG user-bin
-dir where every generated wrapper script lives). This is the single source of
-truth for resolved paths: no other module may hard-code ``~/.local/bin``
-literals.
+``home`` through ``Paths.from_home`` — ``~/.local/bin`` (the XDG user-bin dir
+where every generated wrapper script lives) and ``~/.codex`` (Codex's config
+dir, written only by the OPENAI_TOML shape). This is the single source of
+truth for resolved paths: no other module may hard-code ``~/.local/bin`` or
+``~/.codex`` literals.
 
 This module lives in the ``services/`` layer (pure domain services, no side
 effects). ``from_home`` is PURE path arithmetic — it performs no IO at all and
@@ -39,6 +40,10 @@ class Paths:
     """
 
     bin_dir: Path
+    #: ``~/.codex`` — Codex's per-profile config dir. The OPENAI_TOML shape
+    #: writes ``<alias>.config.toml`` / ``<alias>.model.json`` here; Codex's own
+    #: ``config.toml`` is deliberately NEVER touched.
+    codex_dir: Path
 
     @classmethod
     def from_home(cls, home: str | Path) -> Paths:
@@ -52,9 +57,11 @@ class Paths:
         - ``bin_dir`` = ``home / ".local" / "bin"`` — the XDG user-bin dir
           where every generated wrapper script (``deepseek``, ``glm``, ...)
           lives. It is typically already on ``PATH``.
+        - ``codex_dir`` = ``home / ".codex"`` — Codex's config dir; the
+          OPENAI_TOML shape writes profile files here.
         """
         h = Path(home)
-        return cls(bin_dir=h / ".local" / "bin")
+        return cls(bin_dir=h / ".local" / "bin", codex_dir=h / ".codex")
 
     @classmethod
     def default(cls) -> Paths:
@@ -66,6 +73,29 @@ class Paths:
         """
         return cls.from_home(Path.home())
 
+    def _require_single_component(self, name: str, *, noun: str) -> None:
+        """Raise unless ``name`` is a single path component.
+
+        ``Path(name).name != name`` is the whole check: it rejects
+        ``"../../etc/passwd"``, ``"a/b"``, ``""``, ``"."`` and ``".."`` alike,
+        without ``resolve()`` — so this stays pure arithmetic with no IO. The
+        single shared predicate behind :meth:`script_for` and the
+        ``~/.codex`` accessors: each public accessor still enforces it
+        independently (the structural-safety argument is preserved), but the
+        condition itself lives in one place.
+
+        Args:
+            noun: The human-facing label in the error (``"wrapper name"`` for
+                :meth:`script_for`, ``"alias"`` for the ``~/.codex`` accessors).
+
+        Raises:
+            CodeHelperError: ``name`` is not a single path component.
+        """
+        if name in ("", ".", "..") or Path(name).name != name:
+            raise CodeHelperError(
+                f"invalid {noun} (must be a single path component): {name!r}"
+            )
+
     def script_for(self, name: str) -> Path:
         """Return the resolved path of the wrapper script named ``name``.
 
@@ -75,19 +105,38 @@ class Paths:
         independent of :func:`code_helper.services.naming.validate_alias`:
         that function owns the human-facing rules and runs early, this one
         guarantees that no code path — including a future one that forgets to
-        validate — can address a file outside ``bin_dir``. Duplication here is
-        deliberate; the failure it prevents is writing an executable to an
-        arbitrary filesystem location.
-
-        ``Path(name).name != name`` is the whole check: it rejects
-        ``"../../etc/passwd"``, ``"a/b"``, ``""``, ``"."`` and ``".."`` alike,
-        without ``resolve()`` — so this stays pure arithmetic with no IO.
-
-        Raises:
-            CodeHelperError: ``name`` is not a single path component.
+        validate — can address a file outside ``bin_dir``. The cross-module
+        duplication with :func:`validate_alias` is deliberate; the failure it
+        prevents is writing an executable to an arbitrary filesystem location.
         """
-        if name in ("", ".", "..") or Path(name).name != name:
-            raise CodeHelperError(
-                f"invalid wrapper name (must be a single path component): {name!r}"
-            )
+        self._require_single_component(name, noun="wrapper name")
         return self.bin_dir / name
+
+    def _single_component(self, alias: str, *, suffix: str) -> Path:
+        """``codex_dir / <alias>.<suffix>`` with the same single-component guard
+        as :meth:`script_for`.
+
+        The alias flows into a filename written under ``~/.codex``, so the same
+        structural guard applies (independent of :func:`validate_alias`, which
+        owns the human-facing rules and runs earlier). The suffix is appended
+        after the guard so it cannot smuggle a path separator.
+        """
+        self._require_single_component(alias, noun="alias")
+        return self.codex_dir / f"{alias}.{suffix}"
+
+    def codex_config_for(self, alias: str) -> Path:
+        """``~/.codex/<alias>.config.toml`` — the OPENAI_TOML profile.
+
+        Pure arithmetic, no IO. Codex resolves the profile name from the file
+        basename, so ``<alias>.config.toml`` is addressed as ``--profile
+        <alias>``.
+        """
+        return self._single_component(alias, suffix="config.toml")
+
+    def codex_catalog_for(self, alias: str) -> Path:
+        """``~/.codex/<alias>.model.json`` — the model catalog for the profile.
+
+        Gives Codex a ``context_window`` for models it does not ship knowledge
+        of (e.g. ``glm-5.2:cloud``). Pure arithmetic, no IO.
+        """
+        return self._single_component(alias, suffix="model.json")

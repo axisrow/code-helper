@@ -164,6 +164,25 @@ def build_spec(
 
     chosen = resolve_shape(agent_obj, provider_obj, preferred=shape)
 
+    # OPENAI_TOML carries the token NOWHERE: the wrapper is just
+    # ``exec codex --profile <alias> "$@"`` and the profile has no ``env_key``
+    # field this renderer writes — so a ``secret``-auth provider resolves to a
+    # wrapper that has no way to pass its credential, and ``edit-token`` would
+    # be a silent no-op. Refuse here, BEFORE any caller resolves a token, so a
+    # typo or an impossible pairing never triggers an interactive prompt for a
+    # wrapper that cannot be written — the same contract the missing-model
+    # check below upholds. (No shipped provider hits this today: ollama is
+    # ``literal``. The guard is for a future OpenAI-compatible provider whose
+    # owner declares it ``secret`` without realising OPENAI_TOML cannot carry
+    # that — better a clear error now than a silent credential drop later.)
+    if chosen is ConfigShape.OPENAI_TOML and provider_obj.auth == "secret":
+        raise CodeHelperError(
+            f"provider {provider_obj.name!r} uses secret auth, but the "
+            f"openai-toml shape has no way to carry a token — "
+            f"{agent_obj.name} + {provider_obj.name} cannot be configured "
+            f"this way"
+        )
+
     if not model and tier_models is None:
         raise CodeHelperError(
             f"a model is required for {agent_obj.name} + {provider_obj.name}"
