@@ -123,14 +123,60 @@ def resolve_default_patch(
 #: appends them (matches the issue's own example layout).
 _TOP_LEVEL_KEYS = ("model", "model_provider", "model_catalog_json")
 
-#: Matches the START of the first table header — `[table]` or `[[array]]` —
-#: which is where the top-level section ends. MULTILINE, anchored to line
-#: start so a `[` inside a string value or a comment never matches.
+#: Matches the START of a line that COULD be a table header — `[table]` or
+#: `[[array]]`. MULTILINE, anchored to line start so a `[` inside a string
+#: value or a comment never matches. This is a CANDIDATE only: a line inside
+#: an open multi-line array (`some_array = [\n[1, 2],\n...`) also starts with
+#: `[` and would match here too, which is why callers walk candidates via
+#: :func:`_first_real_table_boundary` rather than taking the first match
+#: as-is — see that function's docstring for why depth-tracking is needed.
 _FIRST_TABLE_RE = re.compile(r"^\[", re.MULTILINE)
 
 #: Matches ANY table header line — used to find the end of a specific named
 #: table's body (its content runs until the next one of these, or EOF).
 _ANY_TABLE_HEADER_RE = re.compile(r"^\[.*$", re.MULTILINE)
+
+#: A crude, line-oriented bracket counter — NOT a TOML lexer. Strips `#`
+#: line-comments and `"..."`/`'...'` quoted spans (both single- and
+#: triple-quoted, non-greedily) before counting `[`/`]`/`{`/`}`, so a
+#: bracket character INSIDE a string or comment never perturbs the count.
+#: Good enough to detect "is this line inside an open multi-line array or
+#: inline table", which is all :func:`_first_real_table_boundary` needs —
+#: it does not need to understand TOML values otherwise.
+_STRING_OR_COMMENT_RE = re.compile(
+    r'"""(?:.|\n)*?"""|\'\'\'(?:.|\n)*?\'\'\'|"(?:[^"\\]|\\.)*"|\'[^\']*\'|#[^\n]*'
+)
+
+
+def _first_real_table_boundary(text: str) -> int | None:
+    """Index where the FIRST real top-level table header begins, or ``None``.
+
+    A line starting with ``[`` is only a genuine table/array-of-tables header
+    when it appears OUTSIDE any open bracket — a continuation line of a
+    multi-line top-level array (e.g. ``some_array = [\\n[1, 2],\\n...``) also
+    starts with ``[`` syntactically but is NOT a table boundary. Round-3
+    review caught this: ``_patch_top_level`` used to take the first ``^\\[``
+    match unconditionally, so an unindented multi-line array made it splice
+    the managed keys into the middle of the array literal, producing invalid
+    TOML — caught by ``_verify_patch_applied`` before any write (so nothing
+    was ever corrupted), but with a confusing "internal error, this is a
+    code-helper bug" message for what is actually a legitimate, if unusual,
+    TOML layout. This walks line-by-line, tracking a running bracket depth
+    (via :data:`_STRING_OR_COMMENT_RE` to ignore brackets inside strings/
+    comments), and only accepts a ``^\\[`` candidate when the depth entering
+    that line is 0.
+    """
+    depth = 0
+    pos = 0
+    for line in text.splitlines(keepends=True):
+        if depth == 0 and _FIRST_TABLE_RE.match(line):
+            return pos
+        stripped = _STRING_OR_COMMENT_RE.sub("", line)
+        depth += stripped.count("[") + stripped.count("{")
+        depth -= stripped.count("]") + stripped.count("}")
+        depth = max(depth, 0)  # a stray closer must never go negative
+        pos += len(line)
+    return None
 
 
 def _patch_value_for(key: str, patch: DefaultPatch) -> str:
@@ -146,15 +192,18 @@ def _patch_value_for(key: str, patch: DefaultPatch) -> str:
 def _patch_top_level(original: str, patch: DefaultPatch) -> str:
     """Replace/insert the three top-level scalar keys. Pure, no IO.
 
-    Operates ONLY on the slice before the first ``^[`` line (or the whole file
-    if there is none) — a table with a colliding-looking body can never be
+    Operates ONLY on the slice before the first REAL table header (see
+    :func:`_first_real_table_boundary` — a line starting with ``[`` inside an
+    open multi-line array/inline table does not count) or the whole file if
+    there is none. A table with a colliding-looking body can never be
     touched by this step. Each key is handled independently: replaced in
     place via an anchored, single-line, ``count=1`` regex if present, else
     appended (in :data:`_TOP_LEVEL_KEYS` order, skipping keys that were
     already found) right before the top-level/table boundary.
     """
-    boundary_match = _FIRST_TABLE_RE.search(original)
-    boundary = boundary_match.start() if boundary_match else len(original)
+    boundary = _first_real_table_boundary(original)
+    if boundary is None:
+        boundary = len(original)
     top = original[:boundary]
     rest = original[boundary:]
 
@@ -479,7 +528,26 @@ def _resolve_catalog_path(paths: Paths, catalog_json: str | None) -> Path:
     return paths.codex_dir / _DEFAULT_CATALOG_NAME
 
 
-def _write_catalog(
+@dataclass(frozen=True)
+class _CatalogPlan:
+    """What :func:`_gate_catalog_write` decided, ready for
+
+    :func:`_commit_catalog_write` — the confirm/refuse decision and the
+    write itself are split into two calls so :func:`apply_set_default` can
+    confirm BOTH the catalog and the config.toml writes before committing
+    EITHER one (see the ordering comment there).
+    """
+
+    catalog_path: Path
+    body: str
+    existing: str | None
+    overwriting: bool
+    #: True when there is nothing to do — ``body`` already matches
+    #: ``existing`` exactly (idempotent no-op).
+    no_op: bool
+
+
+def _gate_catalog_write(
     patch: DefaultPatch,
     agent: Agent,
     provider: Provider,
@@ -488,20 +556,18 @@ def _write_catalog(
     dry_run: bool,
     force: bool,
     confirm,
-) -> bool:
-    """Write the default's model catalog, respecting its own ownership guard.
+) -> _CatalogPlan:
+    """Decide whether the catalog write is allowed, WITHOUT writing anything.
 
     Reuses the SAME structural ``managed_by`` proof
     (``wrappers._catalog_self_marked``) the per-alias OPENAI_TOML catalogs use
     — a hand-curated ``~/.codex/model.json`` is protected exactly like a
-    hand-curated ``<alias>.model.json`` would be. Unlike the round-1 version
-    of this function, EVERY real overwrite of EXISTING content — foreign or
-    our own previously-managed catalog — goes through the confirm/force gate
-    and gets its own backup slot rotated first (:func:`_catalog_backup_slots`
-    / :func:`_rotate_backups`), same posture as config.toml. A managed catalog
-    is not exempt: it is exactly the common case (a second ``set-default``
-    changing the model), and silently clobbering it with no confirm and no
-    backup was the actual gap — the confirm/force gate previously fired only
+    hand-curated ``<alias>.model.json`` would be. EVERY real overwrite of
+    EXISTING content — foreign or our own previously-managed catalog — goes
+    through the confirm/force gate, same posture as config.toml. A managed
+    catalog is not exempt: it is exactly the common case (a second
+    ``set-default`` changing the model), and silently clobbering it with no
+    confirm was the actual gap — the confirm/force gate previously fired only
     for a FOREIGN catalog, so switching models normally overwrote the
     previous default's catalog with no prompt and no way back.
 
@@ -512,6 +578,10 @@ def _write_catalog(
             :func:`diff_preview`) whenever existing content would be
             overwritten, so the prompt shows what is about to change, same as
             the config.toml patch prompt.
+
+    Raises:
+        CodeHelperError: the overwrite is refused (no ``--force``/confirm).
+            Never raises under ``--dry-run`` — that path only previews.
     """
     spec = build_spec(
         agent=agent,
@@ -524,16 +594,15 @@ def _write_catalog(
 
     existing = _read_text_or_none(catalog_path)
     if existing == body:
-        return False  # already exactly this — no-op, idempotent
+        return _CatalogPlan(catalog_path, body, existing, False, no_op=True)
 
     foreign = existing is not None and not _catalog_self_marked(catalog_path)
     overwriting_existing_content = existing is not None
 
     if dry_run:
-        # --dry-run never prompts and never refuses — it only previews, same
-        # ordering as the config.toml patch above.
-        print(f"would write {catalog_path}")
-        return True
+        return _CatalogPlan(
+            catalog_path, body, existing, overwriting_existing_content, no_op=False
+        )
 
     catalog_preview = diff_preview(existing or "", body, label=str(catalog_path))
     if overwriting_existing_content and not force:
@@ -549,11 +618,24 @@ def _write_catalog(
                 f"confirmation (use --force, or re-run interactively)"
             )
 
-    if overwriting_existing_content:
-        _rotate_backups(_catalog_backup_slots(catalog_path), current=existing)
+    return _CatalogPlan(
+        catalog_path, body, existing, overwriting_existing_content, no_op=False
+    )
 
-    atomic_write(catalog_path, body, mode=None)
-    print(f"wrote {catalog_path}")
+
+def _commit_catalog_write(plan: _CatalogPlan) -> bool:
+    """The write-only half of the catalog flow — commits a plan already
+
+    confirmed/force-gated by :func:`_gate_catalog_write`. Returns whether
+    anything changed (``True`` unless ``plan.no_op``).
+    """
+    if plan.no_op:
+        return False
+    if plan.overwriting:
+        assert plan.existing is not None  # implied by `overwriting`
+        _rotate_backups(_catalog_backup_slots(plan.catalog_path), current=plan.existing)
+    atomic_write(plan.catalog_path, plan.body, mode=None)
+    print(f"wrote {plan.catalog_path}")
     return True
 
 
@@ -571,13 +653,16 @@ def apply_set_default(
     """Patch Codex's ``~/.codex/config.toml`` to default onto ``agent``/``provider``/``model``.
 
     Orchestrates the whole ``set-default`` flow: pre-check -> resolve patch ->
-    apply -> post-check -> write the sibling catalog through its own
-    ownership guard FIRST (it's the artifact config.toml's
-    ``model_catalog_json`` key references, so it must exist/be correct before
-    the reference is written) -> then, if there is an actual change, rotate
-    backups, confirm/force-gate, write config.toml. Mirrors
-    ``wrappers.install_wrapper``'s shape (paths spec, dry_run, force, confirm)
-    so the CLI handler stays a thin shell.
+    apply -> post-check -> GATE both the catalog write and the config.toml
+    patch (confirm/force, raising on refusal) BEFORE committing EITHER one ->
+    only once both gates pass, commit the catalog write then the config.toml
+    write. Gating both up front — rather than writing the catalog as soon as
+    its own gate passes, then separately gating config.toml — is what
+    guarantees a refusal on either file leaves BOTH files untouched; the
+    two-phase ``_gate_catalog_write``/``_commit_catalog_write`` split exists
+    specifically to make this possible. Mirrors ``wrappers.install_wrapper``'s
+    shape (paths spec, dry_run, force, confirm) so the CLI handler stays a
+    thin shell.
 
     Args:
         confirm: ``(path: Path, preview: str) -> bool`` — called ONLY when a
@@ -609,17 +694,19 @@ def apply_set_default(
 
     config_changed = patched != original
 
-    # Catalog FIRST, config SECOND: config.toml's model_catalog_json key
-    # REFERENCES the catalog, so the referenced artifact must be established
-    # before the reference is written. Writing config first and having the
-    # catalog write fail/refuse afterward (foreign file without --force, or
-    # an I/O error) would leave config.toml already committed and pointing at
-    # a catalog that was never updated — a half-applied, inconsistent state
-    # with no automatic rollback. Reversing the order means a catalog
-    # failure leaves config.toml untouched (the pre-existing, still-consistent
-    # state), and a catalog success followed by a config failure just leaves
-    # an unreferenced-but-correct catalog file, which is harmless.
-    catalog_wrote = _write_catalog(
+    # GATE both writes (confirm/force, raise on refusal) BEFORE committing
+    # EITHER one — this is what guarantees a refusal on either file leaves
+    # BOTH files completely untouched, no matter which order they're checked
+    # in. An earlier version of this function wrote the catalog immediately
+    # once its own gate passed, then gated config.toml separately — so a
+    # catalog write that succeeded followed by a DECLINED config confirm left
+    # the catalog already changed while the (unpatched) config.toml, in the
+    # common case where the catalog path is unchanged across runs, still
+    # actively referenced it: not "harmless and unreferenced" as a prior
+    # comment here claimed, but a live config<->catalog mismatch. Gating both
+    # first removes the whole class of "one file wrote, the other refused"
+    # states.
+    catalog_plan = _gate_catalog_write(
         patch,
         agent,
         provider,
@@ -629,23 +716,31 @@ def apply_set_default(
         confirm=confirm,
     )
 
-    if config_changed:
-        preview = diff_preview(original, patched)
-        if dry_run:
-            # --dry-run never prompts and never refuses — it only previews,
-            # same contract as wrappers._install_plan (dry_run checked BEFORE
-            # any confirm/force gate).
+    preview = diff_preview(original, patched) if config_changed else ""
+    if config_changed and not dry_run:
+        if not force and not (confirm and confirm(config_path, preview)):
+            raise CodeHelperError(
+                f"about to patch {config_path} — refusing without "
+                f"confirmation (use --force, or re-run interactively)"
+            )
+
+    # Both gates passed (or --dry-run, which never raises) — now commit.
+    if dry_run:
+        if not catalog_plan.no_op:
+            print(f"would write {catalog_path}")
+        if config_changed:
             print(preview or "(no textual change)")
             print(f"would write {config_path}")
         else:
-            if not force and not (confirm and confirm(config_path, preview)):
-                raise CodeHelperError(
-                    f"about to patch {config_path} — refusing without "
-                    f"confirmation (use --force, or re-run interactively)"
-                )
-            _rotate_backups(_config_backup_slots(paths), current=original)
-            atomic_write(config_path, patched, mode=None)
-            print(f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})")
+            print("no changes to config.toml")
+        return not catalog_plan.no_op or config_changed
+
+    catalog_wrote = _commit_catalog_write(catalog_plan)
+
+    if config_changed:
+        _rotate_backups(_config_backup_slots(paths), current=original)
+        atomic_write(config_path, patched, mode=None)
+        print(f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})")
     else:
         print("no changes to config.toml")
 
@@ -716,6 +811,14 @@ def restore_default(
             print(f"would restore {catalog_path} from {catalog_backup_path}")
         return True
 
+    # Confirm BOTH restores before writing EITHER file. Writing config first
+    # (as an earlier version of this function did) and then asking about the
+    # catalog meant a declined catalog confirm left config.toml ALREADY
+    # overwritten with backup_body — an inconsistent config<->catalog pairing
+    # (the exact thing the paired restore exists to avoid) with no rollback,
+    # since this function does not itself back up ``current`` before
+    # overwriting it. Collecting every confirmation up front means a refusal
+    # on either file leaves BOTH files completely untouched.
     if current != backup_body:
         preview = diff_preview(current, backup_body)
         if not force and not (confirm and confirm(config_path, preview)):
@@ -723,9 +826,6 @@ def restore_default(
                 f"about to restore {config_path} from {backup_path} — refusing "
                 f"without confirmation (use --force)"
             )
-        atomic_write(config_path, backup_body, mode=None)
-        print(f"restored {config_path} from {backup_path}")
-
     if catalog_changed:
         assert catalog_backup_body is not None  # implied by catalog_changed above
         catalog_preview = diff_preview(
@@ -736,6 +836,12 @@ def restore_default(
                 f"about to restore {catalog_path} from {catalog_backup_path} — "
                 f"refusing without confirmation (use --force)"
             )
+
+    if current != backup_body:
+        atomic_write(config_path, backup_body, mode=None)
+        print(f"restored {config_path} from {backup_path}")
+    if catalog_changed:
+        assert catalog_backup_body is not None  # implied by catalog_changed above
         atomic_write(catalog_path, catalog_backup_body, mode=None)
         print(f"restored {catalog_path} from {catalog_backup_path}")
 

@@ -221,6 +221,30 @@ def test_patch_handles_a_model_value_with_a_control_character():
     assert 'model = "glm\\u0001bad"' in result
 
 
+@pytest.mark.unit
+def test_patch_does_not_splice_into_an_unindented_multi_line_array():
+    """A top-level multi-line array whose continuation lines start at column
+
+    0 with ``[`` (no leading indentation) must not be mistaken for a table
+    header — the managed keys must land AFTER the array closes, not spliced
+    into the middle of it, and the result must be valid TOML.
+    """
+    tomllib = pytest.importorskip("tomllib")
+    original = (
+        'some_array = [\n[1, 2],\n[3, 4],\n]\n\n[model_providers.other]\nname = "x"\n'
+    )
+    patch = _patch()
+    result = patch_config_toml(original, patch)
+
+    # The array body is untouched — nothing was inserted between its `[` and
+    # its first element.
+    assert "some_array = [\n[1, 2],\n[3, 4],\n]\n" in result
+    # The managed keys landed after the array closed, not inside it.
+    assert result.index("]\n") < result.index('model = "glm-5.2:cloud"')
+    # And the whole thing parses as valid TOML.
+    tomllib.loads(result)
+
+
 # ---------------------------------------------------------------------------
 # resolve_default_patch — axis validation
 # ---------------------------------------------------------------------------
@@ -493,6 +517,80 @@ def test_set_default_restore_also_restores_the_paired_catalog(tmp_path):
     # describe the model set-default was just undone away from.
     assert "glm-4.7" in catalog_text
     assert "glm-5.2" not in catalog_text
+
+
+@pytest.mark.integration
+def test_set_default_restore_declining_catalog_leaves_both_files_untouched(
+    tmp_path,
+):
+    """A declined CATALOG confirm during ``--restore`` must not leave
+
+    config.toml already restored — both files must be gated BEFORE either is
+    written, or a declined catalog restore leaves config.toml pointing at
+    ``model_catalog_json`` while the catalog itself still describes the
+    model the restore was supposed to move away from (and, since
+    ``restore_default`` does not itself back up ``current`` before
+    overwriting, the pre-restore config would be unrecoverable).
+    """
+    paths = Paths.from_home(tmp_path)
+    _install(paths, model="glm-4.7", force=True)
+    _install(paths, model="glm-5.2:cloud", force=True)
+
+    config_before = paths.codex_main_config().read_text(encoding="utf-8")
+    catalog_path = paths.codex_dir / "model.json"
+    catalog_before = catalog_path.read_text(encoding="utf-8")
+
+    calls = []
+
+    def _accept_config_decline_catalog(path, preview):
+        calls.append(path)
+        return path == paths.codex_main_config()
+
+    with pytest.raises(CodeHelperError, match="refusing without confirmation"):
+        restore_default(paths, slot=1, confirm=_accept_config_decline_catalog)
+
+    # BOTH confirms were asked (proves the gate-both-first ordering), and
+    # NEITHER file was written despite the config confirm being accepted.
+    assert len(calls) == 2
+    assert paths.codex_main_config().read_text(encoding="utf-8") == config_before
+    assert catalog_path.read_text(encoding="utf-8") == catalog_before
+
+
+@pytest.mark.integration
+def test_set_default_declining_config_after_accepting_catalog_leaves_both_untouched(
+    tmp_path,
+):
+    """A declined CONFIG confirm during ``set-default`` must not leave the
+
+    catalog already overwritten — both writes must be gated before either is
+    committed, or a declined config confirm leaves the (unpatched, still
+    live) config.toml referencing a catalog that was already changed to
+    describe a different model.
+    """
+    paths = Paths.from_home(tmp_path)
+    _install(paths, model="glm-4.7", force=True)
+
+    config_before = paths.codex_main_config().read_text(encoding="utf-8")
+    catalog_path = paths.codex_dir / "model.json"
+    catalog_before = catalog_path.read_text(encoding="utf-8")
+
+    calls = []
+
+    def _accept_catalog_decline_config(path, preview):
+        calls.append(path)
+        return path == catalog_path
+
+    with pytest.raises(CodeHelperError, match="refusing without confirmation"):
+        _install(
+            paths,
+            model="glm-5.2:cloud",
+            force=False,
+            confirm=_accept_catalog_decline_config,
+        )
+
+    assert len(calls) == 2
+    assert paths.codex_main_config().read_text(encoding="utf-8") == config_before
+    assert catalog_path.read_text(encoding="utf-8") == catalog_before
 
 
 @pytest.mark.integration
