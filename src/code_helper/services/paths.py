@@ -41,8 +41,11 @@ class Paths:
 
     bin_dir: Path
     #: ``~/.codex`` — Codex's per-profile config dir. The OPENAI_TOML shape
-    #: writes ``<alias>.config.toml`` / ``<alias>.model.json`` here; Codex's own
-    #: ``config.toml`` is deliberately NEVER touched.
+    #: writes ``<alias>.config.toml`` / ``<alias>.model.json`` here. Codex's own
+    #: ``config.toml`` is left untouched by every command EXCEPT the explicit
+    #: ``set-default`` (``services/codex_default.py``), which patches only its
+    #: own managed top-level keys and ``[model_providers.X]`` table there —
+    #: never a fragment any other command writes.
     codex_dir: Path
 
     @classmethod
@@ -140,3 +143,29 @@ class Paths:
         of (e.g. ``glm-5.2:cloud``). Pure arithmetic, no IO.
         """
         return self._single_component(alias, suffix="model.json")
+
+    def codex_main_config(self) -> Path:
+        """``~/.codex/config.toml`` — Codex's OWN default config.
+
+        Distinct from :meth:`codex_config_for`: that is a per-alias PROFILE
+        file this tool owns outright; this is Codex's single top-level config
+        file, which this tool never owns and only ever patches (never
+        replaces) via ``services/codex_default.py``. Pure arithmetic, no IO,
+        no existence check — same contract as every other accessor here.
+        """
+        return self.codex_dir / "config.toml"
+
+    def codex_main_config_backup(self, slot: int) -> Path:
+        """``~/.codex/config.toml.bak<slot>`` — one of three rotating backups.
+
+        ``slot`` must be 1, 2, or 3 (1 = most recent). ``set-default`` rotates
+        these FIFO-style before every real patch: 2→3 (oldest lost), 1→2,
+        current file→1. Kept as a fixed 3-slot ring rather than a
+        timestamp-suffixed pile — this project makes no ``datetime.now()``
+        call in business logic today, and an unbounded ``.bak-<ts>`` pile is
+        exactly the on-disk litter its "no state file" philosophy avoids
+        elsewhere (see ``wrappers.discover_managed``'s docstring).
+        """
+        if slot not in (1, 2, 3):
+            raise CodeHelperError(f"invalid backup slot (must be 1, 2, or 3): {slot!r}")
+        return self.codex_dir / f"config.toml.bak{slot}"

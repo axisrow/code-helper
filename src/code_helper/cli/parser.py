@@ -103,6 +103,26 @@ def _confirm_overwrite(path) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
+def _confirm_set_default(path, preview: str) -> bool:
+    """Ask before ``set-default`` patches/restores a real file — TTY-gated.
+
+    Deliberately NOT :func:`_confirm_overwrite`: that prompt's wording ("was
+    not created by code-helper") is misleading here — ``set-default``'s target
+    is ALWAYS foreign by definition (Codex's own config), so that phrasing
+    would fire on every single successful use rather than flag anything
+    unusual. This prompt instead shows the diff/preview so the user can see
+    exactly what is about to change before confirming. Same off-a-TTY
+    fail-fast contract as ``_confirm_overwrite`` (no stdin read, so a scripted
+    run without ``--force`` fails immediately with the hint, never hangs).
+    """
+    if not sys.stdin.isatty():
+        return False
+    if preview:
+        print(preview)
+    answer = input(f"About to write {path}. Continue? [y/N] ")
+    return answer.strip().lower() in ("y", "yes")
+
+
 def _parse_shape(raw: str | None):
     """``--shape`` string -> ``ConfigShape``, or None when not given.
 
@@ -329,6 +349,69 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_set_default(args: argparse.Namespace) -> int:
+    """Patch (or restore) Codex's OWN ``~/.codex/config.toml`` default.
+
+    Thin shell, same contract as every other handler here: resolve
+    ``Paths.default()``, delegate to the service, propagate
+    ``CodeHelperError``. The one command in this project that touches an
+    agent's own configuration file — see ``services/codex_default.py`` for
+    why that is safe (patch, never replace; always backed up first).
+    """
+    from code_helper.errors import CodeHelperError
+    from code_helper.services.codex_default import apply_set_default, restore_default
+    from code_helper.services.model import get_agent, get_provider
+    from code_helper.services.paths import Paths
+
+    paths = Paths.default()
+    dry_run = getattr(args, "dry_run", False)
+    force = getattr(args, "force", False)
+    restore = getattr(args, "restore", False)
+    agent_name = getattr(args, "agent", None)
+    provider_name = getattr(args, "provider", None)
+    model = getattr(args, "model", None)
+
+    if restore and (agent_name or provider_name or model):
+        raise CodeHelperError(
+            "--restore cannot be combined with --agent/--provider/--model"
+        )
+
+    if restore:
+        slot = getattr(args, "slot", None) or 1
+        wrote = restore_default(
+            paths,
+            slot=slot,
+            dry_run=dry_run,
+            force=force,
+            confirm=_confirm_set_default,
+        )
+        if not wrote:
+            print("no changes")
+        return 0
+
+    if not agent_name or not provider_name:
+        raise CodeHelperError("--agent and --provider must be given together")
+    if not model:
+        raise CodeHelperError("--model is required")
+
+    agent = get_agent(agent_name)
+    provider = get_provider(provider_name)
+
+    wrote = apply_set_default(
+        paths,
+        agent=agent,
+        provider=provider,
+        model=model,
+        catalog_json=getattr(args, "catalog_json", None),
+        dry_run=dry_run,
+        force=force,
+        confirm=_confirm_set_default,
+    )
+    if not wrote:
+        print("no changes")
+    return 0
+
+
 def _handle_tui(args: argparse.Namespace) -> int:
     """``tui`` subcommand (and bare ``code-helper``) → the arrow-key menu.
 
@@ -458,6 +541,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="wrapper name (omit to pick interactively with an arrow-key menu)",
     )
     p_edit_token.set_defaults(func=_handle_edit_token)
+
+    p_set_default = subparsers.add_parser(
+        "set-default",
+        help="patch Codex's own ~/.codex/config.toml default (the ONE command "
+        "that touches an agent's own config)",
+        parents=[sub_flags],
+    )
+    # No argparse mutually-exclusive group here: that mechanism expresses
+    # "flag A vs flag B", not "flag A vs THIS TRIPLET together" — --restore is
+    # validated against --agent/--provider/--model explicitly in the handler
+    # instead, which also gives a clearer error message than argparse's own.
+    p_set_default.add_argument(
+        "--restore",
+        action="store_true",
+        default=False,
+        help="restore config.toml from a backup slot instead of patching",
+    )
+    p_set_default.add_argument(
+        "--agent",
+        default=None,
+        help="agent to default onto, e.g. codex (see `code-helper list agents`)",
+    )
+    p_set_default.add_argument(
+        "--provider",
+        default=None,
+        help="model backend (see `code-helper list providers`)",
+    )
+    p_set_default.add_argument(
+        "--model",
+        default=None,
+        help="model name to make the default",
+    )
+    p_set_default.add_argument(
+        "--catalog-json",
+        default=None,
+        help="path to the model catalog (default: ~/.codex/model.json)",
+    )
+    p_set_default.add_argument(
+        "--slot",
+        type=int,
+        default=None,
+        choices=[1, 2, 3],
+        help="backup slot for --restore (1=newest, default: 1)",
+    )
+    p_set_default.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="skip the confirmation prompt",
+    )
+    p_set_default.set_defaults(func=_handle_set_default)
 
     p_tui = subparsers.add_parser(
         "tui",

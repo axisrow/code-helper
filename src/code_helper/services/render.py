@@ -35,6 +35,8 @@ __all__ = [
     "render_legacy_script",
     "openai_toml_body",
     "openai_catalog_body",
+    "openai_base_url",
+    "toml_string",
     "MARKER_PREFIX",
     "CATALOG_MANAGED_BY_KEY",
     "CATALOG_MANAGED_BY_VALUE",
@@ -145,7 +147,7 @@ _DEFAULT_CONTEXT_WINDOW = 128000
 _DEFAULT_MAX_OUTPUT = 32768
 
 
-def _openai_base_url(provider_base_url: str) -> str:
+def openai_base_url(provider_base_url: str) -> str:
     """Derive the OpenAI-compatible ``base_url`` for the TOML profile.
 
     A dual-shape provider like ollama serves both the Anthropic protocol and
@@ -154,6 +156,11 @@ def _openai_base_url(provider_base_url: str) -> str:
     provider follows the ``/v1``-suffix convention instead, so appending again
     would double it (``.../v1/v1/``) and every request 404s. Detect the suffix
     and append only when it is absent — one renderer serving both shapes.
+
+    Public (not ``_``-prefixed): ``services/codex_default.py`` reuses this
+    exact derivation for ``set-default``, so the two OPENAI_TOML writers (a
+    per-alias profile here, Codex's own default config there) cannot disagree
+    on how a provider's ``base_url`` becomes a ``/v1/`` endpoint.
     """
     root = provider_base_url.rstrip("/")
     if root.endswith("/v1"):
@@ -167,7 +174,11 @@ def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
     Codex ≥ 0.146.0 resolves profiles from per-file config: the basename
     ``<alias>.config.toml`` is addressed as ``--profile <alias>``, and legacy
     ``[profiles.X]`` tables inside ``config.toml`` are rejected — so this is a
-    whole file, not a fragment. ``config.toml`` is never read or modified.
+    whole file, not a fragment. This renderer never reads or modifies Codex's
+    own ``config.toml`` — that file has a separate writer entirely
+    (``services/codex_default.py``'s ``set-default`` patcher), which never
+    touches this per-alias profile in turn. The two files are siblings, not
+    layers: neither is a fragment of the other.
 
     Every provider-specific value derives from ``spec.provider`` so the shape
     is a real extension point — wiring a second OpenAI-compatible provider is
@@ -180,7 +191,7 @@ def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
       ``agent.binary`` — the one unquoted interpolation);
     - the display ``name`` is ``spec.provider.description`` (falling back to
       the provider name);
-    - ``base_url`` is :func:`_openai_base_url` (handles both ``/v1``-suffixed
+    - ``base_url`` is :func:`openai_base_url` (handles both ``/v1``-suffixed
       and bare roots);
     - ``wire_api`` is ``spec.provider.wire_api``.
 
@@ -190,22 +201,22 @@ def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
 
     The marker on line 1 is the same comment the bash wrapper carries, which is
     what lets the ownership guard recognise this as ours. Every quoted value
-    goes through :func:`_toml_string`; the table key is the only bare
+    goes through :func:`toml_string`; the table key is the only bare
     interpolation, safe by the import-time check.
     """
     table = spec.provider.name
     display_name = spec.provider.description or spec.provider.name
-    base_url = _openai_base_url(spec.provider.base_url)
+    base_url = openai_base_url(spec.provider.base_url)
     return (
         f"{_marker(spec)}\n"
-        f'model = "{_toml_string(spec.model)}"\n'
-        f'model_provider = "{_toml_string(table)}"\n'
-        f'model_catalog_json = "{_toml_string(catalog_path)}"\n'
+        f'model = "{toml_string(spec.model)}"\n'
+        f'model_provider = "{toml_string(table)}"\n'
+        f'model_catalog_json = "{toml_string(catalog_path)}"\n'
         "\n"
         f"[model_providers.{table}]\n"
-        f'name = "{_toml_string(display_name)}"\n'
-        f'base_url = "{_toml_string(base_url)}"\n'
-        f'wire_api = "{_toml_string(spec.provider.wire_api)}"\n'
+        f'name = "{toml_string(display_name)}"\n'
+        f'base_url = "{toml_string(base_url)}"\n'
+        f'wire_api = "{toml_string(spec.provider.wire_api)}"\n'
     )
 
 
@@ -250,7 +261,7 @@ def openai_catalog_body(spec: WrapperSpec) -> str:
     return json.dumps(body, indent=2) + "\n"
 
 
-def _toml_string(value: str) -> str:
+def toml_string(value: str) -> str:
     """Quote ``value`` for a TOML basic string.
 
     TOML basic strings are ``"..."`` with ``\\`` and ``"`` escaped, and they
@@ -261,6 +272,10 @@ def _toml_string(value: str) -> str:
     escapes (``\\uXXXX`` is always valid). This is the per-target equivalent of
     the shell single-quote escape, applied to every value that originates
     outside the registry (models, base URLs, ``wire_api``).
+
+    Public (not ``_``-prefixed): ``services/codex_default.py`` reuses this
+    exact encoder for the values it patches into Codex's own ``config.toml``,
+    so the two writers of an OPENAI_TOML-shaped value cannot drift on escaping.
     """
     out: list[str] = []
     for ch in value:

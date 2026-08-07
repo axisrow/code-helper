@@ -296,9 +296,9 @@ def _model_from_body(body: str) -> str | None:
 
 
 def _toml_unescape(value: str) -> str:
-    """Reverse :func:`render._toml_string` for a TOML basic-string body.
+    """Reverse :func:`render.toml_string` for a TOML basic-string body.
 
-    Only the escapes ``_toml_string`` emits are handled (``\\\\``, ``\\"``,
+    Only the escapes ``toml_string`` emits are handled (``\\\\``, ``\\"``,
     ``\\n``, ``\\r``, ``\\t``, ``\\uXXXX``) — the values we write back out are
     the only values this ever reads. Used to recover the ``model`` from a
     profile we wrote, so a model containing a quote or a newline round-trips

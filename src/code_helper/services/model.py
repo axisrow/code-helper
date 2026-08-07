@@ -89,10 +89,13 @@ class ConfigShape(str, Enum):
     #: Implemented for ``codex × ollama`` (see ``render.openai_toml_body`` /
     #: ``openai_catalog_body``): the renderer writes its own
     #: ``~/.codex/<alias>.config.toml`` and launches ``codex --profile <alias>``
-    #: — ``~/.codex/config.toml`` is never read or modified. A provider
-    #: declaring this shape but with no renderer entry still resolves here and
-    #: surfaces as "not implemented yet" from ``render_script`` — distinct from
-    #: "incompatible", a different, honest error.
+    #: — this per-alias profile never reads or modifies ``~/.codex/config.toml``
+    #: itself. That file has a separate, explicit writer instead: the
+    #: ``set-default`` command (``services/codex_default.py``), which patches
+    #: only its own managed keys there and touches no per-alias profile. A
+    #: provider declaring this shape but with no renderer entry still resolves
+    #: here and surfaces as "not implemented yet" from ``render_script`` —
+    #: distinct from "incompatible", a different, honest error.
     OPENAI_TOML = "openai-toml"
 
 
