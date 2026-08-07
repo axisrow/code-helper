@@ -227,11 +227,9 @@ def _patch_model_providers_table(original: str, patch: DefaultPatch) -> str:
         prefix = original.rstrip("\n") + "\n\n" if original else ""
         return prefix + rendered
 
-    # Body runs from the end of the header line to the next table header (any
-    # table) or EOF.
-    body_start = header_match.end()
-    if body_start < len(original) and original[body_start] == "\n":
-        body_start += 1
+    # The whole table (header through the next table header, any table, or
+    # EOF) is replaced wholesale by `rendered`, which includes its own header
+    # line — so only the boundary AFTER the table body matters here.
     next_header = _ANY_TABLE_HEADER_RE.search(original, header_match.end() + 1)
     body_end = next_header.start() if next_header else len(original)
 
@@ -420,13 +418,18 @@ def _verify_patch_applied(original: str, patched: str, patch: DefaultPatch) -> N
             )
 
 
-def _rotate_backups(paths: Paths, *, current: str) -> None:
-    """FIFO-rotate the 3 backup slots, then archive ``current`` into slot 1.
+def _rotate_backups(slots: tuple[Path, Path, Path], *, current: str) -> None:
+    """FIFO-rotate 3 backup slots, then archive ``current`` into slot 1.
 
     2->3 (oldest lost), 1->2, current->1. Runs via atomic_write for every
     slot so the crash-safety guarantee is uniform across the whole rotation,
-    not just the final config.toml write. A slot that doesn't exist is simply
-    skipped (no error) — the ring degrades gracefully on a fresh install.
+    not just the final write. A slot that doesn't exist is simply skipped (no
+    error) — the ring degrades gracefully on a fresh install. Takes the three
+    slot paths directly (not a ``Paths`` + accessor name) so the SAME rotation
+    logic serves both ``config.toml``'s ring and the catalog's own ring —
+    the catalog needs its own backup exactly like config.toml does, since a
+    ``set-default`` overwrites the previous default's catalog just as much as
+    it overwrites the previous default's config.
 
     ``current`` is passed in by the caller (the same ``original`` text it
     already read and diffed/confirmed against) rather than re-read from disk
@@ -436,7 +439,7 @@ def _rotate_backups(paths: Paths, *, current: str) -> None:
     unreviewed content into slot 1 while writing ``patched`` (derived from the
     ORIGINAL read) would silently discard whatever changed in between.
     """
-    slot3, slot2, slot1 = (paths.codex_main_config_backup(n) for n in (3, 2, 1))
+    slot3, slot2, slot1 = slots
     body2 = _read_text_or_none(slot2)
     if body2 is not None:
         atomic_write(slot3, body2, mode=None)
@@ -445,6 +448,29 @@ def _rotate_backups(paths: Paths, *, current: str) -> None:
         atomic_write(slot2, body1, mode=None)
 
     atomic_write(slot1, current, mode=None)
+
+
+def _config_backup_slots(paths: Paths) -> tuple[Path, Path, Path]:
+    return (
+        paths.codex_main_config_backup(3),
+        paths.codex_main_config_backup(2),
+        paths.codex_main_config_backup(1),
+    )
+
+
+def _catalog_backup_slots(catalog_path: Path) -> tuple[Path, Path, Path]:
+    """The catalog's own 3-slot ring, next to the catalog itself.
+
+    Not routed through ``Paths`` (unlike the config ring) because the catalog
+    path is user-choosable via ``--catalog-json`` and need not live under
+    ``~/.codex`` at all — the backups simply live beside whatever file the
+    catalog actually is, ``<catalog>.bak1``/``.bak2``/``.bak3``.
+    """
+    return (
+        catalog_path.with_name(catalog_path.name + ".bak3"),
+        catalog_path.with_name(catalog_path.name + ".bak2"),
+        catalog_path.with_name(catalog_path.name + ".bak1"),
+    )
 
 
 def _resolve_catalog_path(paths: Paths, catalog_json: str | None) -> Path:
@@ -468,14 +494,24 @@ def _write_catalog(
     Reuses the SAME structural ``managed_by`` proof
     (``wrappers._catalog_self_marked``) the per-alias OPENAI_TOML catalogs use
     — a hand-curated ``~/.codex/model.json`` is protected exactly like a
-    hand-curated ``<alias>.model.json`` would be.
+    hand-curated ``<alias>.model.json`` would be. Unlike the round-1 version
+    of this function, EVERY real overwrite of EXISTING content — foreign or
+    our own previously-managed catalog — goes through the confirm/force gate
+    and gets its own backup slot rotated first (:func:`_catalog_backup_slots`
+    / :func:`_rotate_backups`), same posture as config.toml. A managed catalog
+    is not exempt: it is exactly the common case (a second ``set-default``
+    changing the model), and silently clobbering it with no confirm and no
+    backup was the actual gap — the confirm/force gate previously fired only
+    for a FOREIGN catalog, so switching models normally overwrote the
+    previous default's catalog with no prompt and no way back.
 
     Args:
         confirm: ``(path: Path, preview: str) -> bool`` — same signature as
             :func:`apply_set_default`'s ``confirm``, called with a unified
             diff of the existing catalog against the new one (via
-            :func:`diff_preview`) so a foreign-catalog overwrite prompt shows
-            what is about to change, same as the config.toml patch prompt.
+            :func:`diff_preview`) whenever existing content would be
+            overwritten, so the prompt shows what is about to change, same as
+            the config.toml patch prompt.
     """
     spec = build_spec(
         agent=agent,
@@ -491,6 +527,7 @@ def _write_catalog(
         return False  # already exactly this — no-op, idempotent
 
     foreign = existing is not None and not _catalog_self_marked(catalog_path)
+    overwriting_existing_content = existing is not None
 
     if dry_run:
         # --dry-run never prompts and never refuses — it only previews, same
@@ -499,16 +536,21 @@ def _write_catalog(
         return True
 
     catalog_preview = diff_preview(existing or "", body, label=str(catalog_path))
-    if (
-        foreign
-        and not force
-        and not (confirm and confirm(catalog_path, catalog_preview))
-    ):
-        raise CodeHelperError(
-            f"{catalog_path} exists and was not created by code-helper "
-            f"(missing {CATALOG_MANAGED_BY_KEY!r} marker) — refusing to "
-            f"overwrite (use --force)"
-        )
+    if overwriting_existing_content and not force:
+        if not (confirm and confirm(catalog_path, catalog_preview)):
+            if foreign:
+                raise CodeHelperError(
+                    f"{catalog_path} exists and was not created by code-helper "
+                    f"(missing {CATALOG_MANAGED_BY_KEY!r} marker) — refusing to "
+                    f"overwrite (use --force)"
+                )
+            raise CodeHelperError(
+                f"about to overwrite {catalog_path} — refusing without "
+                f"confirmation (use --force, or re-run interactively)"
+            )
+
+    if overwriting_existing_content:
+        _rotate_backups(_catalog_backup_slots(catalog_path), current=existing)
 
     atomic_write(catalog_path, body, mode=None)
     print(f"wrote {catalog_path}")
@@ -540,10 +582,11 @@ def apply_set_default(
     Args:
         confirm: ``(path: Path, preview: str) -> bool`` — called ONLY when a
             real, visible write is about to happen and neither ``--force`` nor
-            an existing no-op short-circuit applies (``preview`` is a diff for
-            the config patch, or ``""`` for the catalog's whole-file write).
-            ``None`` behaves like "always refuse" (the fail-fast-off-a-TTY
-            default the CLI layer supplies).
+            an existing no-op short-circuit applies (``preview`` is a unified
+            diff — of the config patch, or of the catalog's old vs. new
+            content — in both cases via :func:`diff_preview`). ``None``
+            behaves like "always refuse" (the fail-fast-off-a-TTY default the
+            CLI layer supplies).
 
     Returns:
         True if anything was written (or would be, under ``--dry-run``);
@@ -600,7 +643,7 @@ def apply_set_default(
                     f"about to patch {config_path} — refusing without "
                     f"confirmation (use --force, or re-run interactively)"
                 )
-            _rotate_backups(paths, current=original)
+            _rotate_backups(_config_backup_slots(paths), current=original)
             atomic_write(config_path, patched, mode=None)
             print(f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})")
     else:
@@ -613,21 +656,35 @@ def restore_default(
     paths: Paths,
     *,
     slot: int = 1,
+    catalog_json: str | None = None,
     dry_run: bool = False,
     force: bool = False,
     confirm=None,
 ) -> bool:
-    """Restore ``~/.codex/config.toml`` from backup slot ``slot`` (1-3, 1=newest).
+    """Restore ``~/.codex/config.toml`` (and its paired catalog) from slot ``slot``.
 
     Does NOT itself create a new backup slot — restoring is the "put it back"
     operation, not a fresh edit to archive. If the user runs ``set-default``
     again afterwards, THAT invocation backs up the just-restored state.
 
+    Also restores the catalog's OWN backup at the same slot number, if one
+    exists (:func:`_catalog_backup_slots`) — a restored config.toml pointing
+    at ``model_catalog_json`` while the catalog itself still describes the
+    model this call just moved AWAY from is exactly the inconsistent
+    config<->catalog pairing this command exists to avoid. ``catalog_json``
+    resolves the catalog path the SAME way :func:`apply_set_default` does
+    (:func:`_resolve_catalog_path`) — pass the same value you passed to the
+    ``set-default`` call being undone, or omit it to use the default
+    ``~/.codex/model.json`` path. The catalog restore is best-effort: a
+    missing catalog backup (e.g. the catalog was never actually changed, or
+    this restores a state from before the catalog got its own backup ring)
+    is not an error — only the config.toml restore is mandatory.
+
     Raises:
-        CodeHelperError: no backup exists at ``slot``, or the overwrite is
-            refused (no ``--force``/confirmation) — restoring can still
-            destroy a DIFFERENT current config.toml if the user edited it (by
-            hand, or via another tool) since the backup was taken.
+        CodeHelperError: no config backup exists at ``slot``, or the overwrite
+            is refused (no ``--force``/confirmation) — restoring can still
+            destroy a DIFFERENT current config.toml (or catalog) if either was
+            edited (by hand, or via another tool) since the backup was taken.
     """
     backup_path = paths.codex_main_config_backup(slot)
     backup_body = _read_text_or_none(backup_path)
@@ -636,23 +693,50 @@ def restore_default(
 
     config_path = paths.codex_main_config()
     current = _read_text_or_none(config_path) or ""
-    if current == backup_body:
+
+    catalog_path = _resolve_catalog_path(paths, catalog_json)
+    catalog_backup_slots = _catalog_backup_slots(catalog_path)
+    catalog_backup_path = catalog_backup_slots[3 - slot]
+    catalog_backup_body = _read_text_or_none(catalog_backup_path)
+    catalog_current = _read_text_or_none(catalog_path)
+    catalog_changed = (
+        catalog_backup_body is not None and catalog_current != catalog_backup_body
+    )
+
+    if current == backup_body and not catalog_changed:
         print("no changes")
         return False
 
     if dry_run:
         # --dry-run never prompts and never refuses — it only previews, same
         # ordering as apply_set_default.
-        print(f"would restore {config_path} from {backup_path}")
+        if current != backup_body:
+            print(f"would restore {config_path} from {backup_path}")
+        if catalog_changed:
+            print(f"would restore {catalog_path} from {catalog_backup_path}")
         return True
 
-    preview = diff_preview(current, backup_body)
-    if not force and not (confirm and confirm(config_path, preview)):
-        raise CodeHelperError(
-            f"about to restore {config_path} from {backup_path} — refusing "
-            f"without confirmation (use --force)"
-        )
+    if current != backup_body:
+        preview = diff_preview(current, backup_body)
+        if not force and not (confirm and confirm(config_path, preview)):
+            raise CodeHelperError(
+                f"about to restore {config_path} from {backup_path} — refusing "
+                f"without confirmation (use --force)"
+            )
+        atomic_write(config_path, backup_body, mode=None)
+        print(f"restored {config_path} from {backup_path}")
 
-    atomic_write(config_path, backup_body, mode=None)
-    print(f"restored {config_path} from {backup_path}")
+    if catalog_changed:
+        assert catalog_backup_body is not None  # implied by catalog_changed above
+        catalog_preview = diff_preview(
+            catalog_current or "", catalog_backup_body, label=str(catalog_path)
+        )
+        if not force and not (confirm and confirm(catalog_path, catalog_preview)):
+            raise CodeHelperError(
+                f"about to restore {catalog_path} from {catalog_backup_path} — "
+                f"refusing without confirmation (use --force)"
+            )
+        atomic_write(catalog_path, catalog_backup_body, mode=None)
+        print(f"restored {catalog_path} from {catalog_backup_path}")
+
     return True

@@ -383,6 +383,7 @@ def _handle_set_default(args: argparse.Namespace) -> int:
         wrote = restore_default(
             paths,
             slot=slot,
+            catalog_json=getattr(args, "catalog_json", None),
             dry_run=dry_run,
             force=force,
             confirm=_confirm_set_default,

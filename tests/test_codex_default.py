@@ -14,6 +14,7 @@ import pytest
 from code_helper.errors import CodeHelperError
 from code_helper.services.codex_default import (
     DefaultPatch,
+    _config_backup_slots,
     _rotate_backups,
     apply_set_default,
     patch_config_toml,
@@ -446,6 +447,55 @@ def test_set_default_leaves_config_untouched_when_catalog_write_is_refused(
 
 
 @pytest.mark.integration
+def test_set_default_catalog_overwrite_of_managed_catalog_requires_confirm(tmp_path):
+    """A SECOND ``set-default`` overwriting our OWN previously-managed
+
+    catalog (the common "change the default model" case, not a foreign file)
+    must still go through the confirm/force gate — round 1 only gated
+    FOREIGN catalogs, so a normal model switch silently clobbered the
+    previous default's catalog with zero confirmation and zero backup.
+    """
+    paths = Paths.from_home(tmp_path)
+    _install(paths, model="glm-4.7", force=True)
+    catalog_path = paths.codex_dir / "model.json"
+    assert "glm-4.7" in catalog_path.read_text(encoding="utf-8")
+
+    with pytest.raises(CodeHelperError, match="refusing without confirmation"):
+        _install(paths, model="glm-5.2:cloud", force=False)
+    # Refused before any write — the previous catalog survives untouched.
+    assert "glm-4.7" in catalog_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.integration
+def test_set_default_restore_also_restores_the_paired_catalog(tmp_path):
+    """``--restore`` must undo BOTH halves of a ``set-default`` — config.toml
+
+    AND the catalog it references — or a restored config can end up pointing
+    at ``model_catalog_json`` while the catalog itself still describes the
+    model the restore was supposed to move away from.
+    """
+    paths = Paths.from_home(tmp_path)
+    _install(paths, model="glm-4.7", force=True)
+    catalog_path = paths.codex_dir / "model.json"
+    assert "glm-4.7" in catalog_path.read_text(encoding="utf-8")
+
+    _install(paths, model="glm-5.2:cloud", force=True)
+    assert "glm-5.2" in catalog_path.read_text(encoding="utf-8")
+    assert "glm-4.7" not in catalog_path.read_text(encoding="utf-8")
+
+    restore_default(paths, slot=1, force=True)
+
+    config_text = paths.codex_main_config().read_text(encoding="utf-8")
+    catalog_text = catalog_path.read_text(encoding="utf-8")
+    assert "glm-4.7" in config_text
+    assert "glm-5.2" not in config_text
+    # The catalog must match what the restored config now claims — NOT still
+    # describe the model set-default was just undone away from.
+    assert "glm-4.7" in catalog_text
+    assert "glm-5.2" not in catalog_text
+
+
+@pytest.mark.integration
 def test_set_default_catalog_confirm_prompt_shows_a_real_diff(tmp_path):
     """The foreign-catalog confirm callback must see an actual preview of
 
@@ -489,7 +539,9 @@ def test_rotate_backups_archives_the_passed_in_content_not_a_fresh_disk_read(
     # read earlier and is passing in as `current`.
     paths.codex_main_config().write_text("on_disk = true\n", encoding="utf-8")
 
-    _rotate_backups(paths, current="already_read_by_caller = true\n")
+    _rotate_backups(
+        _config_backup_slots(paths), current="already_read_by_caller = true\n"
+    )
 
     assert (
         paths.codex_main_config_backup(1).read_text(encoding="utf-8")
