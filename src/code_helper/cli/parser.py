@@ -375,6 +375,8 @@ def _handle_set_default(args: argparse.Namespace) -> int:
         raise CodeHelperError(
             "--restore cannot be combined with --agent/--provider/--model"
         )
+    if getattr(args, "slot", None) is not None and not restore:
+        raise CodeHelperError("--slot only applies together with --restore")
 
     if restore:
         slot = getattr(args, "slot", None) or 1

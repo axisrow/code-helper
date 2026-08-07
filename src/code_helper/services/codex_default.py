@@ -253,18 +253,22 @@ def patch_config_toml(original: str, patch: DefaultPatch) -> str:
     return _patch_model_providers_table(with_keys, patch)
 
 
-def diff_preview(original: str, patched: str) -> str:
+def diff_preview(original: str, patched: str, *, label: str = "config.toml") -> str:
     """Unified diff of ``original`` -> ``patched``, stdlib only.
 
     Empty string when the two are identical (the no-op case) — callers print
-    this as-is under ``--dry-run`` and before an interactive confirm.
+    this as-is under ``--dry-run`` and before an interactive confirm. ``label``
+    names the file in the diff headers — defaults to ``config.toml`` (the
+    original, only caller) but ``_write_catalog`` passes its own catalog path
+    so the confirm prompt shows what is actually about to change there too,
+    instead of an empty preview.
     """
     return "".join(
         difflib.unified_diff(
             original.splitlines(keepends=True),
             patched.splitlines(keepends=True),
-            fromfile="config.toml (current)",
-            tofile="config.toml (patched)",
+            fromfile=f"{label} (current)",
+            tofile=f"{label} (new)",
         )
     )
 
@@ -285,19 +289,39 @@ def _read_text_or_none(path: Path) -> str | None:
         return None
 
 
-def _verify_toml_or_refuse(text: str, *, context: str) -> None:
-    """Best-effort structural sanity check via ``tomllib`` (py3.11+ only).
+def _require_tomllib():
+    """Import and return ``tomllib``, or refuse with a clear message.
 
-    A no-op on py3.10 (no ``tomllib`` in the stdlib) — matches the existing
-    ``wrappers._model_from_toml_profile`` precedent of accepting less
-    verification on the floor Python version rather than blocking the whole
-    feature on a stdlib gap. On py3.11+, a ``TOMLDecodeError`` (a
-    ``ValueError`` subclass) refuses BEFORE any write.
+    Unlike ``wrappers._model_from_toml_profile`` — which accepts a no-op on
+    py3.10 because it verifies a file this tool owns and wrote wholesale —
+    ``set-default`` regex-patches the user's own hand-maintained
+    ``config.toml``. Its patcher has documented blind spots (matching a
+    managed-key-shaped line inside an unrelated multi-line string); the
+    ``tomllib``-based structural verification in ``_verify_patch_applied`` is
+    the ONLY thing that catches those before a write. Skipping it silently on
+    py3.10 would mean a corrupted foreign file could be written with zero
+    runtime check, which is a materially worse failure mode here than for a
+    file this tool owns and can safely regenerate. So ``set-default`` refuses
+    outright on py3.10 rather than degrading its safety net quietly.
     """
     try:
         import tomllib
     except ModuleNotFoundError:
-        return
+        raise CodeHelperError(
+            "set-default requires Python 3.11+ (needs the stdlib tomllib "
+            "module to safely verify a patch to config.toml before writing "
+            "it) — this interpreter is older"
+        ) from None
+    return tomllib
+
+
+def _verify_toml_or_refuse(text: str, *, context: str) -> None:
+    """Structural sanity check via ``tomllib`` — refuses before any write if
+
+    ``text`` does not parse as TOML at all. See :func:`_require_tomllib` for
+    why this is mandatory (not best-effort) for ``set-default`` specifically.
+    """
+    tomllib = _require_tomllib()
     try:
         tomllib.loads(text)
     except ValueError as exc:
@@ -343,13 +367,13 @@ def _verify_patch_applied(original: str, patched: str, patch: DefaultPatch) -> N
 
     The safety net for "the regex patcher missed a corner case in someone's
     real 24 KB file": if this fails, nothing has been written yet — the
-    orchestrator calls this before any ``atomic_write``. A no-op on py3.10
-    (no ``tomllib``); the byte-preservation unit tests are the net there.
+    orchestrator calls this before any ``atomic_write``. Requires ``tomllib``
+    (py3.11+) — see :func:`_require_tomllib` for why this is mandatory rather
+    than best-effort for ``set-default``; ``_verify_toml_or_refuse`` already
+    ran earlier in the same call and would have refused on py3.10, so by the
+    time this function runs ``tomllib`` is guaranteed importable.
     """
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        return
+    tomllib = _require_tomllib()
     try:
         data = tomllib.loads(patched)
     except ValueError as exc:
@@ -359,7 +383,10 @@ def _verify_patch_applied(original: str, patched: str, patch: DefaultPatch) -> N
             f"it: {exc}"
         ) from None
 
-    table = data.get("model_providers", {}).get(patch.provider_table, {})
+    providers = data.get("model_providers", {})
+    table = (
+        providers.get(patch.provider_table, {}) if isinstance(providers, dict) else {}
+    )
     expected = {
         "model": patch.model,
         "model_provider": patch.provider_table,
@@ -445,8 +472,10 @@ def _write_catalog(
 
     Args:
         confirm: ``(path: Path, preview: str) -> bool`` — same signature as
-            :func:`apply_set_default`'s ``confirm``, called with an empty
-            preview (the catalog is a whole-file JSON overwrite, not a diff).
+            :func:`apply_set_default`'s ``confirm``, called with a unified
+            diff of the existing catalog against the new one (via
+            :func:`diff_preview`) so a foreign-catalog overwrite prompt shows
+            what is about to change, same as the config.toml patch prompt.
     """
     spec = build_spec(
         agent=agent,
@@ -469,7 +498,12 @@ def _write_catalog(
         print(f"would write {catalog_path}")
         return True
 
-    if foreign and not force and not (confirm and confirm(catalog_path, "")):
+    catalog_preview = diff_preview(existing or "", body, label=str(catalog_path))
+    if (
+        foreign
+        and not force
+        and not (confirm and confirm(catalog_path, catalog_preview))
+    ):
         raise CodeHelperError(
             f"{catalog_path} exists and was not created by code-helper "
             f"(missing {CATALOG_MANAGED_BY_KEY!r} marker) — refusing to "
@@ -495,10 +529,13 @@ def apply_set_default(
     """Patch Codex's ``~/.codex/config.toml`` to default onto ``agent``/``provider``/``model``.
 
     Orchestrates the whole ``set-default`` flow: pre-check -> resolve patch ->
-    apply -> post-check -> (if there is an actual change) rotate backups,
-    confirm/force-gate, write -> write the sibling catalog through its own
-    ownership guard. Mirrors ``wrappers.install_wrapper``'s shape (paths spec,
-    dry_run, force, confirm) so the CLI handler stays a thin shell.
+    apply -> post-check -> write the sibling catalog through its own
+    ownership guard FIRST (it's the artifact config.toml's
+    ``model_catalog_json`` key references, so it must exist/be correct before
+    the reference is written) -> then, if there is an actual change, rotate
+    backups, confirm/force-gate, write config.toml. Mirrors
+    ``wrappers.install_wrapper``'s shape (paths spec, dry_run, force, confirm)
+    so the CLI handler stays a thin shell.
 
     Args:
         confirm: ``(path: Path, preview: str) -> bool`` — called ONLY when a
@@ -529,6 +566,26 @@ def apply_set_default(
 
     config_changed = patched != original
 
+    # Catalog FIRST, config SECOND: config.toml's model_catalog_json key
+    # REFERENCES the catalog, so the referenced artifact must be established
+    # before the reference is written. Writing config first and having the
+    # catalog write fail/refuse afterward (foreign file without --force, or
+    # an I/O error) would leave config.toml already committed and pointing at
+    # a catalog that was never updated — a half-applied, inconsistent state
+    # with no automatic rollback. Reversing the order means a catalog
+    # failure leaves config.toml untouched (the pre-existing, still-consistent
+    # state), and a catalog success followed by a config failure just leaves
+    # an unreferenced-but-correct catalog file, which is harmless.
+    catalog_wrote = _write_catalog(
+        patch,
+        agent,
+        provider,
+        catalog_path,
+        dry_run=dry_run,
+        force=force,
+        confirm=confirm,
+    )
+
     if config_changed:
         preview = diff_preview(original, patched)
         if dry_run:
@@ -548,16 +605,6 @@ def apply_set_default(
             print(f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})")
     else:
         print("no changes to config.toml")
-
-    catalog_wrote = _write_catalog(
-        patch,
-        agent,
-        provider,
-        catalog_path,
-        dry_run=dry_run,
-        force=force,
-        confirm=confirm,
-    )
 
     return config_changed or catalog_wrote
 

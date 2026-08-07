@@ -415,6 +415,62 @@ def test_set_default_writes_catalog_and_refuses_a_foreign_one(tmp_path):
     assert "hand" not in catalog_path.read_text(encoding="utf-8")
 
 
+@pytest.mark.integration
+def test_set_default_leaves_config_untouched_when_catalog_write_is_refused(
+    tmp_path,
+):
+    """If the catalog write refuses (foreign catalog, no ``--force``),
+
+    ``config.toml`` must be left exactly as it was before this call — no
+    half-applied state where the config already points at
+    ``model_catalog_json`` but the catalog itself was never updated. The
+    catalog is the referenced artifact, so it must be written/verified
+    BEFORE config.toml is patched, not after.
+    """
+    paths = Paths.from_home(tmp_path)
+    paths.codex_main_config().parent.mkdir(parents=True, exist_ok=True)
+    original_config = 'some_other_key = "x"\n'
+    paths.codex_main_config().write_text(original_config, encoding="utf-8")
+
+    catalog_path = paths.codex_dir / "model.json"
+    catalog_path.write_text('{"hand": "curated"}', encoding="utf-8")
+
+    with pytest.raises(CodeHelperError, match="refusing to overwrite"):
+        _install(paths, force=False)
+
+    # Neither file changed, and no backup was rotated — the config write
+    # never happened because the catalog it depends on was refused first.
+    assert paths.codex_main_config().read_text(encoding="utf-8") == original_config
+    assert catalog_path.read_text(encoding="utf-8") == '{"hand": "curated"}'
+    assert not paths.codex_main_config_backup(1).exists()
+
+
+@pytest.mark.integration
+def test_set_default_catalog_confirm_prompt_shows_a_real_diff(tmp_path):
+    """The foreign-catalog confirm callback must see an actual preview of
+
+    what is about to change (a unified diff of old vs. new catalog content),
+    not an empty string — otherwise a user overwriting a hand-curated
+    ``model.json`` has no way to know what they're agreeing to.
+    """
+    paths = Paths.from_home(tmp_path)
+    _install(paths, force=True)
+
+    catalog_path = paths.codex_dir / "model.json"
+    catalog_path.write_text('{"hand": "curated"}', encoding="utf-8")
+
+    seen_previews = []
+
+    def _capture_confirm(path, preview):
+        seen_previews.append(preview)
+        return True
+
+    _install(paths, force=False, confirm=_capture_confirm)
+    assert len(seen_previews) == 1
+    assert seen_previews[0] != ""
+    assert "hand" in seen_previews[0]
+
+
 @pytest.mark.unit
 def test_rotate_backups_archives_the_passed_in_content_not_a_fresh_disk_read(
     tmp_path,
@@ -439,6 +495,34 @@ def test_rotate_backups_archives_the_passed_in_content_not_a_fresh_disk_read(
         paths.codex_main_config_backup(1).read_text(encoding="utf-8")
         == "already_read_by_caller = true\n"
     )
+
+
+@pytest.mark.unit
+def test_set_default_refuses_outright_without_tomllib(tmp_path, monkeypatch):
+    """On an interpreter without ``tomllib`` (py3.10), ``set-default`` must
+
+    refuse outright with a clear message rather than silently degrading its
+    verification — unlike ``wrappers.py``'s no-op-on-py3.10 precedent, which
+    is safe only because that module owns the files it verifies wholesale.
+    ``set-default`` regex-patches a foreign, hand-maintained file, so the
+    ``tomllib``-based structural check is the only net catching a corrupted
+    patch before it's written; skipping it silently here is unacceptable.
+    """
+    import builtins
+
+    from code_helper.services import codex_default
+
+    real_import = builtins.__import__
+
+    def _no_tomllib(name, *args, **kwargs):
+        if name == "tomllib":
+            raise ModuleNotFoundError("No module named 'tomllib'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_tomllib)
+
+    with pytest.raises(CodeHelperError, match="requires Python 3.11"):
+        codex_default._require_tomllib()
 
 
 @pytest.mark.integration
@@ -474,6 +558,33 @@ def test_set_default_refuses_when_a_managed_key_name_appears_inside_a_string_val
     paths.codex_main_config().write_text(
         'notes = """\nmodel_catalog_json = "fake, do not use"\n"""\n',
         encoding="utf-8",
+    )
+
+    with pytest.raises(CodeHelperError, match="code-helper bug"):
+        _install(paths, force=True)
+    # Nothing was written — the refusal happens before any atomic_write.
+    assert not paths.codex_main_config_backup(1).exists()
+
+
+@pytest.mark.integration
+def test_set_default_refuses_cleanly_when_model_providers_is_an_array_of_tables(
+    tmp_path,
+):
+    """``model_providers`` as ``[[model_providers]]`` (an array-of-tables) is
+
+    syntactically valid TOML but not the ``[model_providers.<name>]`` shape
+    this patcher understands. ``_verify_patch_applied`` must still refuse
+    cleanly with ``CodeHelperError`` (the documented fail-clean contract) —
+    not crash with an uncaught ``AttributeError`` from calling ``.get()`` on a
+    list, the way ``data.get("model_providers", {}).get(patch.provider_table,
+    {})`` did before this fix.
+    """
+    tomllib = pytest.importorskip("tomllib")
+    del tomllib  # only used to gate the test on py3.11+
+    paths = Paths.from_home(tmp_path)
+    paths.codex_main_config().parent.mkdir(parents=True, exist_ok=True)
+    paths.codex_main_config().write_text(
+        '[[model_providers]]\nname = "weird"\n', encoding="utf-8"
     )
 
     with pytest.raises(CodeHelperError, match="code-helper bug"):
@@ -555,3 +666,38 @@ def test_restore_dry_run_never_prompts_or_refuses_without_force(tmp_path):
 def test_restore_invalid_slot_raises():
     with pytest.raises(CodeHelperError, match="invalid backup slot"):
         Paths.from_home("/tmp").codex_main_config_backup(4)
+
+
+# ---------------------------------------------------------------------------
+# CLI handler: --slot only makes sense together with --restore
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_slot_without_restore_is_rejected(tmp_path, monkeypatch, capsys):
+    """``--slot`` is only ever read inside the ``--restore`` branch of the
+
+    handler — passing it alongside ``--agent``/``--provider``/``--model``
+    (i.e. without ``--restore``) must raise loudly instead of silently
+    having no effect.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from code_helper.__main__ import main
+
+    assert (
+        main(
+            [
+                "set-default",
+                "--agent",
+                "codex",
+                "--provider",
+                "ollama",
+                "--model",
+                "glm-5.2:cloud",
+                "--slot",
+                "2",
+            ]
+        )
+        == 1
+    )
+    assert "--slot only applies together with --restore" in capsys.readouterr().err
