@@ -858,70 +858,20 @@ def test_slot_without_restore_is_rejected(tmp_path, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# CLI handler: --base-url for a runtime-base_url provider (litellm)
+# Service layer: resolve_default_patch refuses a REQUIRED provider with no
+# base_url (the CLI --base-url flag itself is Part 2/2 — see feat/base-url-cli)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
-def test_set_default_litellm_without_base_url_is_refused(tmp_path, monkeypatch):
-    """--base-url is REQUIRED here, not merely convenient (see cli/parser.py's
-    comment on this substitution): without it, openai_base_url("") would
-    return "/v1/" and _verify_patch_applied would compare that against
-    itself, silently passing verification on a broken write. Assert BOTH the
-    refusal AND that config.toml was never created — a partial write would be
-    worse than an outright refusal.
+@pytest.mark.unit
+def test_resolve_default_patch_refuses_a_required_provider_with_no_base_url():
+    """The service-layer invariant added alongside build_spec's: a
+    REQUIRED-policy provider (its base_url is the user's own server) must
+    never resolve a patch with an unresolved empty base_url, independent of
+    whether any CLI entry point has grown a --base-url flag yet.
     """
-    monkeypatch.setenv("HOME", str(tmp_path))
-    from code_helper.__main__ import main
-
-    code = main(
-        [
-            "set-default",
-            "--agent",
-            "codex",
-            "--provider",
-            "litellm",
-            "--model",
-            "gpt-4o",
-            "--force",
-        ]
-    )
-    assert code == 1
-    assert not Paths.from_home(tmp_path).codex_main_config().exists()
-
-
-@pytest.mark.integration
-def test_set_default_litellm_writes_the_runtime_base_url(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    from code_helper.__main__ import main
-
-    code = main(
-        [
-            "set-default",
-            "--agent",
-            "codex",
-            "--provider",
-            "litellm",
-            "--model",
-            "gpt-4o",
-            "--base-url",
-            "http://localhost:4000/v1",
-            "--force",
-        ]
-    )
-    assert code == 0
-    config = Paths.from_home(tmp_path).codex_main_config().read_text(encoding="utf-8")
-    assert 'base_url = "http://localhost:4000/v1/"' in config
-
-
-@pytest.mark.integration
-def test_set_default_restore_rejects_base_url(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    from code_helper.__main__ import main
-
-    code = main(["set-default", "--restore", "--base-url", "http://x/v1"])
-    assert code == 1
-    assert "--base-url" in capsys.readouterr().err
+    with pytest.raises(CodeHelperError, match="requires a base URL"):
+        resolve_default_patch(CODEX, get_provider("litellm"), "gpt-4o", "/x/model.json")
 
 
 @pytest.mark.unit

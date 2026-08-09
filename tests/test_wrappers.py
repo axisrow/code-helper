@@ -1143,33 +1143,30 @@ def test_spec_from_installed_ignores_a_file_base_url_for_a_fixed_provider(tmp_pa
 
 @pytest.mark.integration
 def test_edit_token_preserves_the_base_url(tmp_path, monkeypatch):
-    """Full round-trip through the CLI: rotating a litellm token must not
-    touch the base_url the wrapper was installed with."""
+    """Rotating a litellm token via the edit-token CLI command must not touch
+    the base_url the wrapper was installed with.
+
+    Installation itself goes through the service layer directly
+    (build_spec/with_base_url/install_wrapper) rather than ``add --base-url``
+    — that CLI flag is wired in Part 2/2 (feat/base-url-cli); ``edit-token``
+    is unconditional CLI here in Part 1/2 and needs no such flag, so it is
+    the one piece of this round-trip this branch can actually exercise
+    end-to-end.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
     import getpass
 
     from code_helper.__main__ import main
 
+    paths = Paths.from_home(tmp_path)
+    provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
+    spec = build_spec(agent="claude", provider=provider, model="gpt-4o", alias="lm")
+    install_wrapper(paths, spec, token="old-tok")
+
     monkeypatch.setattr(getpass, "getpass", lambda *_a, **_kw: "new-tok")
-    code = main(
-        [
-            "add",
-            "--agent",
-            "claude",
-            "--provider",
-            "litellm",
-            "--base-url",
-            "http://h:4000/v1",
-            "--model",
-            "gpt-4o",
-            "--alias",
-            "lm",
-        ]
-    )
-    assert code == 0
     assert main(["edit-token", "lm"]) == 0
 
-    body = Paths.from_home(tmp_path).script_for("lm").read_text(encoding="utf-8")
+    body = paths.script_for("lm").read_text(encoding="utf-8")
     assert "export ANTHROPIC_BASE_URL='http://h:4000/v1'" in body
     assert "export ANTHROPIC_AUTH_TOKEN='new-tok'" in body
 
@@ -1530,3 +1527,60 @@ def test_validate_registries_rejects_openai_toml_provider_without_wire_api():
         # objects for ConfigShape/Provider/etc, breaking identity comparisons
         # (`is`) any test running after this one relies on.
         model_mod.PROVIDERS = original
+
+
+@pytest.mark.unit
+def test_toml_profile_data_fallback_scopes_base_url_to_its_own_table(monkeypatch, tmp_path):
+    """The sub-3.11 fallback regex path must not attribute a sibling table's
+    base_url to the matched table (F1 from PR #12's cycle-review round 1).
+
+    The real ``tomllib.loads`` path naturally nests per table; the defensive
+    fallback used three independent whole-file regex searches instead, so a
+    profile with more than one ``[model_providers.*]`` table (reachable via a
+    hand-edited or ``--force``-adopted legacy file) could hand the SECOND
+    table's ``base_url`` to the FIRST table's name. Force the fallback branch
+    by making the ``tomllib`` import inside ``_toml_profile_data`` raise
+    ``ModuleNotFoundError``, regardless of the interpreter's real version.
+    """
+    import builtins
+
+    import code_helper.services.wrappers as wrappers_mod
+
+    real_import = builtins.__import__
+
+    def _no_tomllib(name, *args, **kwargs):
+        if name == "tomllib":
+            raise ModuleNotFoundError("simulated: no tomllib")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_tomllib)
+
+    paths = Paths.from_home(tmp_path)
+    profile_path = paths.codex_config_for("glm-5-codex")
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    # Two tables: the first (matched by the un-scoped regex first) has NO
+    # base_url; the second carries one. A buggy whole-file search would still
+    # find `base_url_found` (it's present somewhere in the file) and wrongly
+    # attach it to the first table's name.
+    profile_path.write_text(
+        'model = "glm-5.2:cloud"\n'
+        "\n"
+        "[model_providers.first-table]\n"
+        'name = "First"\n'
+        'wire_api = "responses"\n'
+        "\n"
+        "[model_providers.second-table]\n"
+        'name = "Second"\n'
+        'base_url = "https://second.example.com/v1/"\n'
+        'wire_api = "responses"\n',
+        encoding="utf-8",
+    )
+
+    data = wrappers_mod._toml_profile_data(paths, "glm-5-codex")
+
+    assert data is not None
+    # The fallback only ever recovers ONE table (the first match) by design —
+    # what matters is that when it does, it does NOT smuggle in a base_url
+    # that belongs to a different table.
+    assert "first-table" in data["model_providers"]
+    assert data["model_providers"]["first-table"]["base_url"] is None

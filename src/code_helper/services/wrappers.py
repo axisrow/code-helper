@@ -434,7 +434,24 @@ def _toml_profile_data(paths: Paths, alias: str) -> dict | None:
         # ValueError.
         model_found = re.search(r'^model = "(.*)"$', profile, re.MULTILINE)
         table_found = re.search(r"^\[model_providers\.(\S+)\]$", profile, re.MULTILINE)
-        base_url_found = re.search(r'^base_url = "(.*)"$', profile, re.MULTILINE)
+        base_url_found = None
+        if table_found:
+            # Scope the base_url search to THIS table's body — from the end of
+            # its header to the next top-level `[...` header (any table) or
+            # EOF — never the whole file. This renderer only ever writes one
+            # [model_providers.X] table per profile, but a hand-edited or
+            # legacy-adopted file (reachable via --force) could carry more
+            # than one; an unscoped search would attribute a sibling table's
+            # base_url to this one, exactly the ambiguity tomllib.loads does
+            # not have because it naturally nests per table.
+            table_body_start = table_found.end()
+            next_header = re.search(r"^\[", profile[table_body_start:], re.MULTILINE)
+            table_body_end = (
+                table_body_start + next_header.start() if next_header else len(profile)
+            )
+            base_url_found = re.search(
+                r'^base_url = "(.*)"$', profile[table_body_start:table_body_end], re.MULTILINE
+            )
         return {
             "model": _toml_unescape(model_found.group(1)) if model_found else None,
             "model_providers": {

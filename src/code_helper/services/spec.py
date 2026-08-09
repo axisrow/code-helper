@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from code_helper.errors import CodeHelperError
 from code_helper.services.model import (
     Agent,
+    BaseUrlPolicy,
     ConfigShape,
     Provider,
     get_agent,
@@ -161,6 +162,24 @@ def build_spec(
     """
     agent_obj = get_agent(agent) if isinstance(agent, str) else agent
     provider_obj = get_provider(provider) if isinstance(provider, str) else provider
+
+    # A REQUIRED-policy provider (its endpoint is the user's own server, e.g.
+    # a self-hosted LiteLLM proxy) has an empty registry base_url by
+    # construction (see BaseUrlPolicy / _validate_provider). The only way to
+    # get a real address into it is model.with_base_url, called by the
+    # caller BEFORE build_spec runs. If nobody called it, provider_obj still
+    # carries the empty registry default here — refuse rather than silently
+    # rendering/patching a malformed address (an OPENAI_TOML profile's
+    # base_url derives "/v1/" from an empty root, and ANTHROPIC_BASE_URL
+    # would export as an empty string). This is a service-layer invariant,
+    # independent of whether any particular CLI/TUI entry point has grown a
+    # --base-url flag yet — build_spec must never produce a spec for a
+    # REQUIRED provider with no address, no matter how it was reached.
+    if provider_obj.base_url_policy is BaseUrlPolicy.REQUIRED and not provider_obj.base_url:
+        raise CodeHelperError(
+            f"provider {provider_obj.name!r} requires a base URL — supply one "
+            f"via model.with_base_url(provider, url) before build_spec"
+        )
 
     chosen = resolve_shape(agent_obj, provider_obj, preferred=shape)
 
