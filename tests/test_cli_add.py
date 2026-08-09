@@ -134,6 +134,187 @@ def test_incompatible_pairing_never_prompts_for_a_token(tmp_path, monkeypatch):
     )
 
 
+# --------------------------------------------------------------------------- #
+# --base-url — litellm (runtime base_url provider)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_add_litellm_claude_requires_base_url(tmp_path, capsys):
+    code = main(
+        ["add", "--agent", "claude", "--provider", "litellm", "--model", "gpt-4o"]
+    )
+    assert code == 1
+    assert "needs a base URL" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_add_litellm_claude_with_base_url(tmp_path, monkeypatch):
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://localhost:4000/v1",
+            "--model",
+            "gpt-4o",
+        ]
+    )
+    assert code == 0
+    body = _body(tmp_path, "gpt-4o-claude")
+    assert "export ANTHROPIC_BASE_URL='http://localhost:4000/v1'" in body
+    assert "export ANTHROPIC_AUTH_TOKEN='sk-test'" in body
+
+
+@pytest.mark.integration
+def test_add_litellm_codex_writes_env_key_and_export(tmp_path, monkeypatch):
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
+    code = main(
+        [
+            "add",
+            "--agent",
+            "codex",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://localhost:4000/v1",
+            "--model",
+            "gpt-4o",
+            "--alias",
+            "lm-codex",
+        ]
+    )
+    assert code == 0
+    body = _body(tmp_path, "lm-codex")
+    assert "export LITELLM_API_KEY='sk-test'" in body
+    assert body.index("export LITELLM_API_KEY") < body.index("exec codex")
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_config_for("lm-codex").read_text(encoding="utf-8")
+    assert 'env_key = "LITELLM_API_KEY"' in config
+    assert 'base_url = "http://localhost:4000/v1/"' in config
+
+
+@pytest.mark.integration
+def test_add_base_url_on_a_fixed_provider_is_refused(tmp_path, capsys):
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "ollama",
+            "--base-url",
+            "http://x/v1",
+            "--model",
+            "m",
+        ]
+    )
+    assert code == 1
+    assert "fixed base URL" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_add_base_url_with_a_preset_is_refused(tmp_path, capsys):
+    code = main(["add", "deepseek", "--base-url", "http://x/v1"])
+    assert code == 1
+    assert "constructor form only" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_add_rejects_an_invalid_base_url_scheme(tmp_path, capsys):
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "ftp://x",
+            "--model",
+            "m",
+        ]
+    )
+    assert code == 1
+    assert "http:// or https://" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_add_rejects_an_empty_base_url(tmp_path, capsys):
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "",
+            "--model",
+            "m",
+        ]
+    )
+    assert code == 1
+    assert "needs a base URL" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_bad_base_url_never_prompts_for_a_token(tmp_path, monkeypatch):
+    """validate-before-prompt, pinned for the NEW validation channel."""
+    import code_helper.services.secrets as secrets
+
+    def _explode(*a, **kw):  # pragma: no cover - must not run
+        raise AssertionError("must not prompt for a token on an invalid base URL")
+
+    monkeypatch.setattr(secrets, "resolve_token", _explode)
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "ftp://x",
+            "--model",
+            "m",
+        ]
+    )
+    assert code == 1
+
+
+@pytest.mark.integration
+def test_list_models_uses_the_runtime_base_url(tmp_path, monkeypatch, capsys):
+    """The substitution happens BEFORE --list-models, not just before build_spec."""
+    import code_helper.services.models_api as models_api
+
+    seen = {}
+
+    def _fake_list_models(provider):
+        seen["base_url"] = provider.base_url
+        return models_api.ModelListResult(models=("m1",), source="fake")
+
+    monkeypatch.setattr(models_api, "list_models", _fake_list_models)
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://h:4000/v1",
+            "--list-models",
+        ]
+    )
+    assert code == 0
+    assert seen["base_url"] == "http://h:4000/v1"
+
+
 @pytest.mark.integration
 def test_bad_alias_is_rejected(tmp_path, capsys):
     assert (
@@ -305,7 +486,7 @@ def test_list_agents(tmp_path, capsys):
 def test_list_providers(tmp_path, capsys):
     assert main(["list", "providers"]) == 0
     out = capsys.readouterr().out
-    assert "ollama" in out and "zai" in out
+    assert "ollama" in out and "zai" in out and "litellm" in out
 
 
 @pytest.mark.integration
@@ -317,6 +498,20 @@ def test_list_matrix_shows_a_gap_for_incompatible_pairs(tmp_path, capsys):
     assert "—" in codex_row  # codex × zai is impossible
     # codex × ollama now resolves to the TOML profile by priority.
     assert "openai-toml" in codex_row
+
+
+@pytest.mark.integration
+def test_list_matrix_includes_litellm_with_no_gap(tmp_path, capsys):
+    """litellm declares both shapes, so neither agent's row has a gap for it."""
+    assert main(["list", "matrix"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    header_cols = lines[0].split()
+    litellm_idx = header_cols.index("litellm")
+    claude_row = next(line for line in lines if line.startswith("claude")).split()
+    codex_row = next(line for line in lines if line.startswith("codex")).split()
+    # +1: each data row's first word is the agent name, not a provider column.
+    assert claude_row[litellm_idx + 1] == "anthropic-env"
+    assert codex_row[litellm_idx + 1] == "openai-toml"
 
 
 @pytest.mark.integration

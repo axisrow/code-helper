@@ -217,11 +217,15 @@ def run_tui(args: argparse.Namespace) -> int:
         args.name = name
         # Clear the constructor fields: the menu loops, so a previous `new`
         # run would otherwise leave args.agent set and flip _handle_add into
-        # constructor mode for what the user picked as a preset.
+        # constructor mode for what the user picked as a preset. base_url is
+        # the same class of leak: a previous `new` run against litellm would
+        # otherwise leave it set, and `add`'s own handler refuses `--base-url`
+        # together with a preset name.
         args.agent = None
         args.provider = None
         args.alias = None
         args.shape = None
+        args.base_url = None
         _run(_handle_add, getattr(args, "debug", False))
         _pause()
 
@@ -235,7 +239,12 @@ def run_tui(args: argparse.Namespace) -> int:
         what to put on screen.
         """
         from code_helper.cli.menu import MAX_DIGIT_ITEMS
-        from code_helper.services.model import compatible_providers, get_agent
+        from code_helper.services.model import (
+            BaseUrlPolicy,
+            compatible_providers,
+            get_agent,
+            with_base_url,
+        )
         from code_helper.services.models_api import list_models
         from code_helper.services.spec import suggest_alias
 
@@ -259,6 +268,39 @@ def run_tui(args: argparse.Namespace) -> int:
         if provider_name == _BACK:
             return
         provider = next(p for p in usable if p.name == provider_name)
+
+        # Runtime base_url, BEFORE list_models — a provider like litellm has
+        # no address to list models from until one is supplied. Branches on
+        # the policy, never on provider.name (the same data-driven rule
+        # with_base_url itself follows).
+        typed_url = None
+        if provider.base_url_policy is not BaseUrlPolicy.FIXED:
+            required = provider.base_url_policy is BaseUrlPolicy.REQUIRED
+            prompt = (
+                f"base URL для {provider.name} (например http://localhost:4000/v1): "
+                if required
+                else f"base URL для {provider.name} [{provider.base_url}]: "
+            )
+            try:
+                typed_url = input(prompt).strip()
+            except KeyboardInterrupt:
+                print()
+                return
+            if required and not typed_url:
+                # Empty input cancels — mirrors the custom-model prompt below,
+                # which also treats an empty answer as "changed my mind"
+                # rather than re-prompting.
+                return
+            if typed_url:
+                try:
+                    provider = with_base_url(provider, typed_url)
+                except CodeHelperError as e:
+                    emit_error(e, getattr(args, "debug", False))
+                    _pause()
+                    return
+            # else: OVERRIDABLE with nothing typed — the default stands, and
+            # typed_url ("" from .strip()) is falsy just like None would be,
+            # so args.base_url below reads correctly without reassigning it.
 
         result = list_models(provider)
         if not result.ok:
@@ -312,6 +354,7 @@ def run_tui(args: argparse.Namespace) -> int:
         args.model = model
         args.alias = typed or default_alias
         args.shape = None
+        args.base_url = typed_url
         _run(_handle_add, getattr(args, "debug", False))
         _pause()
 

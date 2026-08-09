@@ -486,6 +486,147 @@ def test_tui_preset_still_works_after_a_new_run(tmp_path, monkeypatch):
     assert paths.script_for("glm-ollama").exists()
 
 
+# --------------------------------------------------------------------------- #
+# `new` — runtime base_url prompt (litellm)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_tui_new_asks_for_the_url_before_listing_models(tmp_path, monkeypatch):
+    """The order is load-bearing: list_models must see the typed URL, not an
+    empty one — pinned by RECORDING what list_models actually received."""
+    import code_helper.services.models_api as api
+    from code_helper.services.models_api import ModelListResult
+
+    seen = {}
+
+    def _recording_list_models(provider, **_kw):
+        seen["base_url"] = provider.base_url
+        return ModelListResult(("gpt-4o",), "url", None)
+
+    monkeypatch.setattr(api, "list_models", _recording_list_models)
+    _menu_sequence(monkeypatch, ["new", "claude", "litellm", "gpt-4o", "quit"])
+    typed = iter(["http://h:4000/v1", ""])  # base URL, then accept default alias
+    monkeypatch.setattr("builtins.input", lambda _p="": next(typed))
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
+
+    assert main(["tui"]) == 0
+    assert seen["base_url"] == "http://h:4000/v1"
+
+
+@pytest.mark.integration
+def test_tui_new_litellm_matches_the_cli_byte_for_byte(tmp_path, monkeypatch):
+    """The 1-to-1 contract for the new --base-url flag, codex × litellm."""
+    _fake_models(monkeypatch, "gpt-4o")
+    _menu_sequence(monkeypatch, ["new", "codex", "litellm", "gpt-4o", "quit"])
+    typed = iter(["http://h:4000/v1", ""])
+    monkeypatch.setattr("builtins.input", lambda _p="": next(typed))
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
+    main(["tui"])
+    tui_paths = Paths.from_home(tmp_path)
+    alias = "gpt-4o-codex"
+
+    other_home = tmp_path / "other"
+    other_home.mkdir()
+    monkeypatch.setenv("HOME", str(other_home))
+    main(
+        [
+            "add",
+            "--agent",
+            "codex",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://h:4000/v1",
+            "--model",
+            "gpt-4o",
+        ]
+    )
+    cli_paths = Paths.from_home(other_home)
+
+    assert (
+        tui_paths.script_for(alias).read_text()
+        == cli_paths.script_for(alias).read_text()
+    )
+    assert (
+        tui_paths.codex_catalog_for(alias).read_text()
+        == cli_paths.codex_catalog_for(alias).read_text()
+    )
+    tui_toml = (
+        tui_paths.codex_config_for(alias)
+        .read_text()
+        .replace(str(tui_paths.codex_dir), "")
+    )
+    cli_toml = (
+        cli_paths.codex_config_for(alias)
+        .read_text()
+        .replace(str(cli_paths.codex_dir), "")
+    )
+    assert tui_toml == cli_toml
+
+
+@pytest.mark.integration
+def test_tui_new_rejects_a_bad_base_url_and_returns_to_menu(tmp_path, monkeypatch):
+    _fake_models(monkeypatch, "gpt-4o")
+    _menu_sequence(monkeypatch, ["new", "claude", "litellm", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _p="": "ftp://bad")
+
+    assert main(["tui"]) == 0
+    assert not Paths.from_home(tmp_path).bin_dir.exists()
+
+
+@pytest.mark.integration
+def test_tui_new_empty_base_url_cancels(tmp_path, monkeypatch):
+    _fake_models(monkeypatch, "gpt-4o")
+    _menu_sequence(monkeypatch, ["new", "claude", "litellm", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _p="": "")
+
+    assert main(["tui"]) == 0
+    assert not Paths.from_home(tmp_path).bin_dir.exists()
+
+
+@pytest.mark.integration
+def test_tui_new_ctrl_c_at_the_base_url_prompt_returns_to_menu(tmp_path, monkeypatch):
+    _fake_models(monkeypatch, "gpt-4o")
+    _menu_sequence(monkeypatch, ["new", "claude", "litellm", "quit"])
+
+    def _interrupt(_prompt=""):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", _interrupt)
+
+    assert main(["tui"]) == 0
+    assert not Paths.from_home(tmp_path).bin_dir.exists()
+
+
+@pytest.mark.integration
+def test_tui_add_clears_base_url_between_runs(tmp_path, monkeypatch):
+    """The loop reuses one Namespace — a litellm `new` run must not leave
+    args.base_url set for a later preset `add` (which rejects --base-url)."""
+    _fake_models(monkeypatch, "gpt-4o")
+    _menu_sequence(
+        monkeypatch,
+        [
+            "new",
+            "claude",
+            "litellm",
+            "gpt-4o",
+            "add",
+            "deepseek",
+            "__default__",
+            "quit",
+        ],
+    )
+    typed = iter(["http://h:4000/v1", ""])
+    monkeypatch.setattr("builtins.input", lambda _p="": next(typed))
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
+
+    assert main(["tui"]) == 0
+    paths = Paths.from_home(tmp_path)
+    assert paths.script_for("gpt-4o-claude").exists()
+    assert paths.script_for("deepseek").exists()
+
+
 @pytest.mark.unit
 def test_hint_never_promises_more_digits_than_the_menu_assigns():
     """Regression: a 21-item menu advertised "1-21" but only 1-9 worked.

@@ -31,6 +31,13 @@ code-helper add --agent codex  --provider ollama --model glm-5:cloud
 code-helper add --agent claude --provider ollama --model qwen3.5:9b \
                 --alias qwen              # -> ~/.local/bin/qwen
 
+# a provider whose endpoint YOU choose (a self-hosted LiteLLM proxy) needs
+# --base-url — see the "LiteLLM" section below
+code-helper add --agent claude --provider litellm \
+                --base-url http://localhost:4000/v1 --model gpt-4o
+code-helper add --agent codex  --provider litellm \
+                --base-url http://localhost:4000/v1 --model gpt-4o
+
 # discover what's available
 code-helper list                          # wrappers + install state
 code-helper list agents                   # agents and how each can be configured
@@ -61,7 +68,10 @@ The alias defaults to `<model>-<agent>` (`glm-5:cloud` + `codex` →
 Presets exist alongside the constructor because some combinations aren't just
 "an agent and a model": `glm` uses a *different model per tier*
 (`glm-4.7` / `glm-5-turbo` / `glm-5.2[1m]`), which a single `--model` can't
-express.
+express. There is no `litellm` preset — a preset bundles a fixed provider
+address, and `litellm`'s whole point is that its address is yours, not this
+project's to bundle; use the constructor with `--base-url` instead (see
+below).
 
 ## Not every combination is possible
 
@@ -69,14 +79,82 @@ express.
 an explanation rather than generating a wrapper that fails at runtime:
 
 ```
-        ollama         zai
-claude  anthropic-env  anthropic-env
-codex   ollama-launch  —
+        ollama         zai            litellm
+claude  anthropic-env  anthropic-env  anthropic-env
+codex   openai-toml    —              openai-toml
 ```
 
 Codex can't speak the Anthropic protocol Z.ai serves, so that cell is empty.
 Compatibility is derived from what each side supports, not from a hand-written
-list — a new provider can't silently introduce a broken combination.
+list — a new provider can't silently introduce a broken combination. `litellm`
+declares both mechanisms (a LiteLLM proxy serves both protocols off one host),
+so neither of its cells is empty.
+
+## LiteLLM
+
+`litellm` is the one provider whose address is not built into `code-helper` —
+it's your own [LiteLLM](https://docs.litellm.ai/) proxy, so you supply its URL
+yourself:
+
+```bash
+code-helper add --agent claude --provider litellm \
+                --base-url http://localhost:4000/v1 --model gpt-4o
+code-helper add --agent codex  --provider litellm \
+                --base-url http://localhost:4000/v1 --model gpt-4o
+```
+
+**The URL must include `/v1`** (`http://localhost:4000/v1`, not just
+`http://localhost:4000`) — `--list-models` requests `{url}/models`, and the
+same value feeds the Codex TOML profile's `base_url`, which expects an
+OpenAI-style `/v1` root. One URL serves both agents: `claude` resolves to the
+direct `ANTHROPIC_*` env shape (LiteLLM's Anthropic Messages passthrough),
+`codex` resolves to a `[model_providers.litellm]` TOML profile — chosen
+automatically, same as every other provider here.
+
+The token comes from `LITELLM_API_KEY` (env, or a hidden prompt) exactly like
+any other secret-auth provider. For `codex`, which has no environment-variable
+config of its own, the wrapper `export`s `LITELLM_API_KEY` right before
+launching `codex` — so the credential is visible to `codex` and everything it
+spawns (including MCP servers it starts), which is the mechanism, not a leak.
+
+`set-default --provider litellm` also works, but **requires `--base-url`** —
+without it the command would patch `~/.codex/config.toml` with a malformed
+URL and its own verification couldn't catch it (both sides of the check would
+be wrong the same way). It also does not export the token anywhere: there is
+no wrapper script for a bare `codex` to source a variable from, so set the
+`LITELLM_API_KEY` environment variable in your own shell profile if you use
+this path.
+
+### Fallback (429, provider outages) is LiteLLM's job, not code-helper's
+
+`code-helper` generates one wrapper for one `agent × provider × model` point,
+on purpose — it does not retry, does not race multiple backends, and will not
+grow that logic. A LiteLLM proxy already does this well, in its own
+`config.yaml`:
+
+```yaml
+model_list:
+  - model_name: primary
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: backup
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+litellm_settings:
+  num_retries: 3
+  fallbacks: [{"primary": ["backup"]}]
+  allowed_fails: 3
+  cooldown_time: 30
+```
+
+Point a wrapper at `primary` — `code-helper add ... --model primary` — and a
+429 (or any failure LiteLLM is configured to catch) fails over to `backup`
+transparently; the agent never sees the switch. Check the
+[LiteLLM reliability docs](https://docs.litellm.ai/docs/proxy/reliability) for
+the current config keys, since this is LiteLLM's surface, not this project's.
 
 ## `set-default`
 
@@ -123,6 +201,13 @@ reads one back. Off a TTY, `set-default` refuses without `--force`, same as
   file — except `~/.codex/config.toml`, and only through the explicit
   `set-default` command, which patches only its own managed keys there, backs
   up before every real write, and never carries a secret into it.
+- **A secret-auth Codex wrapper (e.g. `codex × litellm`) exports its token to
+  the process it launches.** Codex has no equivalent of `ANTHROPIC_BASE_URL`,
+  so the only way to hand it a credential is an environment variable named in
+  its own TOML profile (`env_key`) — the wrapper `export`s that variable
+  immediately before `exec`ing `codex`. That variable is visible to `codex`
+  and every child process it spawns, including MCP servers it starts; this is
+  how the credential reaches Codex at all, not an oversight.
 - `--dry-run` writes nothing. There is no `remove` command — delete a wrapper
   script yourself if you no longer want it.
 

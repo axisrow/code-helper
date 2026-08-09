@@ -156,7 +156,12 @@ def _handle_add(args: argparse.Namespace) -> int:
        showing the constructor form rather than a plain "unknown".
     """
     from code_helper.errors import CodeHelperError
-    from code_helper.services.model import get_agent, get_provider, resolve_shape
+    from code_helper.services.model import (
+        get_agent,
+        get_provider,
+        resolve_shape,
+        with_base_url,
+    )
     from code_helper.services.models_api import list_models
     from code_helper.services.paths import Paths
     from code_helper.services.secrets import resolve_token
@@ -178,6 +183,7 @@ def _handle_add(args: argparse.Namespace) -> int:
     name = getattr(args, "name", None)
     model = getattr(args, "model", None)
     alias = getattr(args, "alias", None)
+    base_url = getattr(args, "base_url", None)
     using_axes = agent_name is not None or provider_name is not None
 
     if using_axes and name:
@@ -185,11 +191,24 @@ def _handle_add(args: argparse.Namespace) -> int:
             "give either a preset name or --agent/--provider, not both"
         )
 
+    if not using_axes and base_url:
+        # Checked before get_preset so the message is about the flag, not
+        # about an unrecognised preset name.
+        raise CodeHelperError(
+            "--base-url applies to the constructor form only "
+            "(--agent/--provider) — a preset carries its own provider"
+        )
+
     if using_axes:
         if not agent_name or not provider_name:
             raise CodeHelperError("--agent and --provider must be given together")
         agent = get_agent(agent_name)
-        provider = get_provider(provider_name)
+        # The ONE substitution point: every downstream reader of base_url
+        # (list_models below, resolve_shape/build_spec, the eventual
+        # renderer) reads it off this provider object, so subbing it in here
+        # — before --list-models, before build_spec — is enough for all of
+        # them to see the right value.
+        provider = with_base_url(get_provider(provider_name), base_url)
 
         if getattr(args, "list_models", False):
             result = list_models(provider)
@@ -360,7 +379,7 @@ def _handle_set_default(args: argparse.Namespace) -> int:
     """
     from code_helper.errors import CodeHelperError
     from code_helper.services.codex_default import apply_set_default, restore_default
-    from code_helper.services.model import get_agent, get_provider
+    from code_helper.services.model import get_agent, get_provider, with_base_url
     from code_helper.services.paths import Paths
 
     paths = Paths.default()
@@ -370,10 +389,11 @@ def _handle_set_default(args: argparse.Namespace) -> int:
     agent_name = getattr(args, "agent", None)
     provider_name = getattr(args, "provider", None)
     model = getattr(args, "model", None)
+    base_url = getattr(args, "base_url", None)
 
-    if restore and (agent_name or provider_name or model):
+    if restore and (agent_name or provider_name or model or base_url):
         raise CodeHelperError(
-            "--restore cannot be combined with --agent/--provider/--model"
+            "--restore cannot be combined with --agent/--provider/--model/--base-url"
         )
     if getattr(args, "slot", None) is not None and not restore:
         raise CodeHelperError("--slot only applies together with --restore")
@@ -398,7 +418,15 @@ def _handle_set_default(args: argparse.Namespace) -> int:
         raise CodeHelperError("--model is required")
 
     agent = get_agent(agent_name)
-    provider = get_provider(provider_name)
+    # Same substitution point as _handle_add's — and here it is not merely
+    # convenient but load-bearing: without it, a runtime-base_url provider
+    # with an empty registry base_url would make openai_base_url("") return
+    # "/v1/", and _verify_patch_applied would compare the WRITTEN "/v1/"
+    # against the EXPECTED "/v1/" (both derived from the same empty value) —
+    # a successful set-default that silently breaks codex, with the
+    # verification net unable to catch it because both sides of the check
+    # are wrong in the same way.
+    provider = with_base_url(get_provider(provider_name), base_url)
 
     wrote = apply_set_default(
         paths,
@@ -519,6 +547,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="force a config mechanism when several are possible",
     )
     p_add.add_argument(
+        "--base-url",
+        default=None,
+        help="backend URL for a provider with no address in the registry "
+        "(e.g. litellm: http://localhost:4000/v1); constructor form only",
+    )
+    p_add.add_argument(
         "--force",
         action="store_true",
         default=False,
@@ -575,6 +609,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         default=None,
         help="model name to make the default",
+    )
+    p_set_default.add_argument(
+        "--base-url",
+        default=None,
+        help="backend URL for a provider with no address in the registry "
+        "(e.g. litellm: http://localhost:4000/v1); REQUIRED for such a "
+        "provider, or config.toml would be patched with a malformed URL",
     )
     p_set_default.add_argument(
         "--catalog-json",
