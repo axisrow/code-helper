@@ -335,6 +335,22 @@ def _validate_provider(provider: Provider) -> None:
             f"{provider.token_env_var!r} (must match [A-Z][A-Z0-9_]*) — it is "
             f"interpolated into a generated script unquoted"
         )
+    # A secret-auth provider with an empty token_env_var is a silent
+    # authentication hole for OPENAI_TOML specifically: openai_env_key
+    # returns "" for an empty token_env_var, so neither the TOML profile's
+    # env_key nor the wrapper's `export` line gets written — installation
+    # still succeeds (a token can still be resolved/prompted for) but the
+    # resulting wrapper starts codex with no credential wired in at all.
+    # This is a registry-authoring mistake this import-time check exists to
+    # catch (cycle-review re-review finding on PR #12) — no shipped provider
+    # hits it today (zai/litellm both carry a real token_env_var), but
+    # nothing else would catch a future secret provider added without one.
+    if provider.auth == "secret" and not provider.token_env_var:
+        raise CodeHelperError(
+            f"provider {provider.name!r} declares auth='secret' but has no "
+            f"token_env_var — OPENAI_TOML would silently install with no "
+            f"credential wired in (see openai_env_key)"
+        )
     # See BaseUrlPolicy: exactly one of "registry supplies base_url" / "caller
     # must supply it at runtime" holds per policy — never both, never neither.
     if provider.base_url_policy is BaseUrlPolicy.REQUIRED and provider.base_url:

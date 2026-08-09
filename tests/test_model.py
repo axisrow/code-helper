@@ -414,3 +414,28 @@ def test_uppercase_token_env_var_is_accepted():
         token_env_var="MY_API_KEY",
     )
     m._validate_provider(ok)  # must not raise
+
+
+@pytest.mark.unit
+def test_secret_provider_with_no_token_env_var_is_rejected():
+    """A registry-authoring mistake this import-time check exists to catch
+    (cycle-review re-review finding on PR #12): auth='secret' with an empty
+    token_env_var would let an OPENAI_TOML wrapper install successfully with
+    NO credential wired in at all — openai_env_key returns "" for an empty
+    token_env_var, so neither the profile's env_key nor the wrapper's
+    `export` line gets written. No shipped provider hits this (zai/litellm
+    both carry a real token_env_var); this pins the registry-validation net
+    that would catch a future one that doesn't.
+    """
+    import code_helper.services.model as m
+
+    bad = Provider(
+        name="bad-secret",
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        base_url="https://api.bad.invalid/v1",
+        auth="secret",
+        token_env_var="",  # missing — the whole point of this test
+        wire_api="responses",
+    )
+    with pytest.raises(CodeHelperError, match="declares auth='secret' but has no"):
+        m._validate_provider(bad)
