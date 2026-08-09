@@ -85,7 +85,6 @@ __all__ = [
     "spec_from_installed",
     "token_from_installed",
     "profile_from_installed",
-    "profile_from_installed",
     "list_wrappers",
     "describe_wrapper",
     "describe_all",

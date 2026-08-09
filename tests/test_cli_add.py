@@ -635,11 +635,29 @@ def test_profile_selects_the_default_alias_and_is_visible_in_list(
         == 0
     )
 
-    wrapper = paths.script_for("glm-5-axisrow")
+    wrapper = paths.script_for("glm-5-axisrow-claude")
     assert wrapper.exists()
     assert "profile=axisrow" in wrapper.read_text()
     assert main(["list"]) == 0
     assert "[profile: axisrow]" in capsys.readouterr().out
+
+
+def test_suggest_alias_includes_the_agent_when_a_profile_is_set():
+    """Two agents sharing a model+profile must not suggest the same alias.
+
+    Before this fix, ``suggest_alias`` derived a profiled alias from
+    model+profile only, dropping ``agent_name`` entirely — installing
+    ``glm-5`` for both ``codex`` and ``claude`` with the same profile
+    silently suggested the identical wrapper name for both.
+    """
+    from code_helper.services.spec import suggest_alias
+
+    codex_alias = suggest_alias("glm-5:cloud", "codex", "axisrow")
+    claude_alias = suggest_alias("glm-5:cloud", "claude", "axisrow")
+
+    assert codex_alias != claude_alias
+    assert codex_alias == "glm-5-axisrow-codex"
+    assert claude_alias == "glm-5-axisrow-claude"
 
 
 @pytest.mark.integration

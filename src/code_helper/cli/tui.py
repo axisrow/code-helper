@@ -239,7 +239,13 @@ def run_tui(args: argparse.Namespace) -> int:
             choice = _pick([*rows, (_BACK, "Back")], "Wrappers:")
             if choice == _BACK:
                 return
-            spec = spec_from_installed(Paths.default(), choice) or get_spec(choice)
+            try:
+                spec = spec_from_installed(Paths.default(), choice) or get_spec(
+                    choice
+                )
+            except CodeHelperError as exc:
+                emit_error(exc, getattr(args, "debug", False))
+                continue
             if spec.auth != "secret":
                 _pick([(_BACK, "Back")], f"{choice} has no editable token.")
                 continue

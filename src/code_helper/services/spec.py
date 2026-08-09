@@ -145,7 +145,7 @@ def suggest_alias(
             c if (c.isalnum() or c in "._-") else "-" for c in profile_name
         ).strip("-._")
         if profile_suffix:
-            return f"{cleaned}-{profile_suffix}"
+            return f"{cleaned}-{profile_suffix}-{agent_name}"
     return f"{cleaned}-{agent_name}"
 
 

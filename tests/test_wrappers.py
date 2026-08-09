@@ -1651,3 +1651,12 @@ def test_toml_profile_data_fallback_scopes_base_url_to_its_own_table(
     # that belongs to a different table.
     assert "first-table" in data["model_providers"]
     assert data["model_providers"]["first-table"]["base_url"] is None
+
+
+@pytest.mark.unit
+def test_all_has_no_duplicate_entries():
+    """``__all__`` is the module's public-API list; a duplicate is dead
+    weight from an edit, never intentional (a name is exported once)."""
+    import code_helper.services.wrappers as wrappers_mod
+
+    assert len(wrappers_mod.__all__) == len(set(wrappers_mod.__all__))

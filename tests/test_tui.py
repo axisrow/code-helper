@@ -256,6 +256,37 @@ def test_list_selects_secret_wrapper_for_token_edit(monkeypatch):
 
 
 @pytest.mark.integration
+def test_list_handles_a_managed_wrapper_whose_marker_names_an_unknown_provider(
+    monkeypatch, capsys
+):
+    """A managed-but-unrecognized wrapper must not crash the TUI's List loop.
+
+    ``discover_managed`` lists any marker-carrying file, but
+    ``spec_from_installed`` returns ``None`` when the marker's ``provider=``
+    field names a provider this build doesn't recognise (e.g. one dropped
+    from the registry after install). Before this fix, the ``_run_list``
+    fallback to ``get_spec`` then raised an uncaught ``CodeHelperError`` for
+    such a file, since it also isn't a preset name — crashing the whole TUI
+    instead of reporting the error and returning to the menu.
+    """
+    paths = Paths.default()
+    paths.bin_dir.mkdir(parents=True, exist_ok=True)
+    wrapper = paths.script_for("orphaned-wrapper")
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "# code-helper: managed wrapper (agent=claude, provider=defunct, "
+        "shape=anthropic-env)\n"
+        "exit 0\n"
+    )
+    wrapper.chmod(0o755)
+
+    _menu_sequence(monkeypatch, ["list", "orphaned-wrapper", "__back__", "quit"])
+
+    assert main(["tui"]) == 0
+    assert "error" in capsys.readouterr().err.lower()
+
+
+@pytest.mark.integration
 @pytest.mark.skipif(os.name != "posix", reason="PTY tests require POSIX")
 def test_provider_first_flow_through_a_real_pty(tmp_path):
     """Smoke-test raw keys and the new second-level List navigation."""

@@ -73,10 +73,12 @@ rotates one of its token profiles. The menu never stops on a separate
 "press any key" screen. Scriptable commands, including `edit-token`, remain
 unchanged.
 
-For a secret profile, the suggested command name ends in that profile name:
-choosing `axisrow` for model `glm` suggests `glm-axisrow`. The installed
-wrapper records the selected profile and `code-helper list` shows it, so each
-alias has an explicit token-profile association.
+For a secret profile, the suggested command name includes both the profile
+and the agent: choosing `axisrow` for model `glm` on `claude` suggests
+`glm-axisrow-claude`, so two agents sharing the same model and profile never
+collide on one wrapper name. The installed wrapper records the selected
+profile and `code-helper list` shows it, so each alias has an explicit
+token-profile association.
 
 ## Presets
 
