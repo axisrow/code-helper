@@ -242,7 +242,17 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
         else:
             recovered_url = _env_value(body, "ANTHROPIC_BASE_URL")
         if recovered_url:
-            provider_obj = with_base_url(provider_obj, recovered_url)
+            try:
+                provider_obj = with_base_url(provider_obj, recovered_url)
+            except CodeHelperError:
+                # The recovered value came from a hand-edited or truncated
+                # file (ANTHROPIC_BASE_URL line / TOML base_url), not from
+                # our own renderer — validate_base_url can reject it (bad
+                # scheme, control chars, ...). This function's whole contract
+                # is that it never raises; a malformed recovered address is
+                # the same "unrecoverable" outcome as a missing one, not an
+                # exception for the caller (edit-token/add --alias) to catch.
+                return None
         elif provider_obj.base_url_policy is BaseUrlPolicy.REQUIRED:
             # No registry fallback exists for REQUIRED, and the file didn't
             # carry one either (a truncated profile, a hand-edited wrapper) —

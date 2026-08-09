@@ -1033,6 +1033,36 @@ def test_spec_from_installed_recovers_base_url_anthropic_env(tmp_path):
 
 
 @pytest.mark.integration
+def test_spec_from_installed_never_raises_on_a_corrupted_base_url(tmp_path):
+    """spec_from_installed's documented contract is that it never raises —
+    a recovered base_url that fails validate_base_url (a hand-edited or
+    truncated wrapper) must degrade to None, not propagate CodeHelperError
+    uncaught to a caller like edit-token/add --alias (cycle-review round 2,
+    finding R1).
+    """
+    paths = Paths.from_home(tmp_path)
+    provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
+    spec = build_spec(agent="claude", provider=provider, model="gpt-4o", alias="lm")
+    install_wrapper(paths, spec, token="tok")
+
+    script = paths.script_for("lm")
+    body = script.read_text(encoding="utf-8")
+    # Corrupt the recovered value with an embedded tab — a single-quoted
+    # shell value validate_base_url rejects (embedded control byte), but
+    # that _env_value's single-line regex still matches and hands back
+    # unchanged, so with_base_url/validate_base_url is what has to catch it.
+    hacked = body.replace(
+        "export ANTHROPIC_BASE_URL='http://h:4000/v1'",
+        "export ANTHROPIC_BASE_URL='http://h:4000/v1\tbad'",
+    )
+    assert hacked != body  # sanity: the replace actually matched
+    script.write_text(hacked, encoding="utf-8")
+
+    # Must return None, not raise.
+    assert spec_from_installed(paths, "lm") is None
+
+
+@pytest.mark.integration
 def test_spec_from_installed_recovers_base_url_openai_toml(tmp_path):
     paths = Paths.from_home(tmp_path)
     provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
