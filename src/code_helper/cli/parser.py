@@ -164,7 +164,11 @@ def _handle_add(args: argparse.Namespace) -> int:
     )
     from code_helper.services.models_api import list_models
     from code_helper.services.paths import Paths
-    from code_helper.services.secrets import resolve_token
+    from code_helper.services.secrets import (
+        cache_freshly_typed_token,
+        resolve_token,
+        token_for_discovery,
+    )
     from code_helper.services.spec import (
         build_spec,
         get_preset,
@@ -211,7 +215,7 @@ def _handle_add(args: argparse.Namespace) -> int:
         provider = with_base_url(get_provider(provider_name), base_url)
 
         if getattr(args, "list_models", False):
-            result = list_models(provider)
+            result = list_models(provider, token=token_for_discovery(paths, provider))
             if not result.ok:
                 raise CodeHelperError(result.error)
             for available in result.models:
@@ -257,9 +261,19 @@ def _handle_add(args: argparse.Namespace) -> int:
         spec = spec_from_preset(preset, model_override=model, alias_override=alias)
 
     if spec.auth == "secret":
-        token = resolve_token(
+        resolved = resolve_token(
             env_var=spec.token_env_var,
             prompt=f"{spec.name} token ({spec.token_env_var}): ",
+            paths=paths,
+            provider_name=spec.provider.name,
+        )
+        token = resolved.value
+        cache_freshly_typed_token(
+            paths,
+            spec.provider.name,
+            token,
+            source=resolved.source,
+            dry_run=dry_run,
         )
     else:
         token = spec.auth_value
@@ -282,14 +296,17 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
 
     Unlike ``add``, this always prompts via ``getpass`` directly — it never
     calls :func:`code_helper.services.secrets.resolve_token`, which would
-    silently return an existing ``token_env_var`` value instead of the new
-    one the user is trying to type in.
+    silently return an existing ``token_env_var`` value OR a cached
+    ``credentials.json`` value instead of the NEW one the user is trying to
+    type in. The freshly typed token is cached AFTER the install succeeds, so
+    the cache tracks the rotation rather than going stale.
     """
     import getpass
 
     from code_helper.cli.menu import MenuCancelled, select_from_menu
     from code_helper.errors import CodeHelperError
     from code_helper.services.paths import Paths
+    from code_helper.services.secrets import SOURCE_PROMPT, cache_freshly_typed_token
     from code_helper.services.wrappers import (
         WRAPPERS,
         describe_all,
@@ -365,6 +382,14 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     wrote = install_wrapper(paths, spec, token=token, dry_run=dry_run)
     if not wrote:
         print("no changes")
+        return 0
+    # Keep the credential cache in step with the rotation: if this was a
+    # rotation, the cached value is now stale and the next ``add`` would hand
+    # out the old token. This command always prompts (never env/cache — see the
+    # docstring above), so the source is unconditionally "prompt".
+    cache_freshly_typed_token(
+        paths, spec.provider.name, token, source=SOURCE_PROMPT, dry_run=dry_run
+    )
     return 0
 
 

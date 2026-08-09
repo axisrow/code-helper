@@ -2,10 +2,11 @@
 
 Every filesystem path the tool touches is resolved from a single injected
 ``home`` through ``Paths.from_home`` — ``~/.local/bin`` (the XDG user-bin dir
-where every generated wrapper script lives) and ``~/.codex`` (Codex's config
-dir, written only by the OPENAI_TOML shape). This is the single source of
-truth for resolved paths: no other module may hard-code ``~/.local/bin`` or
-``~/.codex`` literals.
+where every generated wrapper script lives), ``~/.codex`` (Codex's config
+dir, written only by the OPENAI_TOML shape), and ``~/.config/code-helper``
+(this tool's own config dir, where ``credentials.json`` caches provider
+tokens). This is the single source of truth for resolved paths: no other
+module may hard-code those literals.
 
 This module lives in the ``services/`` layer (pure domain services, no side
 effects). ``from_home`` is PURE path arithmetic — it performs no IO at all and
@@ -47,6 +48,12 @@ class Paths:
     #: own managed top-level keys and ``[model_providers.X]`` table there —
     #: never a fragment any other command writes.
     codex_dir: Path
+    #: ``~/.config/code-helper`` — this tool's own config dir. Only
+    #: ``credentials.json`` (the cached provider-token store — see
+    #: ``services/secrets.py``) lives here today. NOT a wrapper/source of
+    #: truth: a token is baked into each generated script (``0o700``), and
+    #: deleting this dir does not break any installed wrapper.
+    config_dir: Path
 
     @classmethod
     def from_home(cls, home: str | Path) -> Paths:
@@ -62,9 +69,20 @@ class Paths:
           lives. It is typically already on ``PATH``.
         - ``codex_dir`` = ``home / ".codex"`` — Codex's config dir; the
           OPENAI_TOML shape writes profile files here.
+        - ``config_dir`` = ``home / ".config" / "code-helper"`` — this tool's
+          own config dir (``credentials.json``).
+
+        ``XDG_CONFIG_HOME`` is intentionally NOT consulted: this method is
+        documented as PURE path arithmetic off ``home`` (no IO, no env), and
+        reading it would also defeat ``conftest.py``'s ``_isolate_home``
+        fixture, which swaps only ``HOME``.
         """
         h = Path(home)
-        return cls(bin_dir=h / ".local" / "bin", codex_dir=h / ".codex")
+        return cls(
+            bin_dir=h / ".local" / "bin",
+            codex_dir=h / ".codex",
+            config_dir=h / ".config" / "code-helper",
+        )
 
     @classmethod
     def default(cls) -> Paths:
@@ -169,3 +187,20 @@ class Paths:
         if slot not in (1, 2, 3):
             raise CodeHelperError(f"invalid backup slot (must be 1, 2, or 3): {slot!r}")
         return self.codex_dir / f"config.toml.bak{slot}"
+
+    def credentials_file(self) -> Path:
+        """``~/.config/code-helper/credentials.json`` — the cached token store.
+
+        A FLAT ``{provider_name: token}`` JSON object (not nested): keys are
+        provider names, never wrapper names, because one provider may back many
+        wrappers and the credential belongs to the provider. Owned and written
+        only by ``services/secrets.py``. Pure arithmetic, no IO, no existence
+        check — same contract as every other accessor here.
+
+        This file is a CACHE of values the user typed at an install prompt, not
+        a session with any provider and not the source of truth: each
+        installed wrapper carries its own token baked in (``0o700``), so
+        deleting this file does not break an installed wrapper — it only means
+        the next ``add``/``--list-models`` will prompt for the token again.
+        """
+        return self.config_dir / "credentials.json"

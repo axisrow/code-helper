@@ -289,16 +289,21 @@ def test_bad_base_url_never_prompts_for_a_token(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_list_models_uses_the_runtime_base_url(tmp_path, monkeypatch, capsys):
-    """The substitution happens BEFORE --list-models, not just before build_spec."""
+    """The substitution happens BEFORE --list-models, not just before build_spec.
+
+    Also pins that the discovery token reaches ``list_models`` (from env here)
+    — the bug #15 point 1: discovery never sent a token at all."""
     import code_helper.services.models_api as models_api
 
     seen = {}
 
-    def _fake_list_models(provider):
+    def _fake_list_models(provider, *, token=""):
         seen["base_url"] = provider.base_url
+        seen["token"] = token
         return models_api.ModelListResult(models=("m1",), source="fake")
 
     monkeypatch.setattr(models_api, "list_models", _fake_list_models)
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-from-env")
     code = main(
         [
             "add",
@@ -313,6 +318,7 @@ def test_list_models_uses_the_runtime_base_url(tmp_path, monkeypatch, capsys):
     )
     assert code == 0
     assert seen["base_url"] == "http://h:4000/v1"
+    assert seen["token"] == "sk-from-env"
 
 
 @pytest.mark.integration
@@ -537,3 +543,170 @@ def test_list_models_prints_and_writes_nothing(tmp_path, monkeypatch):
         main(["add", "--agent", "codex", "--provider", "ollama", "--list-models"]) == 0
     )
     assert not Paths.from_home(tmp_path).bin_dir.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Credential cache (issue #15) — a token typed at a prompt is cached, so the
+# next add/--list-models does not ask again. Never under --dry-run.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_add_caches_a_prompt_typed_token(tmp_path, monkeypatch):
+    import code_helper.services.secrets as secrets
+
+    def _fake_resolve_token(**kwargs):
+        return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
+
+    monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token)
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://localhost:4000/v1",
+            "--model",
+            "gpt-4o",
+        ]
+    )
+    assert code == 0
+    paths = Paths.from_home(tmp_path)
+    assert secrets.credential_for(paths, "litellm") == "sk-typed"
+
+
+@pytest.mark.integration
+def test_add_does_not_cache_an_env_resolved_token(tmp_path, monkeypatch):
+    """The env value already outlives this process — caching it would just be
+    a second, redundant copy, and the priority test in test_secrets.py already
+    proves env beats the cache anyway."""
+
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-env")
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://localhost:4000/v1",
+            "--model",
+            "gpt-4o",
+        ]
+    )
+    assert code == 0
+    paths = Paths.from_home(tmp_path)
+    assert not paths.credentials_file().exists()
+
+
+@pytest.mark.integration
+def test_add_dry_run_never_writes_the_credentials_file(tmp_path, monkeypatch):
+    import code_helper.services.secrets as secrets
+
+    def _fake_resolve_token(**kwargs):
+        return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
+
+    monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token)
+    code = main(
+        [
+            "--dry-run",
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://localhost:4000/v1",
+            "--model",
+            "gpt-4o",
+        ]
+    )
+    assert code == 0
+    paths = Paths.from_home(tmp_path)
+    assert not paths.credentials_file().exists()
+
+
+@pytest.mark.integration
+def test_add_reuses_a_cached_token_without_prompting(tmp_path, monkeypatch):
+    """A token cached by a previous add is picked up silently on the next one."""
+    import code_helper.services.secrets as secrets
+
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "litellm", "sk-cached")
+
+    def _explode(_prompt):  # pragma: no cover - must not run
+        raise AssertionError("must not prompt when the cache already has the token")
+
+    monkeypatch.setattr("code_helper.services.secrets.getpass.getpass", _explode)
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://localhost:4000/v1",
+            "--model",
+            "gpt-4o",
+        ]
+    )
+    assert code == 0
+    body = _body(tmp_path, "gpt-4o-claude")
+    assert "export ANTHROPIC_AUTH_TOKEN='sk-cached'" in body
+
+
+@pytest.mark.integration
+def test_list_models_token_comes_from_credentials_cache(tmp_path, monkeypatch):
+    """--list-models discovery uses a cached token when there is no env var —
+    issue #15 point 1, through the real CLI path (not a fake list_models)."""
+    import code_helper.services.models_api as models_api
+    import code_helper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "litellm", "sk-cached")
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+
+    seen = {}
+
+    def _fake_list_models(provider, *, token=""):
+        seen["token"] = token
+        return models_api.ModelListResult(models=("m1",), source="fake")
+
+    monkeypatch.setattr(models_api, "list_models", _fake_list_models)
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://localhost:4000/v1",
+            "--list-models",
+        ]
+    )
+    assert code == 0
+    assert seen["token"] == "sk-cached"
+
+
+@pytest.mark.integration
+def test_edit_token_updates_the_cache(tmp_path, monkeypatch):
+    """Rotation must overwrite a stale cached value, not just the installed
+    script — otherwise the next add hands out the OLD token."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-old")
+    assert main(["add", "glm"]) == 0
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+
+    import code_helper.services.secrets as secrets
+
+    # _handle_edit_token does `import getpass` locally and calls
+    # getpass.getpass directly (never resolve_token) — patch that exact path.
+    monkeypatch.setattr("getpass.getpass", lambda _p="": "sk-new")
+    assert main(["edit-token", "glm"]) == 0
+    paths = Paths.from_home(tmp_path)
+    assert secrets.credential_for(paths, "zai") == "sk-new"

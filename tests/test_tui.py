@@ -515,6 +515,33 @@ def test_tui_new_asks_for_the_url_before_listing_models(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_tui_new_passes_a_cached_token_to_list_models(tmp_path, monkeypatch):
+    """issue #15 point 1, through the TUI's model picker: the discovery token
+    reaches list_models even with no env var set, when one is cached."""
+    import code_helper.services.models_api as api
+    import code_helper.services.secrets as secrets
+    from code_helper.services.models_api import ModelListResult
+    from code_helper.services.paths import Paths as _Paths
+
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    secrets.save_credential(_Paths.from_home(tmp_path), "litellm", "sk-cached")
+
+    seen = {}
+
+    def _recording_list_models(provider, *, token=""):
+        seen["token"] = token
+        return ModelListResult(("gpt-4o",), "url", None)
+
+    monkeypatch.setattr(api, "list_models", _recording_list_models)
+    _menu_sequence(monkeypatch, ["new", "claude", "litellm", "gpt-4o", "quit"])
+    typed = iter(["http://h:4000/v1", ""])  # base URL, then accept default alias
+    monkeypatch.setattr("builtins.input", lambda _p="": next(typed))
+
+    assert main(["tui"]) == 0
+    assert seen["token"] == "sk-cached"
+
+
+@pytest.mark.integration
 def test_tui_new_litellm_matches_the_cli_byte_for_byte(tmp_path, monkeypatch):
     """The 1-to-1 contract for the new --base-url flag, codex × litellm."""
     _fake_models(monkeypatch, "gpt-4o")

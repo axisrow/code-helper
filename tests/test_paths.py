@@ -69,3 +69,36 @@ def test_from_home_never_references_real_home(tmp_path):
 def test_script_for_resolves_under_bin_dir(tmp_path):
     p = Paths.from_home(tmp_path)
     assert p.script_for("deepseek") == tmp_path / ".local" / "bin" / "deepseek"
+
+
+@pytest.mark.unit
+def test_from_home_resolves_config_dir_under_injected_home(tmp_path):
+    p = Paths.from_home(tmp_path)
+    assert p.config_dir == tmp_path / ".config" / "code-helper"
+
+
+@pytest.mark.unit
+def test_config_dir_never_references_real_home(tmp_path):
+    """Same HOME-isolation guarantee as bin_dir."""
+    real_home_str = str(REAL_HOME)
+    p = Paths.from_home(tmp_path)
+    assert not str(p.config_dir).startswith(real_home_str)
+
+
+@pytest.mark.unit
+def test_credentials_file_resolves_under_config_dir(tmp_path):
+    p = Paths.from_home(tmp_path)
+    assert (
+        p.credentials_file()
+        == tmp_path / ".config" / "code-helper" / "credentials.json"
+    )
+
+
+@pytest.mark.unit
+def test_config_dir_resolution_is_pure_no_fs_effects(tmp_path):
+    """Resolving config_dir creates nothing — directory creation is the write
+    boundary's job (``backends/_atomic.py``), not ``Paths``."""
+    before = set(tmp_path.iterdir())
+    Paths.from_home(tmp_path).credentials_file()
+    after = set(tmp_path.iterdir())
+    assert before == after
