@@ -165,7 +165,10 @@ def _handle_add(args: argparse.Namespace) -> int:
     from code_helper.services.models_api import list_models
     from code_helper.services.paths import Paths
     from code_helper.services.secrets import (
+        SOURCE_ENV,
         cache_freshly_typed_token,
+        credential_for,
+        invalidate_cached_credential,
         resolve_token,
         token_for_discovery,
     )
@@ -297,6 +300,27 @@ def _handle_add(args: argparse.Namespace) -> int:
             source=resolved.source,
             dry_run=dry_run,
         )
+        # A non-prompt source (env/cache) is never itself written to the
+        # cache — see cache_freshly_typed_token's docstring, an env value
+        # already outlives this process. But a REAL install (wrote and not
+        # dry_run) that used an env-sourced token just changed what the
+        # wrapper actually runs with, and a cache entry for this provider
+        # from an EARLIER, different install would now be stale relative to
+        # it: an env-free run later would resolve that stale cache value and
+        # silently revert the wrapper to it (a rotated/revoked credential
+        # resurrected with no confirmation). Invalidate rather than "helpfully"
+        # overwrite it with the env value — env values aren't meant to be
+        # cached, and dropping the stale entry is enough to make the next
+        # env-free run fall through to a fresh prompt instead of reusing
+        # either the old or the env-only value.
+        if (
+            resolved.source == SOURCE_ENV
+            and wrote
+            and not dry_run
+            and credential_for(paths, spec.provider.name)
+            and credential_for(paths, spec.provider.name) != token
+        ):
+            invalidate_cached_credential(paths, spec.provider.name)
     if not wrote:
         print("no changes")
     return 0
@@ -404,7 +428,6 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     )
     if not wrote:
         print("no changes")
-        return 0
     return 0
 
 

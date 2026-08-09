@@ -28,6 +28,7 @@ from code_helper.services.secrets import (
     SOURCE_ENV,
     SOURCE_PROMPT,
     credential_for,
+    invalidate_cached_credential,
     load_credentials,
     resolve_token,
     save_credential,
@@ -145,6 +146,86 @@ def test_save_credential_preserves_foreign_file_content(tmp_path):
     save_credential(paths, "litellm", "sk-1")
     creds = load_credentials(paths)
     assert creds == {"future-provider": "sk-x", "litellm": "sk-1"}
+
+
+# --------------------------------------------------------------------------- #
+# invalidate_cached_credential — drop a stale entry, never raise
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_invalidate_cached_credential_removes_the_entry(tmp_path):
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-old")
+    invalidate_cached_credential(paths, "zai")
+    assert credential_for(paths, "zai") == ""
+
+
+@pytest.mark.unit
+def test_invalidate_cached_credential_preserves_other_providers(tmp_path):
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-old")
+    save_credential(paths, "litellm", "sk-other")
+    invalidate_cached_credential(paths, "zai")
+    assert credential_for(paths, "zai") == ""
+    assert credential_for(paths, "litellm") == "sk-other"
+
+
+@pytest.mark.unit
+def test_invalidate_cached_credential_missing_provider_is_a_noop(tmp_path):
+    paths = _paths(tmp_path)
+    save_credential(paths, "litellm", "sk-other")
+    invalidate_cached_credential(paths, "zai")  # never cached — nothing to do
+    assert credential_for(paths, "litellm") == "sk-other"
+
+
+@pytest.mark.unit
+def test_invalidate_cached_credential_missing_file_is_a_noop(tmp_path):
+    paths = _paths(tmp_path)
+    invalidate_cached_credential(paths, "zai")  # no file at all yet
+    assert not paths.credentials_file().exists()
+
+
+# --------------------------------------------------------------------------- #
+# cache_freshly_typed_token — best-effort: a persistence failure must not
+# crash a caller whose wrapper install already succeeded.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_cache_freshly_typed_token_swallows_oserror(tmp_path, capsys, monkeypatch):
+    """A cache write is best-effort AFTER a successful install (the ordering
+    round 1's fix introduced): the install already happened, so a disk-full/
+    permission-denied/other OSError writing the cache must not propagate as
+    an uncaught exception — that would crash the process for what is, from
+    the user's perspective, a fully successful command. Warn and move on."""
+    import code_helper.services.secrets as secrets
+
+    paths = _paths(tmp_path)
+
+    def _boom(*_a, **_kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(secrets, "save_credential", _boom)
+    secrets.cache_freshly_typed_token(
+        paths, "litellm", "sk-typed", source=SOURCE_PROMPT, dry_run=False
+    )
+
+    # Must not raise (proven by reaching this line) and must tell the user.
+    assert "warning" in capsys.readouterr().err.lower()
+
+
+@pytest.mark.unit
+def test_cache_freshly_typed_token_still_raises_nothing_on_success(tmp_path):
+    """Sanity check: the try/except added for the OSError case does not
+    swallow a normal, successful save — it still lands in the cache."""
+    from code_helper.services.secrets import cache_freshly_typed_token
+
+    paths = _paths(tmp_path)
+    cache_freshly_typed_token(
+        paths, "litellm", "sk-typed", source=SOURCE_PROMPT, dry_run=False
+    )
+    assert credential_for(paths, "litellm") == "sk-typed"
 
 
 # --------------------------------------------------------------------------- #

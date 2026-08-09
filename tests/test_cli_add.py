@@ -603,6 +603,64 @@ def test_add_does_not_cache_an_env_resolved_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_add_env_sourced_install_invalidates_a_stale_cached_token(
+    tmp_path, monkeypatch
+):
+    """An env-sourced install must not leave a now-stale cached token behind
+    for a LATER, env-free run to silently resurrect.
+
+    Sequence: (1) a prompt-typed token "old" gets cached for a FIXED
+    provider; (2) a later ``add`` with the env var set to "new" installs
+    successfully — env-sourced values are still never CACHED (an env value
+    already outlives the process), but the stale "old" cache entry must not
+    be left standing either, or (3) a still-later ``add`` run WITHOUT the env
+    var would resolve "old" from the cache and silently reinstall over the
+    wrapper that currently has "new" — reverting a rotated/revoked
+    credential with no confirmation and no warning.
+    """
+    import code_helper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+
+    # Step 1: cache "old" via a prompt-typed install.
+    real_resolve_token = secrets.resolve_token
+
+    def _fake_resolve_token_old(**kwargs):
+        return secrets.ResolvedToken("sk-old", secrets.SOURCE_PROMPT)
+
+    monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token_old)
+    assert main(["add", "glm"]) == 0
+    assert secrets.credential_for(paths, "zai") == "sk-old"
+    # Restore the real resolve_token for steps 2-3 — NOT monkeypatch.undo(),
+    # which would also roll back conftest.py's HOME-isolation fixture and
+    # let this test escape into the real home directory.
+    monkeypatch.setattr(secrets, "resolve_token", real_resolve_token)
+
+    # Step 2: install with a NEW token via the env var. install_wrapper
+    # actually changes the wrapper (different token -> not byte-identical).
+    monkeypatch.setenv("ZAI_API_KEY", "sk-new")
+    assert main(["add", "glm"]) == 0
+    assert "sk-new" in _body(tmp_path, "glm")
+    # The stale cache entry must be gone (or updated) — never left at "old".
+    assert secrets.credential_for(paths, "zai") != "sk-old"
+
+    # Step 3: a later run without the env var must NOT silently resolve "old"
+    # from a stale cache and revert the wrapper. The cache was invalidated by
+    # step 2's fix, so resolve_token falls through to a fresh prompt here —
+    # simulate the user typing a new value; the point being proven is that
+    # "sk-old" is never resolved from a stale cache.
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+
+    def _fake_resolve_token_new(**kwargs):
+        return secrets.ResolvedToken("sk-freshly-typed", secrets.SOURCE_PROMPT)
+
+    monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token_new)
+    assert main(["add", "glm"]) == 0
+    assert "sk-old" not in _body(tmp_path, "glm")
+    assert "sk-freshly-typed" in _body(tmp_path, "glm")
+
+
+@pytest.mark.integration
 def test_add_does_not_cache_a_prompt_typed_token_when_the_install_is_refused(
     tmp_path, capsys, monkeypatch
 ):

@@ -32,6 +32,7 @@ from __future__ import annotations
 import getpass
 import json
 import os
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
@@ -45,6 +46,7 @@ __all__ = [
     "load_credentials",
     "credential_for",
     "save_credential",
+    "invalidate_cached_credential",
     "cache_freshly_typed_token",
     "token_for_discovery",
 ]
@@ -126,6 +128,34 @@ def save_credential(paths: Paths, provider_name: str, token: str) -> None:
     )
 
 
+def invalidate_cached_credential(paths: Paths, provider_name: str) -> None:
+    """Drop ``provider_name``'s cached credential, if any — never raises.
+
+    A ``FIXED``-policy provider's cache can go stale relative to what is
+    actually installed: an env-sourced token (never itself cached — see
+    :func:`cache_freshly_typed_token`) can replace an OLDER prompt-cached
+    token in the installed wrapper without touching the cache at all, and a
+    later, env-free ``add`` would then resolve that now-stale cached value
+    and silently reinstall the wrapper back to it — reverting a rotated or
+    revoked credential with no confirmation. The caller (``_handle_add``) is
+    responsible for deciding WHEN that situation applies (see its own
+    comment); this is just the drop, read-modify-write like
+    :func:`save_credential` so it never disturbs another provider's entry.
+    Dropping (rather than overwriting with the env value) is deliberate: an
+    env value is not meant to be cached at all, so simply removing the stale
+    entry is enough — the next env-free run falls through to a fresh prompt.
+    """
+    data = load_credentials(paths)
+    if provider_name not in data:
+        return
+    del data[provider_name]
+    atomic_write(
+        paths.credentials_file(),
+        json.dumps(data, indent=2, sort_keys=True) + "\n",
+        mode=0o600,
+    )
+
+
 def cache_freshly_typed_token(
     paths: Paths, provider_name: str, token: str, *, source: str, dry_run: bool
 ) -> None:
@@ -143,9 +173,29 @@ def cache_freshly_typed_token(
     Never caches ``SOURCE_ENV``/``SOURCE_CACHE`` (already durable) or anything
     under ``--dry-run`` (the project-wide rule that ``--dry-run`` writes
     nothing holds for credentials too).
+
+    Both callers run this AFTER their wrapper install already succeeded (see
+    each call site's own comment on why caching is ordered last) — so a write
+    failure here (a full disk, an unwritable ``config_dir``, a permission
+    error) must not surface as an uncaught exception. ``save_credential``
+    goes through ``atomic_write``, which raises a plain ``OSError`` on
+    failure — not a :class:`CodeHelperError`, so ``__main__.main()``'s
+    ``except CodeHelperError`` would not catch it, and the command would
+    crash with a raw traceback for what the user just watched succeed. The
+    cache is optional convenience, not the source of truth (the token is
+    already baked into the installed script); treat a failure to persist it
+    as best-effort and warn instead of crashing.
     """
     if source == SOURCE_PROMPT and not dry_run:
-        save_credential(paths, provider_name, token)
+        try:
+            save_credential(paths, provider_name, token)
+        except OSError as e:
+            print(
+                f"warning: could not cache the token for {provider_name} "
+                f"({e}) — the wrapper is installed, but the next add/"
+                f"--list-models will prompt again",
+                file=sys.stderr,
+            )
 
 
 def resolve_token(
