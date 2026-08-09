@@ -717,12 +717,14 @@ def test_add_dry_run_never_writes_the_credentials_file(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_add_reuses_a_cached_token_without_prompting(tmp_path, monkeypatch):
-    """A token cached by a previous add is picked up silently on the next one."""
+    """A token cached by a previous add is picked up silently on the next one
+    — for a FIXED-base_url_policy provider (zai), where the address never
+    varies and the cache is safe to reuse across installs."""
     import code_helper.services.secrets as secrets
 
-    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
     paths = Paths.from_home(tmp_path)
-    secrets.save_credential(paths, "litellm", "sk-cached")
+    secrets.save_credential(paths, "zai", "sk-cached")
 
     def _explode(_prompt):  # pragma: no cover - must not run
         raise AssertionError("must not prompt when the cache already has the token")
@@ -734,16 +736,54 @@ def test_add_reuses_a_cached_token_without_prompting(tmp_path, monkeypatch):
             "--agent",
             "claude",
             "--provider",
+            "zai",
+            "--model",
+            "glm-5",
+        ]
+    )
+    assert code == 0
+    body = _body(tmp_path, "glm-5-claude")
+    assert "export ANTHROPIC_AUTH_TOKEN='sk-cached'" in body
+
+
+@pytest.mark.integration
+def test_add_ignores_a_cached_token_for_a_runtime_address_provider_on_install(
+    tmp_path, monkeypatch
+):
+    """A token cached for litellm under one --base-url must not be silently
+    reused (and baked into a wrapper) for a DIFFERENT --base-url given for
+    the same provider name — the install-path twin of
+    ``test_list_models_ignores_a_cached_token_for_a_runtime_address_provider``
+    (discovery path). Falls through to the prompt instead of the stale cache."""
+    import code_helper.services.secrets as secrets
+
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "litellm", "sk-cached-for-host-a")
+
+    real_resolve_token = secrets.resolve_token
+
+    def _resolve_token_with_fake_prompt(**kwargs):
+        return real_resolve_token(**kwargs, getpass_fn=lambda _p: "sk-typed-for-host-b")
+
+    monkeypatch.setattr(secrets, "resolve_token", _resolve_token_with_fake_prompt)
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
             "litellm",
             "--base-url",
-            "http://localhost:4000/v1",
+            "http://host-b:4000/v1",
             "--model",
             "gpt-4o",
         ]
     )
     assert code == 0
     body = _body(tmp_path, "gpt-4o-claude")
-    assert "export ANTHROPIC_AUTH_TOKEN='sk-cached'" in body
+    assert "export ANTHROPIC_AUTH_TOKEN='sk-typed-for-host-b'" in body
+    assert "sk-cached-for-host-a" not in body
 
 
 @pytest.mark.integration
@@ -801,3 +841,27 @@ def test_edit_token_updates_the_cache(tmp_path, monkeypatch):
     assert main(["edit-token", "glm"]) == 0
     paths = Paths.from_home(tmp_path)
     assert secrets.credential_for(paths, "zai") == "sk-new"
+
+
+@pytest.mark.integration
+def test_edit_token_caches_even_on_a_byte_identical_noop(tmp_path, monkeypatch):
+    """Retyping the token that's already installed no-ops install_wrapper
+    (byte-identical), but the cache must still be refreshed/created — matching
+    ``add``'s explicit rule that ``wrote=False`` is not a refusal and the
+    token that produced the no-op is exactly the one worth having cached."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-same")
+    assert main(["add", "glm"]) == 0
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+
+    import code_helper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    # The install above resolved its token from ZAI_API_KEY (not a prompt), so
+    # nothing is cached yet — the wrapper on disk has "sk-same" baked in, but
+    # credentials.json doesn't exist. edit-token must still create the cache
+    # entry even though install_wrapper no-ops (same token, byte-identical).
+    assert not paths.credentials_file().exists()
+
+    monkeypatch.setattr("getpass.getpass", lambda _p="": "sk-same")
+    assert main(["edit-token", "glm"]) == 0  # no-op: same token, byte-identical
+    assert secrets.credential_for(paths, "zai") == "sk-same"

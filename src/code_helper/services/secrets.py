@@ -154,6 +154,7 @@ def resolve_token(
     prompt: str,
     paths: Paths,
     provider_name: str,
+    base_url_policy: str = "fixed",
     environ: Mapping[str, str] = os.environ,
     getpass_fn: Callable[[str], str] = getpass.getpass,
     retries: int = 3,
@@ -167,6 +168,14 @@ def resolve_token(
         paths: Resolved paths — locates ``credentials.json``.
         provider_name: Key into ``credentials.json`` (a provider name, not a
             wrapper name).
+        base_url_policy: The resolved provider's
+            :class:`~code_helper.services.model.BaseUrlPolicy` value (as a
+            plain string — this module stays free of the ``model`` import,
+            same reasoning as :func:`token_for_discovery`). Defaults to
+            ``"fixed"`` so every pre-existing caller keeps the original
+            cache-using behaviour unless it opts in by passing the real
+            value. See :func:`token_for_discovery`'s docstring for why the
+            cache is skipped for anything else.
         environ: Injected environment (default ``os.environ``).
         getpass_fn: Hidden-input source (default ``getpass.getpass``, NEVER
             echoed to the terminal).
@@ -187,9 +196,10 @@ def resolve_token(
     if env_value:
         return ResolvedToken(env_value, SOURCE_ENV)
 
-    cached = credential_for(paths, provider_name)
-    if cached:
-        return ResolvedToken(cached, SOURCE_CACHE)
+    if base_url_policy == "fixed":
+        cached = credential_for(paths, provider_name)
+        if cached:
+            return ResolvedToken(cached, SOURCE_CACHE)
 
     for _ in range(retries):
         value = getpass_fn(prompt)

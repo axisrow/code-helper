@@ -189,6 +189,72 @@ def test_resolve_token_cache_wins_over_prompt(tmp_path):
 
 
 @pytest.mark.unit
+def test_resolve_token_ignores_cache_for_a_runtime_address_provider(tmp_path):
+    """The INSTALL path must not hand a cached token to a different host either.
+
+    Mirrors ``token_for_discovery``'s ``base_url_policy`` gate: a token cached
+    for ``litellm`` at one ``--base-url`` must not be silently reused (and
+    baked into a wrapper script) for a *different* ``--base-url`` given for
+    the same provider name. Falls through to the prompt instead.
+    """
+    paths = _paths(tmp_path)
+    save_credential(paths, "litellm", "sk-cached-for-host-a")
+
+    def _fake_prompt(_prompt):
+        return "sk-typed-for-host-b"
+
+    resolved = resolve_token(
+        env_var="LITELLM_API_KEY",
+        prompt="token: ",
+        paths=paths,
+        provider_name="litellm",
+        base_url_policy="required",
+        environ={},
+        getpass_fn=_fake_prompt,
+    )
+    assert resolved.value == "sk-typed-for-host-b"
+    assert resolved.source == SOURCE_PROMPT
+
+
+@pytest.mark.unit
+def test_resolve_token_still_uses_cache_for_a_fixed_provider(tmp_path):
+    """The pre-existing behaviour is preserved for FIXED providers, where the
+    address never varies and the cache is safe to reuse."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-cached")
+    resolved = resolve_token(
+        env_var="ZAI_API_KEY",
+        prompt="token: ",
+        paths=paths,
+        provider_name="zai",
+        base_url_policy="fixed",
+        environ={},
+        getpass_fn=_no_prompt,
+    )
+    assert resolved.value == "sk-cached"
+    assert resolved.source == SOURCE_CACHE
+
+
+@pytest.mark.unit
+def test_resolve_token_defaults_to_fixed_for_backward_compatibility(tmp_path):
+    """``base_url_policy`` defaults to ``"fixed"`` when omitted — every
+    pre-existing caller (and every other test in this file) that doesn't pass
+    it keeps the original cache-using behaviour."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "litellm", "sk-cached")
+    resolved = resolve_token(
+        env_var="LITELLM_API_KEY",
+        prompt="token: ",
+        paths=paths,
+        provider_name="litellm",
+        environ={},
+        getpass_fn=_no_prompt,
+    )
+    assert resolved.value == "sk-cached"
+    assert resolved.source == SOURCE_CACHE
+
+
+@pytest.mark.unit
 def test_resolve_token_prompt_when_neither_env_nor_cache(tmp_path):
     paths = _paths(tmp_path)
 

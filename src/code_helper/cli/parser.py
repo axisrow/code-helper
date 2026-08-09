@@ -266,6 +266,7 @@ def _handle_add(args: argparse.Namespace) -> int:
             prompt=f"{spec.name} token ({spec.token_env_var}): ",
             paths=paths,
             provider_name=spec.provider.name,
+            base_url_policy=spec.provider.base_url_policy,
         )
         token = resolved.value
     else:
@@ -390,16 +391,20 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     # preset from scratch and discards whatever model this wrapper was
     # actually installed with.
     wrote = install_wrapper(paths, spec, token=token, dry_run=dry_run)
-    if not wrote:
-        print("no changes")
-        return 0
     # Keep the credential cache in step with the rotation: if this was a
     # rotation, the cached value is now stale and the next ``add`` would hand
     # out the old token. This command always prompts (never env/cache — see the
-    # docstring above), so the source is unconditionally "prompt".
+    # docstring above), so the source is unconditionally "prompt". Cached
+    # regardless of ``wrote`` — matching ``_handle_add``'s rule (see its
+    # comment): ``wrote=False`` means install_wrapper no-opped because the
+    # typed token already matches what's installed byte-for-byte, which is
+    # exactly the token worth having cached, not a reason to skip caching.
     cache_freshly_typed_token(
         paths, spec.provider.name, token, source=SOURCE_PROMPT, dry_run=dry_run
     )
+    if not wrote:
+        print("no changes")
+        return 0
     return 0
 
 

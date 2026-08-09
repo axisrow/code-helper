@@ -537,6 +537,17 @@ def test_tui_new_ignores_a_cached_token_for_a_runtime_address_provider(
         return ModelListResult(("gpt-4o",), "url", None)
 
     monkeypatch.setattr(api, "list_models", _recording_list_models)
+    # The install path (resolve_token) now also skips the cache for a
+    # REQUIRED-policy provider (see test_add_ignores_a_cached_token_for_a_
+    # runtime_address_provider_on_install), so it falls through to a prompt —
+    # unrelated to what this test is pinning (the discovery path), but must
+    # be satisfied for the "new" flow to complete.
+    real_resolve_token = secrets.resolve_token
+    monkeypatch.setattr(
+        secrets,
+        "resolve_token",
+        lambda **kw: real_resolve_token(**kw, getpass_fn=lambda _p: "sk-typed"),
+    )
     _menu_sequence(monkeypatch, ["new", "claude", "litellm", "gpt-4o", "quit"])
     typed = iter(["http://h:4000/v1", ""])  # base URL, then accept default alias
     monkeypatch.setattr("builtins.input", lambda _p="": next(typed))
