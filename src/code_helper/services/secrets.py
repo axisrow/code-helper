@@ -218,12 +218,24 @@ def token_for_discovery(
 
     ``provider`` is a :class:`code_helper.services.model.Provider`; typed loose
     to avoid importing the model module here (``secrets`` → ``model`` would be a
-    fine edge, but this helper reads only two attributes and staying free of the
-    import keeps the dependency arrow one-directional at call sites).
+    fine edge, but this helper reads only three attributes and staying free of
+    the import keeps the dependency arrow one-directional at call sites).
+
+    The cache is consulted **only for a** ``BaseUrlPolicy.FIXED`` **provider.**
+    The cache key is the provider *name*, not an address — safe as long as a
+    provider has exactly one true address (``FIXED``), but a ``REQUIRED``/
+    ``OVERRIDABLE`` provider's ``base_url`` can be a different, caller-supplied
+    host on every invocation (that is the whole point of ``--base-url``). Handing
+    a cached secret to whatever host the caller names next would silently send
+    it to an address it was never cached for. An explicit env var is still
+    honoured either way: the caller set it for *this* invocation, so it carries
+    no such cross-invocation ambiguity.
     """
     if provider.auth != "secret":
         return ""
     env_value = environ.get(provider.token_env_var, "")
     if env_value:
         return env_value
+    if provider.base_url_policy != "fixed":
+        return ""
     return credential_for(paths, provider.name)

@@ -268,14 +268,8 @@ def _handle_add(args: argparse.Namespace) -> int:
             provider_name=spec.provider.name,
         )
         token = resolved.value
-        cache_freshly_typed_token(
-            paths,
-            spec.provider.name,
-            token,
-            source=resolved.source,
-            dry_run=dry_run,
-        )
     else:
+        resolved = None
         token = spec.auth_value
 
     wrote = install_wrapper(
@@ -286,6 +280,22 @@ def _handle_add(args: argparse.Namespace) -> int:
         force=getattr(args, "force", False),
         confirm=_confirm_overwrite,
     )
+    # Cache only once install_wrapper has returned WITHOUT raising: a refusal
+    # (foreign-file guard, discard-only-secret guard) raises CodeHelperError
+    # and skips this line entirely, so a token typed for an install that never
+    # happened is never persisted. ``wrote`` itself is deliberately NOT part
+    # of the gate — ``wrote=False`` means "install_wrapper no-opped because
+    # the content was already byte-identical", not a refusal, and the token
+    # that produced that byte-identical content is exactly the one worth
+    # having cached.
+    if resolved is not None:
+        cache_freshly_typed_token(
+            paths,
+            spec.provider.name,
+            token,
+            source=resolved.source,
+            dry_run=dry_run,
+        )
     if not wrote:
         print("no changes")
     return 0

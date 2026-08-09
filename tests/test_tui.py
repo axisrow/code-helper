@@ -515,9 +515,13 @@ def test_tui_new_asks_for_the_url_before_listing_models(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_tui_new_passes_a_cached_token_to_list_models(tmp_path, monkeypatch):
-    """issue #15 point 1, through the TUI's model picker: the discovery token
-    reaches list_models even with no env var set, when one is cached."""
+def test_tui_new_ignores_a_cached_token_for_a_runtime_address_provider(
+    tmp_path, monkeypatch
+):
+    """The TUI's model picker must NOT hand a cached token to a REQUIRED-policy
+    provider (litellm) — its ``base_url`` can point anywhere the user types,
+    so a token cached under the provider name alone must not follow it there.
+    See ``token_for_discovery``'s ``base_url_policy`` gate in secrets.py."""
     import code_helper.services.models_api as api
     import code_helper.services.secrets as secrets
     from code_helper.services.models_api import ModelListResult
@@ -538,7 +542,7 @@ def test_tui_new_passes_a_cached_token_to_list_models(tmp_path, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _p="": next(typed))
 
     assert main(["tui"]) == 0
-    assert seen["token"] == "sk-cached"
+    assert seen["token"] == ""
 
 
 @pytest.mark.integration

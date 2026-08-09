@@ -230,12 +230,13 @@ def test_resolve_token_raises_after_empty_retries(tmp_path):
 
 
 class _Provider:
-    """Stand-in provider: ``token_for_discovery`` reads only two attrs."""
+    """Stand-in provider: ``token_for_discovery`` reads these attrs."""
 
-    def __init__(self, *, auth, token_env_var, name):
+    def __init__(self, *, auth, token_env_var, name, base_url_policy="fixed"):
         self.auth = auth
         self.token_env_var = token_env_var
         self.name = name
+        self.base_url_policy = base_url_policy
 
 
 @pytest.mark.unit
@@ -272,6 +273,45 @@ def test_token_for_discovery_never_prompts(tmp_path):
     """
     provider = _Provider(auth="secret", token_env_var="LITELLM_API_KEY", name="litellm")
     assert token_for_discovery(_paths(tmp_path), provider, environ={}) == ""
+
+
+@pytest.mark.unit
+def test_token_for_discovery_ignores_cache_for_a_runtime_address_provider(tmp_path):
+    """A cached token must not follow a provider to an arbitrary runtime URL.
+
+    ``token_for_discovery`` used to key the cache lookup purely by provider
+    name — so a token cached for ``litellm`` at one ``--base-url`` was handed
+    to a *different* ``--base-url`` for the same provider name, with no check
+    that the two addresses have anything to do with each other. Any provider
+    whose ``base_url_policy`` is not FIXED (REQUIRED/OVERRIDABLE) can have its
+    address changed per-invocation by the caller, so a cached secret must not
+    be attached to it automatically — only an explicit env var (which the
+    caller set for *this* invocation) is still honoured.
+    """
+    paths = _paths(tmp_path)
+    save_credential(paths, "litellm", "sk-cached")
+    provider = _Provider(
+        auth="secret",
+        token_env_var="LITELLM_API_KEY",
+        name="litellm",
+        base_url_policy="required",
+    )
+    assert token_for_discovery(paths, provider, environ={}) == ""
+
+
+@pytest.mark.unit
+def test_token_for_discovery_still_uses_cache_for_a_fixed_provider(tmp_path):
+    """The pre-existing behaviour is preserved for FIXED (registry-address)
+    providers — there the cache is safe, since the address never varies."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-cached")
+    provider = _Provider(
+        auth="secret",
+        token_env_var="ZAI_API_KEY",
+        name="zai",
+        base_url_policy="fixed",
+    )
+    assert token_for_discovery(paths, provider, environ={}) == "sk-cached"
 
 
 @pytest.mark.unit

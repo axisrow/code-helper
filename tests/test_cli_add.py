@@ -603,6 +603,92 @@ def test_add_does_not_cache_an_env_resolved_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_add_does_not_cache_a_prompt_typed_token_when_the_install_is_refused(
+    tmp_path, capsys, monkeypatch
+):
+    """A token typed for an install that never happened must not be cached.
+
+    A prompt-resolved token is only worth persisting once the install it was
+    typed for actually landed — caching it unconditionally, before
+    ``install_wrapper`` even runs, leaves a stale/orphaned token in
+    ``credentials.json`` when the install is refused (foreign-file guard, no
+    ``--force``, no TTY to confirm). ``edit-token`` already gets this right
+    (caches only after ``wrote`` is truthy); ``add`` must match it.
+    """
+    import code_helper.services.secrets as secrets
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    paths = Paths.from_home(tmp_path)
+    paths.bin_dir.mkdir(parents=True, exist_ok=True)
+    # gpt-4o + claude -> suggested alias "gpt-4o-claude" (see suggest_alias).
+    paths.script_for("gpt-4o-claude").write_text(
+        "#!/bin/bash\necho mine\n", encoding="utf-8"
+    )
+
+    def _fake_resolve_token(**kwargs):
+        return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
+
+    monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token)
+
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://localhost:4000/v1",
+            "--model",
+            "gpt-4o",
+        ]
+    )
+    assert code == 1
+    assert "refusing to overwrite" in capsys.readouterr().err
+    assert secrets.credential_for(paths, "litellm") == ""
+
+
+@pytest.mark.integration
+def test_add_caches_a_prompt_typed_token_on_a_byte_identical_noop_reinstall(
+    tmp_path, monkeypatch
+):
+    """A prompt-typed token IS still cached when install_wrapper no-ops because
+    the re-typed token happens to match what's already installed byte-for-byte
+    (``wrote=False``, not a refusal) — the fix must not overcorrect into never
+    caching when ``wrote`` is falsy for this reason instead of a refusal."""
+    import code_helper.services.secrets as secrets
+
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    paths = Paths.from_home(tmp_path)
+
+    args = [
+        "add",
+        "--agent",
+        "claude",
+        "--provider",
+        "litellm",
+        "--base-url",
+        "http://localhost:4000/v1",
+        "--model",
+        "gpt-4o",
+    ]
+
+    def _fake_resolve_token(**kwargs):
+        return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
+
+    monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token)
+    assert main(args) == 0  # first install, writes the wrapper
+    # Clear the cache so the second run must go through resolve_token again
+    # (the fake always reports SOURCE_PROMPT) while install_wrapper itself
+    # sees byte-identical content and no-ops.
+    paths.credentials_file().unlink()
+    assert not paths.credentials_file().exists()
+
+    assert main(args) == 0  # second install: same token -> install_wrapper no-ops
+    assert secrets.credential_for(paths, "litellm") == "sk-typed"
+
+
+@pytest.mark.integration
 def test_add_dry_run_never_writes_the_credentials_file(tmp_path, monkeypatch):
     import code_helper.services.secrets as secrets
 
@@ -661,9 +747,14 @@ def test_add_reuses_a_cached_token_without_prompting(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_list_models_token_comes_from_credentials_cache(tmp_path, monkeypatch):
-    """--list-models discovery uses a cached token when there is no env var —
-    issue #15 point 1, through the real CLI path (not a fake list_models)."""
+def test_list_models_ignores_a_cached_token_for_a_runtime_address_provider(
+    tmp_path, monkeypatch
+):
+    """--list-models discovery must NOT hand a cached token to a provider whose
+    ``base_url`` the caller can point anywhere (litellm is REQUIRED-policy) —
+    see ``token_for_discovery``'s ``base_url_policy`` gate in secrets.py.
+    Through the real CLI path (not a fake ``token_for_discovery``), proving the
+    substitution actually reaches discovery for a REQUIRED provider."""
     import code_helper.services.models_api as models_api
     import code_helper.services.secrets as secrets
 
@@ -691,7 +782,7 @@ def test_list_models_token_comes_from_credentials_cache(tmp_path, monkeypatch):
         ]
     )
     assert code == 0
-    assert seen["token"] == "sk-cached"
+    assert seen["token"] == ""
 
 
 @pytest.mark.integration
