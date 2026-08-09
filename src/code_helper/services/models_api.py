@@ -32,6 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from code_helper.services.model import ModelListAPI, Provider
+from code_helper.services.render import openai_base_url
 
 __all__ = ["list_models", "ModelListResult", "Fetcher", "DEFAULT_TIMEOUT"]
 
@@ -61,18 +62,52 @@ class ModelListResult:
         return self.error is None
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse every HTTP redirect instead of silently following it.
+
+    ``urllib``'s default redirect handling re-sends the SAME ``Request``
+    object — headers included — to the ``Location`` target, even when that
+    target is a different host. This function attaches an ``Authorization:
+    Bearer <token>`` header for secret-auth providers, so the stock behaviour
+    would forward that bearer token to whatever host a (misconfigured,
+    load-balancer-fronted, or actively malicious) endpoint redirects to. This
+    is a one-shot discovery convenience (``--list-models`` / the TUI's model
+    picker), not agent traffic — there is no legitimate reason for it to
+    follow a redirect at all, so the correct fix is to refuse one outright
+    rather than try to selectively strip the header per-hop. The caller gets
+    the resulting :class:`urllib.error.HTTPError` back through the same
+    exception path as any other unreachable-endpoint failure (see
+    ``list_models``'s ``except`` tuple), so this degrades to the existing
+    "could not reach {provider}" message — no new failure mode, just a closed
+    one.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+        return None
+
+
+#: One opener, reused across calls: redirect handling is a fixed policy of
+#: this fetcher, not per-request state, and urllib's default OpenerDirector
+#: construction is cheap but there is no reason to redo it every call.
+_opener = urllib.request.build_opener(_NoRedirectHandler)
+
+
 def _urlopen_fetch(url: str, timeout: float, token: str) -> bytes:
     request = urllib.request.Request(url, method="GET")
     if token:
         request.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+    with _opener.open(request, timeout=timeout) as response:  # noqa: S310
         return response.read()
 
 
-#: Path appended to the provider's base URL, per API shape. Note OPENAI_V1 uses
-#: ``/models``, not ``/v1/models``: an OpenAI-compatible ``base_url`` already
-#: ends in ``/v1`` (that is the value Codex itself wants in its TOML), so the
-#: version segment must not be duplicated here.
+#: Path appended to the provider's base URL, per API shape.
+#:
+#: Both use a path WITHOUT a version segment. OLLAMA_TAGS hits ``/api/tags``
+#: directly off the daemon root. OPENAI_V1 hits ``/models`` off an OpenAI-style
+#: root, which :func:`openai_base_url` normalizes to end in ``/v1`` first — so a
+#: bare-root ``--base-url`` (``http://host:4000``) and an already-versioned one
+#: (``http://host:4000/v1``) both reach ``…/v1/models``, matching the endpoint
+#: the eventual install points Codex at (see ``services/render.py``).
 _PATHS: dict[ModelListAPI, str] = {
     ModelListAPI.OLLAMA_TAGS: "/api/tags",
     ModelListAPI.OPENAI_V1: "/models",
@@ -135,6 +170,16 @@ def list_models(
     base = (provider.model_list_url or provider.base_url).rstrip("/")
     if not base:
         return ModelListResult((), "", f"{provider.name} has no base URL configured")
+    # OPENAI_V1 normalizes to an OpenAI ``/v1`` root so a bare ``--base-url``
+    # (no ``/v1``) reaches ``…/v1/models`` — matching the endpoint the eventual
+    # install points Codex at. Done AFTER the empty-base guard: openai_base_url
+    # would turn an empty base into a bare ``/v1/`` and lose the clear message
+    # above. OLLAMA_TAGS needs no version segment and is left as-is.
+    if api is ModelListAPI.OPENAI_V1:
+        # openai_base_url always returns a trailing "/" (e.g. ".../v1/") — this
+        # rstrip is NOT redundant with the one above: without it the "url ="
+        # concatenation below doubles the slash (".../v1//models").
+        base = openai_base_url(base).rstrip("/")
     url = base + _PATHS[api]
 
     auth_token = token if provider.auth == "secret" else ""
@@ -143,6 +188,7 @@ def list_models(
         raw = fetch(url, timeout, auth_token)
     except (
         TimeoutError,
+        urllib.error.HTTPError,
         urllib.error.URLError,
         OSError,
         http.client.HTTPException,
@@ -153,6 +199,24 @@ def list_models(
         # ``OSError`` subclass: a server closing mid-body raises
         # ``IncompleteRead``, which would otherwise escape and break the
         # documented never-raises contract every call site relies on.
+        #
+        # ``HTTPError`` (a URLError subclass) is in the SAME tuple on purpose:
+        # a 401/403 means the endpoint is UP but unauthorized, so "start the
+        # daemon" is the wrong advice there and gets its own message; every
+        # other HTTP status (500, 404, …) reads correctly as a reachability
+        # fault and falls through to the generic wording. One ``except`` arm
+        # (not a separate clause before this one) because a ``raise`` from a
+        # sibling ``except`` escapes the whole ``try`` rather than landing in
+        # the next arm — splitting them would leak non-auth HTTP errors out
+        # and break the never-raises contract.
+        if isinstance(e, urllib.error.HTTPError) and e.code in (401, 403):
+            return ModelListResult(
+                (),
+                url,
+                f"{provider.name} rejected the request at {url} (HTTP {e.code}) "
+                f"— it requires a token: set {provider.token_env_var} or add one "
+                f"to the credentials file",
+            )
         return ModelListResult(
             (),
             url,

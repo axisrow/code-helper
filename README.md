@@ -46,7 +46,7 @@ code-helper list matrix                   # which agent × provider pairings wor
 code-helper add --agent codex --provider ollama --list-models
 
 code-helper --dry-run add deepseek        # preview, write nothing
-code-helper edit-token glm                # rotate glm's token (ignores ZAI_API_KEY)
+code-helper edit-token glm                # rotate glm's token (always prompts)
 code-helper                               # arrow-key menu over all of the above
 
 # change what a bare `codex` (no wrapper) runs by default
@@ -111,11 +111,12 @@ direct `ANTHROPIC_*` env shape (LiteLLM's Anthropic Messages passthrough),
 `codex` resolves to a `[model_providers.litellm]` TOML profile — chosen
 automatically, same as every other provider here.
 
-The token comes from `LITELLM_API_KEY` (env, or a hidden prompt) exactly like
-any other secret-auth provider. For `codex`, which has no environment-variable
-config of its own, the wrapper `export`s `LITELLM_API_KEY` right before
-launching `codex` — so the credential is visible to `codex` and everything it
-spawns (including MCP servers it starts), which is the mechanism, not a leak.
+The token comes from `LITELLM_API_KEY` (env, a cached credential, or a hidden
+prompt — see [Where tokens live](#where-tokens-live)) exactly like any other
+secret-auth provider. For `codex`, which has no environment-variable config of
+its own, the wrapper `export`s `LITELLM_API_KEY` right before launching
+`codex` — so the credential is visible to `codex` and everything it spawns
+(including MCP servers it starts), which is the mechanism, not a leak.
 
 `set-default --provider litellm` also works, but **requires `--base-url`** —
 without it the command would patch `~/.codex/config.toml` with a malformed
@@ -196,9 +197,14 @@ reads one back. Off a TTY, `set-default` refuses without `--force`, same as
 - **No shell injection.** Every value interpolated into a generated script
   (token, base URL, model names) is POSIX single-quoted, including values that
   come from user input or an untrusted environment variable.
-- **Secrets stay put.** A token lives only inside the generated script, which
-  is written `0o700` when it carries a real credential. There is no config
-  file — except `~/.codex/config.toml`, and only through the explicit
+- **Secrets stay put.** A token lives inside the generated script, which is
+  written `0o700` when it carries a real credential — that copy is what an
+  installed wrapper actually runs on, and it is never affected by anything
+  below. A token typed at a prompt is also cached in
+  `~/.config/code-helper/credentials.json` (`0o600`) so the next `add` or
+  `--list-models` doesn't ask again — see
+  [Where tokens live](#where-tokens-live). The only agent config file this
+  tool ever touches is `~/.codex/config.toml`, and only through the explicit
   `set-default` command, which patches only its own managed keys there, backs
   up before every real write, and never carries a secret into it.
 - **A secret-auth Codex wrapper (e.g. `codex × litellm`) exports its token to
@@ -210,6 +216,35 @@ reads one back. Off a TTY, `set-default` refuses without `--force`, same as
   how the credential reaches Codex at all, not an oversight.
 - `--dry-run` writes nothing. There is no `remove` command — delete a wrapper
   script yourself if you no longer want it.
+
+## Where tokens live
+
+For a secret-auth provider (`zai`, `litellm`), a token is resolved in this
+order every time one is needed:
+
+1. **Environment variable** (`ZAI_API_KEY`, `LITELLM_API_KEY`, ...) — wins over
+   everything, so a headless/CI run can always override.
+2. **Cached credential** — `~/.config/code-helper/credentials.json` (`0o600`,
+   owner-only). A token typed at an `add` prompt is written here so the *next*
+   `add` or `--list-models` doesn't ask again.
+3. **Hidden prompt** — asked only when neither of the above has it.
+
+This file is a **cache of a value you typed**, not a session with the
+provider: `code-helper` configures agents and aliases, it does not log in
+anywhere. There is no "logged in" state and no command that connects to a
+provider to validate a token. Deleting the file does not break any installed
+wrapper — each wrapper carries its own token baked into the script itself
+(`0o700`); the cache only means the next install/discovery prompts again.
+
+`edit-token` never reads the cache — it always prompts via a hidden input,
+because rotating a token should never silently return the value you're trying
+to replace. The newly typed value is cached after a successful rotation, so
+the cache stays in step.
+
+`--list-models` discovery follows the same env → cache lookup (never the
+prompt — an optional listing must never block a script waiting on stdin); with
+neither available it falls back to an unauthenticated request, same as before
+this cache existed.
 
 ## Development
 

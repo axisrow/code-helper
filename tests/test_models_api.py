@@ -243,3 +243,108 @@ def test_timeout_value_is_forwarded():
         _OLLAMA, fetch=_fetch_returning({"models": []}, record=calls), timeout=0.5
     )
     assert calls[0][1] == 0.5
+
+
+# --------------------------------------------------------------------------- #
+# /v1 normalization (issue #15, point 2) — OPENAI_V1 only
+# --------------------------------------------------------------------------- #
+
+_OPENAI_BARE_ROOT = Provider(
+    name="litellm",
+    shapes=frozenset(),
+    base_url="http://host:4000",  # deliberately no /v1 — a bare --base-url
+    auth="secret",
+    token_env_var="LITELLM_API_KEY",
+    model_list_api=ModelListAPI.OPENAI_V1,
+)
+
+
+@pytest.mark.unit
+def test_bare_root_openai_url_is_normalized_to_v1():
+    calls = []
+    list_models(_OPENAI_BARE_ROOT, fetch=_fetch_returning({"data": []}, record=calls))
+    assert calls[0][0] == "http://host:4000/v1/models"
+
+
+@pytest.mark.unit
+def test_already_v1_openai_url_is_not_duplicated_via_normalization():
+    """Reinforces test_openai_url_does_not_duplicate_v1 through the new
+    normalization path explicitly."""
+    calls = []
+    list_models(_OPENAI, fetch=_fetch_returning({"data": []}, record=calls))
+    assert calls[0][0] == "https://example.invalid/v1/models"
+
+
+@pytest.mark.unit
+def test_ollama_tags_are_never_v1_normalized():
+    """OLLAMA_TAGS must not gain a /v1 segment — normalization is OPENAI_V1-only."""
+    calls = []
+    list_models(_OLLAMA, fetch=_fetch_returning({"models": []}, record=calls))
+    assert calls[0][0] == "http://127.0.0.1:11434/api/tags"
+
+
+@pytest.mark.unit
+def test_empty_base_url_is_reported_before_any_normalization_or_fetch():
+    """The clear "has no base URL configured" message must survive
+    normalization — openai_base_url("") would otherwise turn it into a request
+    against a bare "/v1/"."""
+
+    def _explode(url, timeout, token):  # pragma: no cover - must not run
+        raise AssertionError("fetch must not be called with no base URL")
+
+    provider = Provider(
+        name="litellm",
+        shapes=frozenset(),
+        base_url="",
+        auth="secret",
+        token_env_var="LITELLM_API_KEY",
+        model_list_api=ModelListAPI.OPENAI_V1,
+    )
+    result = list_models(provider, fetch=_explode)
+    assert not result.ok
+    assert "has no base URL configured" in result.error
+
+
+# --------------------------------------------------------------------------- #
+# 401/403 — a distinct, actionable message (issue #15, point 1)
+# --------------------------------------------------------------------------- #
+
+
+def _http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "https://example.invalid/v1/models", code, "x", {}, None
+    )
+
+
+@pytest.mark.unit
+def test_401_reports_a_token_specific_message_not_start_it():
+    result = list_models(_OPENAI, fetch=_fetch_raising(_http_error(401)))
+    assert not result.ok
+    assert "start it" not in result.error
+    assert "EXAMPLE_API_KEY" in result.error
+
+
+@pytest.mark.unit
+def test_403_reports_a_token_specific_message():
+    result = list_models(_OPENAI, fetch=_fetch_raising(_http_error(403)))
+    assert not result.ok
+    assert "EXAMPLE_API_KEY" in result.error
+
+
+@pytest.mark.unit
+def test_other_http_errors_keep_the_generic_reachability_message():
+    """A 500/404 is a reachability-shaped problem, not an auth one — the
+    generic wording (and its "manually" fallback hint) still applies."""
+    result = list_models(_OPENAI, fetch=_fetch_raising(_http_error(500)))
+    assert not result.ok
+    assert "could not reach" in result.error
+    assert "manually" in result.error
+
+
+@pytest.mark.unit
+def test_401_never_leaks_the_token():
+    result = list_models(
+        _OPENAI, fetch=_fetch_raising(_http_error(401)), token="s3cret"
+    )
+    assert "s3cret" not in (result.error or "")
+    assert "s3cret" not in result.source

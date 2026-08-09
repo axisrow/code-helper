@@ -515,6 +515,48 @@ def test_tui_new_asks_for_the_url_before_listing_models(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_tui_new_ignores_a_cached_token_for_a_runtime_address_provider(
+    tmp_path, monkeypatch
+):
+    """The TUI's model picker must NOT hand a cached token to a REQUIRED-policy
+    provider (litellm) — its ``base_url`` can point anywhere the user types,
+    so a token cached under the provider name alone must not follow it there.
+    See ``token_for_discovery``'s ``base_url_policy`` gate in secrets.py."""
+    import code_helper.services.models_api as api
+    import code_helper.services.secrets as secrets
+    from code_helper.services.models_api import ModelListResult
+    from code_helper.services.paths import Paths as _Paths
+
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    secrets.save_credential(_Paths.from_home(tmp_path), "litellm", "sk-cached")
+
+    seen = {}
+
+    def _recording_list_models(provider, *, token=""):
+        seen["token"] = token
+        return ModelListResult(("gpt-4o",), "url", None)
+
+    monkeypatch.setattr(api, "list_models", _recording_list_models)
+    # The install path (resolve_token) now also skips the cache for a
+    # REQUIRED-policy provider (see test_add_ignores_a_cached_token_for_a_
+    # runtime_address_provider_on_install), so it falls through to a prompt —
+    # unrelated to what this test is pinning (the discovery path), but must
+    # be satisfied for the "new" flow to complete.
+    real_resolve_token = secrets.resolve_token
+    monkeypatch.setattr(
+        secrets,
+        "resolve_token",
+        lambda **kw: real_resolve_token(**kw, getpass_fn=lambda _p: "sk-typed"),
+    )
+    _menu_sequence(monkeypatch, ["new", "claude", "litellm", "gpt-4o", "quit"])
+    typed = iter(["http://h:4000/v1", ""])  # base URL, then accept default alias
+    monkeypatch.setattr("builtins.input", lambda _p="": next(typed))
+
+    assert main(["tui"]) == 0
+    assert seen["token"] == ""
+
+
+@pytest.mark.integration
 def test_tui_new_litellm_matches_the_cli_byte_for_byte(tmp_path, monkeypatch):
     """The 1-to-1 contract for the new --base-url flag, codex × litellm."""
     _fake_models(monkeypatch, "gpt-4o")

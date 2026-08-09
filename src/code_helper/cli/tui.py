@@ -246,6 +246,8 @@ def run_tui(args: argparse.Namespace) -> int:
             with_base_url,
         )
         from code_helper.services.models_api import list_models
+        from code_helper.services.paths import Paths
+        from code_helper.services.secrets import token_for_discovery
         from code_helper.services.spec import suggest_alias
 
         agent_items = [
@@ -302,7 +304,9 @@ def run_tui(args: argparse.Namespace) -> int:
             # typed_url ("" from .strip()) is falsy just like None would be,
             # so args.base_url below reads correctly without reassigning it.
 
-        result = list_models(provider)
+        result = list_models(
+            provider, token=token_for_discovery(Paths.default(), provider)
+        )
         if not result.ok:
             print(result.error)
             # The next menu frame clears the screen on a TTY, so without a
