@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from code_helper.errors import CodeHelperError
 
@@ -66,7 +66,7 @@ __all__ = [
 ]
 
 
-class ConfigShape(str, Enum):
+class ConfigShape(StrEnum):
     """How an agent is pointed at a backend — the hidden third axis.
 
     Both an :class:`Agent` (what it can consume) and a :class:`Provider` (what
@@ -89,14 +89,17 @@ class ConfigShape(str, Enum):
     #: Implemented for ``codex × ollama`` (see ``render.openai_toml_body`` /
     #: ``openai_catalog_body``): the renderer writes its own
     #: ``~/.codex/<alias>.config.toml`` and launches ``codex --profile <alias>``
-    #: — ``~/.codex/config.toml`` is never read or modified. A provider
-    #: declaring this shape but with no renderer entry still resolves here and
-    #: surfaces as "not implemented yet" from ``render_script`` — distinct from
-    #: "incompatible", a different, honest error.
+    #: — this per-alias profile never reads or modifies ``~/.codex/config.toml``
+    #: itself. That file has a separate, explicit writer instead: the
+    #: ``set-default`` command (``services/codex_default.py``), which patches
+    #: only its own managed keys there and touches no per-alias profile. A
+    #: provider declaring this shape but with no renderer entry still resolves
+    #: here and surfaces as "not implemented yet" from ``render_script`` —
+    #: distinct from "incompatible", a different, honest error.
     OPENAI_TOML = "openai-toml"
 
 
-class ModelListAPI(str, Enum):
+class ModelListAPI(StrEnum):
     """Which HTTP shape lists a provider's models (see ``services/models_api``)."""
 
     #: ``GET {base}/api/tags`` -> ``{"models": [{"name": ...}]}``
