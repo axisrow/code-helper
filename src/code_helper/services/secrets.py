@@ -144,16 +144,31 @@ def invalidate_cached_credential(paths: Paths, provider_name: str) -> None:
     Dropping (rather than overwriting with the env value) is deliberate: an
     env value is not meant to be cached at all, so simply removing the stale
     entry is enough — the next env-free run falls through to a fresh prompt.
+
+    Like :func:`cache_freshly_typed_token`, this runs AFTER the wrapper
+    install already succeeded, so a write failure here (full disk,
+    unwritable ``config_dir``, permission error) must not surface as an
+    uncaught exception — see that function's docstring for the full
+    reasoning; both go through the identical best-effort try/except so the
+    two cannot drift on it.
     """
     data = load_credentials(paths)
     if provider_name not in data:
         return
     del data[provider_name]
-    atomic_write(
-        paths.credentials_file(),
-        json.dumps(data, indent=2, sort_keys=True) + "\n",
-        mode=0o600,
-    )
+    try:
+        atomic_write(
+            paths.credentials_file(),
+            json.dumps(data, indent=2, sort_keys=True) + "\n",
+            mode=0o600,
+        )
+    except OSError as e:
+        print(
+            f"warning: could not invalidate the stale cached token for "
+            f"{provider_name} ({e}) — a future run without the environment "
+            f"variable set may resolve it again",
+            file=sys.stderr,
+        )
 
 
 def cache_freshly_typed_token(

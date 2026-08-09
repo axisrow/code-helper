@@ -302,25 +302,29 @@ def _handle_add(args: argparse.Namespace) -> int:
         )
         # A non-prompt source (env/cache) is never itself written to the
         # cache — see cache_freshly_typed_token's docstring, an env value
-        # already outlives this process. But a REAL install (wrote and not
-        # dry_run) that used an env-sourced token just changed what the
-        # wrapper actually runs with, and a cache entry for this provider
-        # from an EARLIER, different install would now be stale relative to
-        # it: an env-free run later would resolve that stale cache value and
-        # silently revert the wrapper to it (a rotated/revoked credential
-        # resurrected with no confirmation). Invalidate rather than "helpfully"
-        # overwrite it with the env value — env values aren't meant to be
-        # cached, and dropping the stale entry is enough to make the next
-        # env-free run fall through to a fresh prompt instead of reusing
-        # either the old or the env-only value.
-        if (
-            resolved.source == SOURCE_ENV
-            and wrote
-            and not dry_run
-            and credential_for(paths, spec.provider.name)
-            and credential_for(paths, spec.provider.name) != token
-        ):
-            invalidate_cached_credential(paths, spec.provider.name)
+        # already outlives this process. But an env-sourced token that
+        # disagrees with what's cached for this provider means the cache is
+        # stale relative to what's actually installed: an env-free run later
+        # would resolve that stale cache value and silently revert the
+        # wrapper to it (a rotated/revoked credential resurrected with no
+        # confirmation). Invalidate rather than "helpfully" overwrite it with
+        # the env value — env values aren't meant to be cached, and dropping
+        # the stale entry is enough to make the next env-free run fall
+        # through to a fresh prompt instead of reusing either value.
+        #
+        # Deliberately NOT gated on ``wrote``: staleness is a fact about
+        # whether the cache disagrees with the token just resolved, not about
+        # whether THIS call happened to change any bytes. A byte-identical
+        # reinstall (``wrote=False`` — the wrapper already has this exact env
+        # token) with a stale, DIFFERENT cache entry is just as much a
+        # staleness hazard as a real write: the entry is still there, still
+        # wrong, and still waiting for an env-free run to resurrect it. Only
+        # ``dry_run`` is excluded — a dry run changes nothing on disk, so
+        # there is nothing yet to reconcile the cache against.
+        if resolved.source == SOURCE_ENV and not dry_run:
+            cached = credential_for(paths, spec.provider.name)
+            if cached and cached != token:
+                invalidate_cached_credential(paths, spec.provider.name)
     if not wrote:
         print("no changes")
     return 0

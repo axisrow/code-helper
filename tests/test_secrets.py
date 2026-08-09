@@ -186,6 +186,29 @@ def test_invalidate_cached_credential_missing_file_is_a_noop(tmp_path):
     assert not paths.credentials_file().exists()
 
 
+@pytest.mark.unit
+def test_invalidate_cached_credential_swallows_oserror(tmp_path, capsys, monkeypatch):
+    """Matches cache_freshly_typed_token's own OSError handling (finding K):
+    the docstring promises "never raises", but until this fix the body called
+    atomic_write with no try/except — a disk-full/permission-denied failure
+    there would crash the process after the wrapper install already
+    succeeded. Warn and move on instead."""
+    import code_helper.services.secrets as secrets
+
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-stale")
+
+    def _boom(*_a, **_kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("code_helper.backends._atomic.atomic_write", _boom)
+    monkeypatch.setattr(secrets, "atomic_write", _boom)
+    secrets.invalidate_cached_credential(paths, "zai")
+
+    # Must not raise (proven by reaching this line) and must tell the user.
+    assert "warning" in capsys.readouterr().err.lower()
+
+
 # --------------------------------------------------------------------------- #
 # cache_freshly_typed_token — best-effort: a persistence failure must not
 # crash a caller whose wrapper install already succeeded.

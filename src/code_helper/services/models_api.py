@@ -62,11 +62,41 @@ class ModelListResult:
         return self.error is None
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse every HTTP redirect instead of silently following it.
+
+    ``urllib``'s default redirect handling re-sends the SAME ``Request``
+    object — headers included — to the ``Location`` target, even when that
+    target is a different host. This function attaches an ``Authorization:
+    Bearer <token>`` header for secret-auth providers, so the stock behaviour
+    would forward that bearer token to whatever host a (misconfigured,
+    load-balancer-fronted, or actively malicious) endpoint redirects to. This
+    is a one-shot discovery convenience (``--list-models`` / the TUI's model
+    picker), not agent traffic — there is no legitimate reason for it to
+    follow a redirect at all, so the correct fix is to refuse one outright
+    rather than try to selectively strip the header per-hop. The caller gets
+    the resulting :class:`urllib.error.HTTPError` back through the same
+    exception path as any other unreachable-endpoint failure (see
+    ``list_models``'s ``except`` tuple), so this degrades to the existing
+    "could not reach {provider}" message — no new failure mode, just a closed
+    one.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+        return None
+
+
+#: One opener, reused across calls: redirect handling is a fixed policy of
+#: this fetcher, not per-request state, and urllib's default OpenerDirector
+#: construction is cheap but there is no reason to redo it every call.
+_opener = urllib.request.build_opener(_NoRedirectHandler)
+
+
 def _urlopen_fetch(url: str, timeout: float, token: str) -> bytes:
     request = urllib.request.Request(url, method="GET")
     if token:
         request.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+    with _opener.open(request, timeout=timeout) as response:  # noqa: S310
         return response.read()
 
 

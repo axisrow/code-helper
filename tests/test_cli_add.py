@@ -661,6 +661,44 @@ def test_add_env_sourced_install_invalidates_a_stale_cached_token(
 
 
 @pytest.mark.integration
+def test_add_invalidates_stale_cache_even_on_a_byte_identical_env_reinstall(
+    tmp_path, monkeypatch
+):
+    """The stale-cache invalidation must fire even when install_wrapper
+    no-ops (``wrote=False``) because the wrapper ALREADY has the env token
+    baked in — not just when the env-sourced install actually changes
+    something. Gating invalidation on ``wrote`` (the bug this test pins)
+    means: install once with env token "new" (writes, invalidates "old" —
+    covered by test_add_env_sourced_install_invalidates_a_stale_cached_token
+    above); if a DIFFERENT stale token then reappears in the cache (e.g. an
+    unrelated edit-token run for the same provider) and ``add`` is run AGAIN
+    with the same env token "new" already installed, install_wrapper no-ops
+    (byte-identical), so ``wrote=False`` — and the gate must still catch the
+    staleness, or a later env-free run resurrects the stale value.
+    """
+    import code_helper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+
+    # Install once with the env token — wrote=True, wrapper now has "sk-new".
+    monkeypatch.setenv("ZAI_API_KEY", "sk-new")
+    assert main(["add", "glm"]) == 0
+    assert "sk-new" in _body(tmp_path, "glm")
+    assert secrets.credential_for(paths, "zai") == ""  # nothing cached yet
+
+    # A stale, DIFFERENT token reappears in the cache (independent of this
+    # install — e.g. left over from an earlier prompt-driven install of a
+    # different wrapper sharing the same provider).
+    secrets.save_credential(paths, "zai", "sk-stale")
+
+    # Re-run `add` with the SAME env token: install_wrapper no-ops
+    # (byte-identical -> wrote=False), but the stale cache entry must still
+    # be invalidated.
+    assert main(["add", "glm"]) == 0
+    assert secrets.credential_for(paths, "zai") != "sk-stale"
+
+
+@pytest.mark.integration
 def test_add_does_not_cache_a_prompt_typed_token_when_the_install_is_refused(
     tmp_path, capsys, monkeypatch
 ):
