@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from code_helper.errors import CodeHelperError
 
@@ -66,7 +66,7 @@ __all__ = [
 ]
 
 
-class ConfigShape(str, Enum):
+class ConfigShape(StrEnum):
     """How an agent is pointed at a backend — the hidden third axis.
 
     Both an :class:`Agent` (what it can consume) and a :class:`Provider` (what
@@ -99,7 +99,7 @@ class ConfigShape(str, Enum):
     OPENAI_TOML = "openai-toml"
 
 
-class ModelListAPI(str, Enum):
+class ModelListAPI(StrEnum):
     """Which HTTP shape lists a provider's models (see ``services/models_api``)."""
 
     #: ``GET {base}/api/tags`` -> ``{"models": [{"name": ...}]}``

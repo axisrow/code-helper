@@ -26,8 +26,10 @@ jobs:
       matrix:
         # The range pyproject.toml advertises in its classifiers. Keep the two
         # in step: a version claimed there but untested here is a claim
-        # nothing checks.
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # nothing checks. Floor is 3.11, not 3.10: set-default's tomllib-based
+        # verification of ~/.codex/config.toml only exists in stdlib from 3.11
+        # on, and that check is mandatory (see codex_default._require_tomllib).
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Sequence
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import NamedTuple
 
@@ -349,9 +349,12 @@ def _model_from_toml_profile(paths: Paths, alias: str) -> str | None:
     The OPENAI_TOML wrapper body carries no model (it only dispatches
     ``codex --profile <alias>``), so ``edit-token``/``spec_from_installed``
     cannot recover the model from the wrapper the way the other shapes do —
-    the model is in the TOML profile written alongside it. ``tomllib`` (3.11+)
-    parses it correctly; on 3.10 (the project's minimum) a line regex reads
-    the ``model = "..."`` key this renderer is the only writer of. Unreadable,
+    the model is in the TOML profile written alongside it. ``tomllib`` (3.11+,
+    this project's floor) parses it correctly; the ``ModuleNotFoundError``
+    branch below is a defensive fallback for an interpreter below that floor
+    (reachable only if the package was installed with ``requires-python``
+    bypassed) — a line regex reads the ``model = "..."`` key this renderer is
+    the only writer of. Unreadable,
     absent, or UNPARSEABLE → None, so the caller falls back to the preset path
     rather than raising — this function's whole contract, inherited by
     :func:`spec_from_installed`, is that it never raises. A hand-edited or
@@ -366,13 +369,14 @@ def _model_from_toml_profile(paths: Paths, alias: str) -> str | None:
     if profile is None:
         return None
     try:
-        import tomllib  # py3.11+
+        import tomllib  # py3.11+, this project's floor
     except ModuleNotFoundError:
-        # 3.10 fallback: this renderer is the only writer of the profile, so a
-        # plain ``^model = "..."`` line match is sufficient — tomllib's
-        # validation is not needed for a file we authored. A malformed line
-        # simply fails to match, which is the same "unrecoverable → None"
-        # outcome the 3.11+ branch gives for a ValueError.
+        # Defensive fallback below the floor: this renderer is the only
+        # writer of the profile, so a plain ``^model = "..."`` line match is
+        # sufficient — tomllib's validation is not needed for a file we
+        # authored. A malformed line simply fails to match, which is the same
+        # "unrecoverable → None" outcome the tomllib branch gives for a
+        # ValueError.
         found = re.search(r'^model = "(.*)"$', profile, re.MULTILINE)
         return _toml_unescape(found.group(1)) if found else None
 
@@ -613,7 +617,7 @@ class _FilePlan(NamedTuple):
     is_wrapper: bool
 
 
-class _Action(str, Enum):
+class _Action(StrEnum):
     """What :func:`_decide` resolved for one plan entry."""
 
     SKIP = "skip"  # byte-identical file already installed — write nothing

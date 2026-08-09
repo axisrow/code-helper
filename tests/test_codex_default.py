@@ -649,14 +649,18 @@ def test_rotate_backups_archives_the_passed_in_content_not_a_fresh_disk_read(
 
 @pytest.mark.unit
 def test_set_default_refuses_outright_without_tomllib(tmp_path, monkeypatch):
-    """On an interpreter without ``tomllib`` (py3.10), ``set-default`` must
+    """Without ``tomllib`` importable, ``set-default`` must refuse outright
 
-    refuse outright with a clear message rather than silently degrading its
-    verification — unlike ``wrappers.py``'s no-op-on-py3.10 precedent, which
-    is safe only because that module owns the files it verifies wholesale.
+    with a clear message rather than silently degrading its verification —
+    unlike ``wrappers.py``'s no-op-without-tomllib precedent, which is safe
+    only because that module owns the files it verifies wholesale.
     ``set-default`` regex-patches a foreign, hand-maintained file, so the
     ``tomllib``-based structural check is the only net catching a corrupted
     patch before it's written; skipping it silently here is unacceptable.
+    ``tomllib`` is stdlib from Python 3.11 on (this project's floor — see
+    ``pyproject.toml``'s ``requires-python``), so this simulates an
+    interpreter below that floor via ``builtins.__import__`` rather than
+    relying on the test runner's actual Python version.
     """
     import builtins
 

@@ -22,9 +22,11 @@ named table, leave every other byte exactly where it was.
 The patcher (:func:`patch_config_toml`) is pure regex/string manipulation, not
 a round-trip TOML parser — this project is stdlib-only (no ``tomlkit`` in
 ``pyproject.toml``), and even a full TOML library would drop comments and
-reorder tables on a naive read-modify-write. ``tomllib`` (py3.11+, read-only in
-the stdlib) is used only as a verification net before and after the patch —
-never to construct the output.
+reorder tables on a naive read-modify-write. ``tomllib`` (read-only in the
+stdlib, but only from Python 3.11 on) is used only as a verification net
+before and after the patch — never to construct the output. That verification
+is mandatory, not best-effort (see :func:`_require_tomllib`), which is why
+this project's ``requires-python`` floor is 3.11, not lower.
 """
 
 from __future__ import annotations
@@ -339,17 +341,23 @@ def _read_text_or_none(path: Path) -> str | None:
 def _require_tomllib():
     """Import and return ``tomllib``, or refuse with a clear message.
 
-    Unlike ``wrappers._model_from_toml_profile`` — which accepts a no-op on
-    py3.10 because it verifies a file this tool owns and wrote wholesale —
-    ``set-default`` regex-patches the user's own hand-maintained
-    ``config.toml``. Its patcher has documented blind spots (matching a
-    managed-key-shaped line inside an unrelated multi-line string); the
-    ``tomllib``-based structural verification in ``_verify_patch_applied`` is
-    the ONLY thing that catches those before a write. Skipping it silently on
-    py3.10 would mean a corrupted foreign file could be written with zero
-    runtime check, which is a materially worse failure mode here than for a
-    file this tool owns and can safely regenerate. So ``set-default`` refuses
-    outright on py3.10 rather than degrading its safety net quietly.
+    ``tomllib`` entered the stdlib in Python 3.11 — that is *why* this whole
+    project's ``requires-python`` floor is 3.11, not merely a coincidence.
+    Unlike ``wrappers._model_from_toml_profile`` — which accepts a no-op when
+    ``tomllib`` is unavailable, because it verifies a file this tool owns and
+    wrote wholesale — ``set-default`` regex-patches the user's own
+    hand-maintained ``config.toml``. Its patcher has documented blind spots
+    (matching a managed-key-shaped line inside an unrelated multi-line
+    string); the ``tomllib``-based structural verification in
+    ``_verify_patch_applied`` is the ONLY thing that catches those before a
+    write. Skipping it silently would mean a corrupted foreign file could be
+    written with zero runtime check, which is a materially worse failure mode
+    here than for a file this tool owns and can safely regenerate. So
+    ``set-default`` refuses outright rather than degrading its safety net
+    quietly — this function is a defensive backstop (a normal install already
+    refuses below 3.11 via ``requires-python``), reachable only if someone
+    installs the package with that check bypassed (e.g. ``pip install
+    --ignore-requires-python``).
     """
     try:
         import tomllib
@@ -415,10 +423,11 @@ def _verify_patch_applied(original: str, patched: str, patch: DefaultPatch) -> N
     The safety net for "the regex patcher missed a corner case in someone's
     real 24 KB file": if this fails, nothing has been written yet — the
     orchestrator calls this before any ``atomic_write``. Requires ``tomllib``
-    (py3.11+) — see :func:`_require_tomllib` for why this is mandatory rather
-    than best-effort for ``set-default``; ``_verify_toml_or_refuse`` already
-    ran earlier in the same call and would have refused on py3.10, so by the
-    time this function runs ``tomllib`` is guaranteed importable.
+    (py3.11+, this project's floor — see :func:`_require_tomllib`) for why
+    this is mandatory rather than best-effort for ``set-default``;
+    ``_verify_toml_or_refuse`` already ran earlier in the same call and would
+    have refused otherwise, so by the time this function runs ``tomllib`` is
+    guaranteed importable.
     """
     tomllib = _require_tomllib()
     try:
