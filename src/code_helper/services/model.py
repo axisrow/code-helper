@@ -47,7 +47,7 @@ renderer (see ``services/render.py``), so the two can never disagree.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from code_helper.errors import CodeHelperError
@@ -55,6 +55,7 @@ from code_helper.errors import CodeHelperError
 __all__ = [
     "ConfigShape",
     "ModelListAPI",
+    "BaseUrlPolicy",
     "Agent",
     "Provider",
     "AGENTS",
@@ -63,6 +64,7 @@ __all__ = [
     "get_provider",
     "resolve_shape",
     "compatible_providers",
+    "with_base_url",
 ]
 
 
@@ -127,6 +129,47 @@ _SHAPE_PRIORITY: tuple[ConfigShape, ...] = (
 #: user input. Enforced at import time by :func:`_validate_registries`.
 _BINARY_RE = re.compile(r"\A[a-z][a-z0-9_-]*\Z")
 
+#: ``token_env_var`` is now interpolated into a generated script UNQUOTED too
+#: (``export {token_env_var}={quoted token}`` — the shape's OPENAI_TOML
+#: renderer, added for a runtime-``base_url`` provider that needs to carry a
+#: secret). The name sits left of ``=``, where shell syntax has no quoting
+#: form at all, so it needs the same structural gate as ``agent.binary``
+#: rather than relying on registry authors to type a safe value.
+_ENV_VAR_RE = re.compile(r"\A[A-Z][A-Z0-9_]*\Z")
+
+
+class BaseUrlPolicy(StrEnum):
+    """Where a :class:`Provider`'s ``base_url`` comes from.
+
+    Most providers (``ollama``, ``zai``) have one true address: it lives in
+    the registry and nothing at runtime can override it. A provider whose
+    endpoint is the *user's own* (a self-hosted LiteLLM proxy, say) cannot
+    ship an address at all — the registry ``base_url`` would just be someone
+    else's server. This is the third axis of that distinction, not a second
+    meaning bolted onto an empty ``base_url`` string: an empty ``base_url``
+    already means "this provider has no address" to ``models_api.list_models``
+    (it reports ``has no base URL configured``), and reusing that same empty
+    string to also mean "ask the user" would make a registry typo and a
+    deliberate runtime-address provider indistinguishable.
+    """
+
+    #: The registry ``base_url`` is the only value — never overridable.
+    #: ``base_url`` must be non-empty.
+    FIXED = "fixed"
+
+    #: No registry ``base_url`` at all; the caller MUST supply one at runtime
+    #: (``--base-url`` / a TUI prompt) via :func:`with_base_url`. Registry
+    #: ``base_url`` must be empty — a non-empty one here would be a second,
+    #: silently-losing source of truth for the same value.
+    REQUIRED = "required"
+
+    #: The registry ``base_url`` is a default the caller MAY override at
+    #: runtime. Registry ``base_url`` must be non-empty (an empty default is
+    #: meaningless — that is what REQUIRED is for). No shipped provider uses
+    #: this today; it exists so a future provider with a sensible default
+    #: doesn't need a new axis, only this value.
+    OVERRIDABLE = "overridable"
+
 
 @dataclass(frozen=True)
 class Agent:
@@ -149,6 +192,9 @@ class Provider:
     #: Config shapes this provider can PRESENT itself as.
     shapes: frozenset[ConfigShape]
     base_url: str = ""
+    #: See :class:`BaseUrlPolicy`. Constrains what ``base_url`` may hold —
+    #: enforced at import time by :func:`_validate_provider`.
+    base_url_policy: BaseUrlPolicy = BaseUrlPolicy.FIXED
     #: ``"literal"`` — a non-secret token baked into the script (Ollama's local
     #: daemon accepts ``"ollama"``); ``"secret"`` — resolved from env/prompt and
     #: the script is written 0o700; ``"none"`` — the launcher authenticates.
@@ -217,7 +263,93 @@ PROVIDERS: tuple[Provider, ...] = (
         model_list_api=ModelListAPI.NONE,
         description="Z.ai (Anthropic-compatible)",
     ),
+    Provider(
+        name="litellm",
+        # A self-hosted LiteLLM proxy serves BOTH protocols off one host: the
+        # Anthropic Messages passthrough (/v1/messages) and an OpenAI-style
+        # /v1 endpoint — so it declares both shapes, and _SHAPE_PRIORITY
+        # (ANTHROPIC_ENV > OPENAI_TOML) resolves `claude × litellm` to the
+        # direct env shape and `codex × litellm` to the TOML profile, with no
+        # special-case code needed for either.
+        shapes=frozenset({ConfigShape.ANTHROPIC_ENV, ConfigShape.OPENAI_TOML}),
+        # REQUIRED, not FIXED: this is the user's own server, not an address
+        # this project could ship a default for. base_url is supplied at
+        # runtime (--base-url / a TUI prompt) via model.with_base_url — see
+        # BaseUrlPolicy and cli/parser.py's --base-url handling.
+        base_url="",
+        base_url_policy=BaseUrlPolicy.REQUIRED,
+        auth="secret",
+        token_env_var="LITELLM_API_KEY",
+        model_list_api=ModelListAPI.OPENAI_V1,
+        # "chat", not "responses": LiteLLM's proxy implements
+        # /chat/completions across all its backends; /responses is not
+        # proxied uniformly for every provider it fronts.
+        wire_api="chat",
+        description="LiteLLM proxy (user-supplied base URL)",
+    ),
 )
+
+
+def _validate_provider(provider: Provider) -> None:
+    """Fail on a malformed :class:`Provider` entry.
+
+    Split out from :func:`_validate_registries` so a provider that is
+    deliberately built *outside* ``PROVIDERS`` (a test proving
+    :class:`BaseUrlPolicy` is enforced rather than merely followed by the two
+    shipped providers) can be checked without monkeypatching the module-level
+    registry.
+    """
+    if not _BINARY_RE.match(provider.name):
+        raise CodeHelperError(f"invalid provider name in registry: {provider.name!r}")
+    if not provider.shapes:
+        raise CodeHelperError(f"provider {provider.name!r} declares no config shapes")
+    if provider.auth not in ("none", "literal", "secret"):
+        raise CodeHelperError(
+            f"provider {provider.name!r} has invalid auth {provider.auth!r}"
+        )
+    # openai_toml_body (render.py) consumes wire_api unconditionally for
+    # every provider that can resolve to OPENAI_TOML — an empty or
+    # unrecognised value renders a profile Codex rejects at runtime rather
+    # than a registry error at import time. The whole selling point of the
+    # shape is "a second OpenAI-compatible provider is just a PROVIDERS
+    # entry"; catching a missing wire_api here, not at `codex` runtime, is
+    # what keeps that promise honest.
+    if ConfigShape.OPENAI_TOML in provider.shapes and provider.wire_api not in (
+        "responses",
+        "chat",
+    ):
+        raise CodeHelperError(
+            f"provider {provider.name!r} declares openai-toml but has "
+            f"invalid wire_api {provider.wire_api!r} (must be 'responses' "
+            f"or 'chat')"
+        )
+    # `export {token_env_var}=...` interpolates this name unquoted, left of
+    # `=`, in the OPENAI_TOML wrapper for a secret provider — see
+    # render.openai_env_key. A provider with `auth != "secret"` never reaches
+    # that interpolation, but the gate is unconditional (whenever the field is
+    # non-empty) rather than gated on auth, so a future auth-mode change can
+    # never silently un-guard it.
+    if provider.token_env_var and not _ENV_VAR_RE.match(provider.token_env_var):
+        raise CodeHelperError(
+            f"provider {provider.name!r} has invalid token_env_var "
+            f"{provider.token_env_var!r} (must match [A-Z][A-Z0-9_]*) — it is "
+            f"interpolated into a generated script unquoted"
+        )
+    # See BaseUrlPolicy: exactly one of "registry supplies base_url" / "caller
+    # must supply it at runtime" holds per policy — never both, never neither.
+    if provider.base_url_policy is BaseUrlPolicy.REQUIRED and provider.base_url:
+        raise CodeHelperError(
+            f"provider {provider.name!r} declares base_url_policy=REQUIRED but "
+            f"also carries a registry base_url {provider.base_url!r} — the "
+            f"runtime value passed to with_base_url would silently overwrite it"
+        )
+    if provider.base_url_policy is not BaseUrlPolicy.REQUIRED and not provider.base_url:
+        raise CodeHelperError(
+            f"provider {provider.name!r} declares base_url_policy="
+            f"{provider.base_url_policy.value!r} but has no registry base_url "
+            f"— FIXED has no other source, and an OVERRIDABLE default cannot "
+            f"be empty (that is what REQUIRED is for)"
+        )
 
 
 def _validate_registries() -> None:
@@ -233,34 +365,7 @@ def _validate_registries() -> None:
         if not agent.shapes:
             raise CodeHelperError(f"agent {agent.name!r} declares no config shapes")
     for provider in PROVIDERS:
-        if not _BINARY_RE.match(provider.name):
-            raise CodeHelperError(
-                f"invalid provider name in registry: {provider.name!r}"
-            )
-        if not provider.shapes:
-            raise CodeHelperError(
-                f"provider {provider.name!r} declares no config shapes"
-            )
-        if provider.auth not in ("none", "literal", "secret"):
-            raise CodeHelperError(
-                f"provider {provider.name!r} has invalid auth {provider.auth!r}"
-            )
-        # openai_toml_body (render.py) consumes wire_api unconditionally for
-        # every provider that can resolve to OPENAI_TOML — an empty or
-        # unrecognised value renders a profile Codex rejects at runtime rather
-        # than a registry error at import time. The whole selling point of the
-        # shape is "a second OpenAI-compatible provider is just a PROVIDERS
-        # entry"; catching a missing wire_api here, not at `codex` runtime, is
-        # what keeps that promise honest.
-        if ConfigShape.OPENAI_TOML in provider.shapes and provider.wire_api not in (
-            "responses",
-            "chat",
-        ):
-            raise CodeHelperError(
-                f"provider {provider.name!r} declares openai-toml but has "
-                f"invalid wire_api {provider.wire_api!r} (must be 'responses' "
-                f"or 'chat')"
-            )
+        _validate_provider(provider)
     for label, names in (
         ("agent", [a.name for a in AGENTS]),
         ("provider", [p.name for p in PROVIDERS]),
@@ -360,3 +465,61 @@ def compatible_providers(agent: Agent) -> list[Provider]:
     combination that would only fail later.
     """
     return [p for p in PROVIDERS if p.shapes & agent.shapes]
+
+
+def with_base_url(provider: Provider, base_url: str | None) -> Provider:
+    """The single substitution point for a runtime ``base_url``.
+
+    Every one of ``base_url``'s four readers (``render._render_anthropic_env``,
+    ``render.openai_base_url`` inside ``openai_toml_body``,
+    ``models_api.list_models``, ``codex_default.resolve_default_patch``) reads
+    it off a :class:`Provider` object, never off :class:`WrapperSpec`
+    directly — so substituting the provider once, here, at the command's entry
+    point (before ``build_spec``, before ``list_models``, before
+    ``resolve_token``) is enough to make every one of them see the right
+    value. This is deliberately DATA-driven: the branch is on
+    ``provider.base_url_policy``, never on ``provider.name`` — the whole point
+    of :class:`BaseUrlPolicy` is that a future runtime-address provider needs
+    no new code here, only a registry entry.
+
+    Args:
+        provider: The provider as looked up from the registry.
+        base_url: What the caller supplied (``--base-url`` / a TUI prompt),
+            or ``None``/empty if nothing was supplied.
+
+    Returns:
+        ``provider`` unchanged (FIXED with nothing supplied, or OVERRIDABLE
+        with nothing supplied — the registry default applies), or a copy with
+        ``base_url`` replaced (REQUIRED or OVERRIDABLE with a value supplied,
+        after :func:`~code_helper.services.naming.validate_base_url`).
+
+    Raises:
+        CodeHelperError: a URL was supplied for a FIXED provider; no URL was
+            supplied for a REQUIRED provider; or the supplied URL fails
+            validation.
+    """
+    from code_helper.services.naming import validate_base_url
+
+    if provider.base_url_policy is BaseUrlPolicy.FIXED:
+        if base_url:
+            raise CodeHelperError(
+                f"provider {provider.name!r} has a fixed base URL "
+                f"({provider.base_url!r}) — --base-url only applies to: "
+                + ", ".join(
+                    p.name
+                    for p in PROVIDERS
+                    if p.base_url_policy is not BaseUrlPolicy.FIXED
+                )
+            )
+        return provider
+
+    if not base_url:
+        if provider.base_url_policy is BaseUrlPolicy.REQUIRED:
+            raise CodeHelperError(
+                f"provider {provider.name!r} needs a base URL — pass "
+                f"--base-url https://host:port/v1"
+            )
+        return provider  # OVERRIDABLE, nothing supplied: the default stands.
+
+    validate_base_url(base_url)
+    return replace(provider, base_url=base_url)

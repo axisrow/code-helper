@@ -34,7 +34,14 @@ from typing import NamedTuple
 
 from code_helper.backends._atomic import atomic_write
 from code_helper.errors import CodeHelperError
-from code_helper.services.model import Agent, ConfigShape, Provider
+from code_helper.services.model import (
+    Agent,
+    BaseUrlPolicy,
+    ConfigShape,
+    Provider,
+    get_provider,
+    with_base_url,
+)
 from code_helper.services.naming import validate_alias
 from code_helper.services.paths import Paths
 from code_helper.services.render import (
@@ -189,10 +196,18 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
 
     # The OPENAI_TOML wrapper body embeds no model — it lives in the sibling
     # TOML profile — so recover it from there rather than the body. The other
-    # shapes carry the model in the rendered script itself.
+    # shapes carry the model in the rendered script itself. Read the profile
+    # ONCE here (rather than letting _model_from_toml_data and, further down,
+    # _base_url_from_toml_data each trigger their own read-and-parse) —
+    # toml_profile is threaded through both lookups below.
     shape_field = fields.get("shape")
+    toml_profile = (
+        _toml_profile_data(paths, name)
+        if shape_field == ConfigShape.OPENAI_TOML.value
+        else None
+    )
     if shape_field == ConfigShape.OPENAI_TOML.value:
-        model = _model_from_toml_profile(paths, name)
+        model = _model_from_toml_data(toml_profile)
     else:
         model = _model_from_body(body)
 
@@ -206,9 +221,44 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     tiers = _tiers_from_body(body)
 
     try:
+        provider_obj = get_provider(fields["provider"])
+    except CodeHelperError:
+        return None
+
+    # Round-trip rule: the FILE wins for anything but a FIXED base_url. This
+    # is a direct consequence of edit-token's own contract just above ("rotate
+    # a credential WITHOUT re-expanding a preset from scratch" — the same bug
+    # class as silently reverting --model) applied to base_url: an installed
+    # wrapper is a complete record of itself, and a credential rotation is not
+    # licence to change an unrelated setting. For FIXED the registry wins
+    # instead — there IS no user-supplied value on that axis, so the file
+    # could not have recorded a legitimate override, only a hand-edit; siding
+    # with the registry there is what lets a genuine address change (e.g.
+    # z.ai moving domains) reach already-installed wrappers on the next
+    # edit-token, exactly as the docstring above intends for the model.
+    if provider_obj.base_url_policy is not BaseUrlPolicy.FIXED:
+        if shape_field == ConfigShape.OPENAI_TOML.value:
+            recovered_url = _base_url_from_toml_data(toml_profile, fields["provider"])
+        else:
+            recovered_url = _env_value(body, "ANTHROPIC_BASE_URL")
+        if recovered_url:
+            provider_obj = with_base_url(provider_obj, recovered_url)
+        elif provider_obj.base_url_policy is BaseUrlPolicy.REQUIRED:
+            # No registry fallback exists for REQUIRED, and the file didn't
+            # carry one either (a truncated profile, a hand-edited wrapper) —
+            # returning a spec with an empty base_url here would let
+            # edit-token silently reinstall the wrapper pointed at nothing.
+            # Refusing to reconstruct is the same fail-safe as the "not
+            # all(...)" check above for a missing model.
+            return None
+        # else: OVERRIDABLE with nothing recovered — the registry default on
+        # provider_obj (untouched by with_base_url) stands, which is correct:
+        # there is a real default, so refusing here would be needless.
+
+    try:
         return build_spec(
             agent=fields["agent"],
-            provider=fields["provider"],
+            provider=provider_obj,
             model=model,
             alias=name,
             # The RECORDED shape, not a re-derived one. `claude × ollama` is
@@ -286,7 +336,7 @@ def _model_from_body(body: str) -> str | None:
     Returns None for the ``OPENAI_TOML`` shape: its wrapper body is just
     ``exec codex --profile <alias> "$@"`` and embeds no model — the model lives
     in the sibling ``~/.codex/<alias>.config.toml`` profile, read by
-    :func:`_model_from_toml_profile`.
+    :func:`_model_from_toml_data`.
     """
     sonnet = _env_value(body, "ANTHROPIC_DEFAULT_SONNET_MODEL")
     if sonnet is not None:
@@ -343,27 +393,32 @@ def _toml_unescape(value: str) -> str:
     return "".join(out)
 
 
-def _model_from_toml_profile(paths: Paths, alias: str) -> str | None:
-    """The ``model`` value from the sibling ``<alias>.config.toml`` profile.
+def _toml_profile_data(paths: Paths, alias: str) -> dict | None:
+    """The parsed ``<alias>.config.toml`` profile, or ``None`` if unrecoverable.
 
-    The OPENAI_TOML wrapper body carries no model (it only dispatches
-    ``codex --profile <alias>``), so ``edit-token``/``spec_from_installed``
-    cannot recover the model from the wrapper the way the other shapes do —
-    the model is in the TOML profile written alongside it. ``tomllib`` (3.11+,
-    this project's floor) parses it correctly; the ``ModuleNotFoundError``
-    branch below is a defensive fallback for an interpreter below that floor
-    (reachable only if the package was installed with ``requires-python``
-    bypassed) — a line regex reads the ``model = "..."`` key this renderer is
-    the only writer of. Unreadable,
-    absent, or UNPARSEABLE → None, so the caller falls back to the preset path
-    rather than raising — this function's whole contract, inherited by
-    :func:`spec_from_installed`, is that it never raises. A hand-edited or
-    truncated profile (reachable the moment a user touches ``~/.codex`` by
-    hand) makes ``tomllib.loads`` raise ``TOMLDecodeError``, a ``ValueError``
-    subclass and NOT a :class:`CodeHelperError` — left uncaught it used to
-    escape all the way to ``edit-token``/``add --alias`` as a raw traceback,
-    bypassing the ownership guard whose entire job is to handle a bad file in
-    the way (and which ``--force`` could otherwise rescue).
+    Called once by ``spec_from_installed`` per lookup against an OPENAI_TOML
+    wrapper, with the result passed to both :func:`_model_from_toml_data` and
+    :func:`_base_url_from_toml_data` — a single read and a single
+    ``tomllib.loads`` serving both extractions, rather than each doing its
+    own independent read-and-parse of the same file.
+
+    ``tomllib`` (3.11+, this project's floor) parses it correctly; the
+    ``ModuleNotFoundError`` branch below is a defensive fallback for an
+    interpreter below that floor (reachable only if the package was installed
+    with ``requires-python`` bypassed) — line regexes read the ``model`` and
+    ``[model_providers.X].base_url`` keys this renderer is the only writer of,
+    assembled into the same ``{"model": ..., "model_providers": {name: {...}}}``
+    shape ``tomllib.loads`` would produce, so both extractors below can stay
+    format-agnostic. Unreadable, absent, or UNPARSEABLE → None, so the caller
+    falls back to the preset path rather than raising — this function's whole
+    contract, inherited by :func:`spec_from_installed`, is that it never
+    raises. A hand-edited or truncated profile (reachable the moment a user
+    touches ``~/.codex`` by hand) makes ``tomllib.loads`` raise
+    ``TOMLDecodeError``, a ``ValueError`` subclass and NOT a
+    :class:`CodeHelperError` — left uncaught it used to escape all the way to
+    ``edit-token``/``add --alias`` as a raw traceback, bypassing the ownership
+    guard whose entire job is to handle a bad file in the way (and which
+    ``--force`` could otherwise rescue).
     """
     profile = _read_text_or_none(paths.codex_config_for(alias))
     if profile is None:
@@ -372,22 +427,72 @@ def _model_from_toml_profile(paths: Paths, alias: str) -> str | None:
         import tomllib  # py3.11+, this project's floor
     except ModuleNotFoundError:
         # Defensive fallback below the floor: this renderer is the only
-        # writer of the profile, so a plain ``^model = "..."`` line match is
+        # writer of the profile, so a plain line-regex match per key is
         # sufficient — tomllib's validation is not needed for a file we
         # authored. A malformed line simply fails to match, which is the same
         # "unrecoverable → None" outcome the tomllib branch gives for a
         # ValueError.
-        found = re.search(r'^model = "(.*)"$', profile, re.MULTILINE)
-        return _toml_unescape(found.group(1)) if found else None
+        model_found = re.search(r'^model = "(.*)"$', profile, re.MULTILINE)
+        table_found = re.search(r"^\[model_providers\.(\S+)\]$", profile, re.MULTILINE)
+        base_url_found = re.search(r'^base_url = "(.*)"$', profile, re.MULTILINE)
+        return {
+            "model": _toml_unescape(model_found.group(1)) if model_found else None,
+            "model_providers": {
+                table_found.group(1): {
+                    "base_url": _toml_unescape(base_url_found.group(1))
+                    if base_url_found
+                    else None
+                }
+            }
+            if table_found
+            else {},
+        }
 
     try:
-        data = tomllib.loads(profile)
+        return tomllib.loads(profile)
     except ValueError:
         # tomllib.TOMLDecodeError is a ValueError subclass — a hand-edited or
         # truncated profile, not this module's problem to resolve here.
         return None
+
+
+def _model_from_toml_data(data: dict | None) -> str | None:
+    """The ``model`` value from an already-parsed ``<alias>.config.toml`` profile.
+
+    The OPENAI_TOML wrapper body carries no model (it only dispatches
+    ``codex --profile <alias>``), so ``edit-token``/``spec_from_installed``
+    cannot recover the model from the wrapper the way the other shapes do —
+    the model is in the TOML profile written alongside it. Pure lookup, no IO
+    of its own: the caller reads and parses the profile once via
+    :func:`_toml_profile_data` and passes the result here (and to
+    :func:`_base_url_from_toml_data`) rather than each doing its own read.
+    """
+    if data is None:
+        return None
     model = data.get("model")
     return model if isinstance(model, str) and model else None
+
+
+def _base_url_from_toml_data(data: dict | None, provider_name: str) -> str | None:
+    """The ``base_url`` value from ``[model_providers.<provider_name>]``.
+
+    Same "already-parsed data in, pure lookup out" shape as
+    :func:`_model_from_toml_data` — only ever CALLED for a provider whose
+    ``base_url_policy is not FIXED`` (see :func:`spec_from_installed`): for
+    everything else the registry value is authoritative and this function is
+    not consulted, which is what lets ``edit-token`` pick up a registry
+    address change for a fixed provider while a runtime-``base_url`` provider
+    (a self-hosted LiteLLM proxy) keeps exactly the address the user gave it
+    at ``add`` time — rotating a token is not licence to change that.
+    """
+    if data is None:
+        return None
+    table = data.get("model_providers", {})
+    provider_table = table.get(provider_name, {}) if isinstance(table, dict) else {}
+    base_url = (
+        provider_table.get("base_url") if isinstance(provider_table, dict) else None
+    )
+    return base_url if isinstance(base_url, str) and base_url else None
 
 
 def _read_text_or_none(script: Path) -> str | None:

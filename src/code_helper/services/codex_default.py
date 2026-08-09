@@ -343,7 +343,7 @@ def _require_tomllib():
 
     ``tomllib`` entered the stdlib in Python 3.11 — that is *why* this whole
     project's ``requires-python`` floor is 3.11, not merely a coincidence.
-    Unlike ``wrappers._model_from_toml_profile`` — which accepts a no-op when
+    Unlike ``wrappers._toml_profile_data`` — which accepts a no-op when
     ``tomllib`` is unavailable, because it verifies a file this tool owns and
     wrote wholesale — ``set-default`` regex-patches the user's own
     hand-maintained ``config.toml``. Its patcher has documented blind spots
