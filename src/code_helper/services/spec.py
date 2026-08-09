@@ -86,6 +86,10 @@ class WrapperSpec:
     tier_models: TierModels | None = None
     subagent_model: str | None = None
     description: str = ""
+    #: Named secret profile selected when this wrapper was installed.  It is
+    #: metadata, not a runtime lookup: the rendered wrapper still carries the
+    #: resolved token so it works even if the cache is later removed.
+    profile_name: str | None = None
 
     @property
     def name(self) -> str:
@@ -114,7 +118,9 @@ class WrapperSpec:
         return self.provider.token_env_var
 
 
-def suggest_alias(model: str, agent_name: str) -> str:
+def suggest_alias(
+    model: str, agent_name: str, profile_name: str | None = None
+) -> str:
     """Derive a default alias, e.g. ``glm-5:cloud`` + ``codex`` -> ``glm-5-codex``.
 
     Strips the registry prefix (``nvidia/…``) and the tag (``:cloud``), then
@@ -134,6 +140,12 @@ def suggest_alias(model: str, agent_name: str) -> str:
         raise CodeHelperError(
             f"cannot derive a wrapper name from model {model!r} — pass --alias"
         )
+    if profile_name:
+        profile_suffix = "".join(
+            c if (c.isalnum() or c in "._-") else "-" for c in profile_name
+        ).strip("-._")
+        if profile_suffix:
+            return f"{cleaned}-{profile_suffix}"
     return f"{cleaned}-{agent_name}"
 
 
@@ -147,6 +159,7 @@ def build_spec(
     tier_models: TierModels | None = None,
     subagent_model: str | None = None,
     description: str = "",
+    profile_name: str | None = None,
 ) -> WrapperSpec:
     """Assemble a :class:`WrapperSpec` from the three axes. Pure, no IO.
 
@@ -213,7 +226,9 @@ def build_spec(
     effective_model = model or (tier_models.sonnet if tier_models else "")
 
     resolved_alias = (
-        alias if alias is not None else suggest_alias(effective_model, agent_obj.name)
+        alias
+        if alias is not None
+        else suggest_alias(effective_model, agent_obj.name, profile_name)
     )
     validate_alias(resolved_alias)
 
@@ -229,6 +244,7 @@ def build_spec(
         tier_models=tier_models,
         subagent_model=subagent_model,
         description=description,
+        profile_name=profile_name,
     )
 
 
@@ -307,6 +323,7 @@ def spec_from_preset(
     *,
     model_override: str | None = None,
     alias_override: str | None = None,
+    profile_name: str | None = None,
 ) -> WrapperSpec:
     """Expand a preset into a spec, applying ``--model`` if given.
 
@@ -337,4 +354,5 @@ def spec_from_preset(
         # one for the model actually installed — `list` is the only place a
         # user sees what a wrapper points at, so a stale line misinforms.
         description="" if model_override else preset.description,
+        profile_name=profile_name,
     )

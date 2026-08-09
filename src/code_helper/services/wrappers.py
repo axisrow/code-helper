@@ -31,6 +31,7 @@ from collections.abc import Callable, Sequence
 from enum import StrEnum
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import unquote
 
 from code_helper.backends._atomic import atomic_write
 from code_helper.errors import CodeHelperError
@@ -82,6 +83,9 @@ __all__ = [
     "is_installed",
     "is_managed",
     "spec_from_installed",
+    "token_from_installed",
+    "profile_from_installed",
+    "profile_from_installed",
     "list_wrappers",
     "describe_wrapper",
     "describe_all",
@@ -320,12 +324,53 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
             shape=ConfigShape(fields["shape"]) if fields.get("shape") else None,
             tier_models=tiers,
             subagent_model=_env_value(body, "CLAUDE_CODE_SUBAGENT_MODEL"),
+            profile_name=unquote(fields["profile"]) if fields.get("profile") else None,
         )
     except (CodeHelperError, ValueError):
         # A marker naming an agent/provider/shape this build no longer knows,
         # or a pairing that is no longer valid (ValueError comes from the
         # ConfigShape lookup). Not our problem to resolve here.
         return None
+
+
+def token_from_installed(paths: Paths, name: str, provider_name: str) -> str | None:
+    """Recover a secret token from an installed wrapper we can fully trust.
+
+    The wrapper is the durable source of truth when the profile cache is
+    missing: ``add`` already embeds the selected token in the generated file.
+    Do not scrape arbitrary files, though. ``spec_from_installed`` first proves
+    that the file is one of our recognised wrappers and reconstructs its
+    provider/shape; only then is the shape-specific export read.
+
+    Returns ``None`` for a missing, foreign, malformed, non-secret, or
+    provider-mismatched wrapper. The token value is intentionally kept inside
+    this service and is never logged.
+    """
+    spec = spec_from_installed(paths, name)
+    if spec is None or spec.auth != "secret" or spec.provider.name != provider_name:
+        return None
+
+    body = _read_text_or_none(paths.script_for(name))
+    if body is None:
+        return None
+    if spec.shape is ConfigShape.ANTHROPIC_ENV:
+        return _env_value(body, "ANTHROPIC_AUTH_TOKEN") or None
+    if spec.shape is ConfigShape.OPENAI_TOML:
+        return _env_value(body, spec.token_env_var) or None
+    return None
+
+
+def profile_from_installed(paths: Paths, name: str) -> str | None:
+    """Return the token profile recorded by a managed wrapper, if any.
+
+    Wrappers written before profiles were introduced have no such metadata, so
+    ``None`` is normal and deliberately distinct from a profile named
+    ``default``.
+    """
+    spec = spec_from_installed(paths, name)
+    if spec is None:
+        return None
+    return spec.profile_name
 
 
 def _spec_from_legacy_body(name: str, body: str) -> WrapperSpec | None:
@@ -1134,7 +1179,12 @@ def install_wrapper(
 
 
 def describe_wrapper(
-    spec: WrapperSpec, *, installed: bool, installed_word: str, not_installed_word: str
+    spec: WrapperSpec,
+    *,
+    installed: bool,
+    installed_word: str,
+    not_installed_word: str,
+    profile_name: str | None = None,
 ) -> str:
     """Format one ``name / install-state / description`` row.
 
@@ -1148,7 +1198,8 @@ def describe_wrapper(
     only the format itself is shared.
     """
     state = installed_word if installed else not_installed_word
-    return f"{spec.name:12} {state:13} {spec.description}"
+    profile = f" [profile: {profile_name}]" if profile_name else ""
+    return f"{spec.name:12} {state:13} {spec.description}{profile}"
 
 
 def describe_all(
@@ -1176,6 +1227,7 @@ def describe_all(
                 installed=is_installed(paths, spec.name),
                 installed_word=installed_word,
                 not_installed_word=not_installed_word,
+                profile_name=profile_from_installed(paths, spec.name),
             ),
         )
         for spec in specs
@@ -1203,7 +1255,9 @@ def list_wrappers(paths: Paths, *, print_fn=print) -> None:
         print_fn("")
         print_fn("ad-hoc wrappers:")
         for name in ad_hoc:
-            print_fn(f"{name:12} {'installed':13}")
+            profile = profile_from_installed(paths, name)
+            suffix = f" [profile: {profile}]" if profile else ""
+            print_fn(f"{name:12} {'installed':13}{suffix}")
 
 
 def discover_managed(paths: Paths) -> list[str]:

@@ -42,6 +42,7 @@ from code_helper.services.wrappers import (
     is_managed,
     list_wrappers,
     spec_from_installed,
+    token_from_installed,
 )
 
 
@@ -82,6 +83,40 @@ def test_glm_ollama_uses_the_launcher_shape():
     assert spec.agent.name == "claude"
     assert spec.model == "glm-5.2:cloud"
     assert spec.auth == "literal"  # no token — ollama launch authenticates itself
+
+
+@pytest.mark.integration
+def test_token_from_installed_recovers_a_managed_secret_wrapper(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    token = "sk-existing"
+    install_wrapper(paths, "glm", token=token)
+    before = paths.script_for("glm").read_bytes()
+
+    assert token_from_installed(paths, "glm", "zai") == token
+    assert paths.script_for("glm").read_bytes() == before
+
+
+@pytest.mark.integration
+def test_token_from_installed_rejects_a_provider_mismatch(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token="sk-existing")
+
+    assert token_from_installed(paths, "glm", "litellm") is None
+
+
+@pytest.mark.integration
+def test_token_from_installed_recovers_openai_toml_secret_wrapper(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
+    spec = build_spec(
+        agent="codex",
+        provider=provider,
+        model="gpt-4o",
+        alias="lite",
+    )
+    install_wrapper(paths, spec, token="sk-existing")
+
+    assert token_from_installed(paths, "lite", "litellm") == "sk-existing"
 
 
 @pytest.mark.unit

@@ -46,7 +46,9 @@ code-helper list matrix                   # which agent × provider pairings wor
 code-helper add --agent codex --provider ollama --list-models
 
 code-helper --dry-run add deepseek        # preview, write nothing
-code-helper edit-token glm                # rotate glm's token (always prompts)
+code-helper add glm --profile work        # use a named token profile
+code-helper edit-token glm --profile work # rotate the selected profile
+code-helper edit-token glm                # choose a profile and rotate it
 code-helper                               # arrow-key menu over all of the above
 
 # change what a bare `codex` (no wrapper) runs by default
@@ -56,6 +58,25 @@ code-helper set-default --restore         # undo the last set-default
 
 The alias defaults to `<model>-<agent>` (`glm-5:cloud` + `codex` →
 `glm-5-codex`); `--alias` overrides it.
+
+## Interactive menu
+
+Running `code-helper` opens an English arrow-key menu with `List`, `Add`,
+`Settings`, and `Quit`. `Add` follows one path:
+
+`provider → profile/token → model → compatible agent → command name`
+
+Providers with literal authentication skip the profile step; LiteLLM asks for
+its base URL before it selects a profile and discovers models. `List` is a
+second-level wrapper browser with `Back`; choosing a secret-backed wrapper
+rotates one of its token profiles. The menu never stops on a separate
+"press any key" screen. Scriptable commands, including `edit-token`, remain
+unchanged.
+
+For a secret profile, the suggested command name ends in that profile name:
+choosing `axisrow` for model `glm` suggests `glm-axisrow`. The installed
+wrapper records the selected profile and `code-helper list` shows it, so each
+alias has an explicit token-profile association.
 
 ## Presets
 
@@ -111,8 +132,8 @@ direct `ANTHROPIC_*` env shape (LiteLLM's Anthropic Messages passthrough),
 `codex` resolves to a `[model_providers.litellm]` TOML profile — chosen
 automatically, same as every other provider here.
 
-The token comes from `LITELLM_API_KEY` (env, a cached credential, or a hidden
-prompt — see [Where tokens live](#where-tokens-live)) exactly like any other
+The token comes from `LITELLM_API_KEY`, a selected token profile, or a hidden
+prompt — see [Where tokens live](#where-tokens-live) — exactly like any other
 secret-auth provider. For `codex`, which has no environment-variable config of
 its own, the wrapper `export`s `LITELLM_API_KEY` right before launching
 `codex` — so the credential is visible to `codex` and everything it spawns
@@ -200,8 +221,8 @@ reads one back. Off a TTY, `set-default` refuses without `--force`, same as
 - **Secrets stay put.** A token lives inside the generated script, which is
   written `0o700` when it carries a real credential — that copy is what an
   installed wrapper actually runs on, and it is never affected by anything
-  below. A token typed at a prompt is also cached in
-  `~/.config/code-helper/credentials.json` (`0o600`) so the next `add` or
+  below. A token typed at a prompt is also cached in named provider profiles
+  in `~/.config/code-helper/credentials.json` (`0o600`) so the next `add` or
   `--list-models` doesn't ask again — see
   [Where tokens live](#where-tokens-live). The only agent config file this
   tool ever touches is `~/.codex/config.toml`, and only through the explicit
@@ -219,27 +240,47 @@ reads one back. Off a TTY, `set-default` refuses without `--force`, same as
 
 ## Where tokens live
 
-For a secret-auth provider (`zai`, `litellm`), a token is resolved in this
-order every time one is needed:
+For a secret-auth provider (`zai`, `litellm`), profiles are stored per provider:
+
+```json
+{
+  "zai": {
+    "work": "key-1",
+    "personal": "key-2"
+  }
+}
+```
+
+The first key is kept under the internal `default` profile. When a second key
+is added through the TUI, it asks for names for both the old and new profiles.
+Each installed wrapper still contains its own copy of the selected key.
+If the profile cache is missing, the TUI recovers the key from the selected
+managed wrapper into `default` without rewriting that wrapper.
+
+Without an explicit profile, a token is resolved in this order:
 
 1. **Environment variable** (`ZAI_API_KEY`, `LITELLM_API_KEY`, ...) — wins over
-   everything, so a headless/CI run can always override.
-2. **Cached credential** — `~/.config/code-helper/credentials.json` (`0o600`,
-   owner-only). A token typed at an `add` prompt is written here so the *next*
-   `add` or `--list-models` doesn't ask again.
+   the default profile, so a headless/CI run can override it.
+2. **Default profile** — a token typed at an `add` prompt is written there so
+   the next `add` or `--list-models` doesn't ask again.
 3. **Hidden prompt** — asked only when neither of the above has it.
 
-This file is a **cache of a value you typed**, not a session with the
-provider: `code-helper` configures agents and aliases, it does not log in
-anywhere. There is no "logged in" state and no command that connects to a
-provider to validate a token. Deleting the file does not break any installed
-wrapper — each wrapper carries its own token baked into the script itself
-(`0o700`); the cache only means the next install/discovery prompts again.
+With `--profile` or an explicit TUI selection, that profile is used first and
+the environment variable is not substituted for it. A custom LiteLLM URL does
+not receive a profile implicitly; selecting a profile is an explicit choice.
 
-`edit-token` never reads the cache — it always prompts via a hidden input,
-because rotating a token should never silently return the value you're trying
-to replace. The newly typed value is cached after a successful rotation, so
-the cache stays in step.
+This file is a **cache, not a session with the provider**: `code-helper`
+configures agents and aliases, it does not log in anywhere. There is no
+"logged in" state and no command that connects to a provider to validate a
+token. Deleting the file does not break any installed wrapper — each wrapper
+carries its own token baked into the script itself (`0o700`); the TUI can
+recreate `default` from the selected managed wrapper, while the cache only
+controls whether the next install/discovery prompts again.
+
+`edit-token` always prompts for the replacement key. With `--profile` it updates
+that profile; without it, the CLI/TUI lets you choose one when several exist
+(with only one profile, that profile is used). The newly typed value is cached
+after a successful rotation, so the cache stays in step.
 
 `--list-models` discovery follows the same env → cache lookup (never the
 prompt — an optional listing must never block a script waiting on stdin); with

@@ -578,6 +578,71 @@ def test_add_caches_a_prompt_typed_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_add_uses_the_selected_profile_even_when_env_has_another_token(
+    tmp_path, monkeypatch
+):
+    import code_helper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "zai", "sk-work", "work")
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
+
+    assert main(["add", "glm", "--profile", "work"]) == 0
+    assert "sk-work" in _body(tmp_path, "glm")
+    assert "sk-env" not in _body(tmp_path, "glm")
+
+
+@pytest.mark.integration
+def test_add_profile_caches_a_prompt_typed_token(tmp_path, monkeypatch):
+    import code_helper.services.secrets as secrets
+
+    def _fake_resolve_token(**_kwargs):
+        return secrets.ResolvedToken("sk-personal", secrets.SOURCE_PROMPT)
+
+    monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token)
+    assert main(["add", "glm", "--profile", "personal"]) == 0
+
+    assert (
+        secrets.credential_for(Paths.from_home(tmp_path), "zai", "personal")
+        == "sk-personal"
+    )
+
+
+@pytest.mark.integration
+def test_profile_selects_the_default_alias_and_is_visible_in_list(
+    tmp_path, monkeypatch, capsys
+):
+    """A profile is durable wrapper metadata, not an invisible install input."""
+    import code_helper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "zai", "sk-axisrow", "axisrow")
+
+    assert (
+        main(
+            [
+                "add",
+                "--agent",
+                "claude",
+                "--provider",
+                "zai",
+                "--model",
+                "glm-5",
+                "--profile",
+                "axisrow",
+            ]
+        )
+        == 0
+    )
+
+    wrapper = paths.script_for("glm-5-axisrow")
+    assert wrapper.exists()
+    assert "profile=axisrow" in wrapper.read_text()
+    assert main(["list"]) == 0
+    assert "[profile: axisrow]" in capsys.readouterr().out
+
+
+@pytest.mark.integration
 def test_add_does_not_cache_an_env_resolved_token(tmp_path, monkeypatch):
     """The env value already outlives this process — caching it would just be
     a second, redundant copy, and the priority test in test_secrets.py already

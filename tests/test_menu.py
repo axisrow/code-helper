@@ -10,7 +10,12 @@ import sys
 
 import pytest
 
-from code_helper.cli.menu import MenuCancelled, press_any_key, select_from_menu
+from code_helper.cli.menu import (
+    MenuCancelled,
+    press_any_key,
+    read_line,
+    select_from_menu,
+)
 
 
 def _fake_keys(keys):
@@ -76,6 +81,30 @@ def test_select_from_menu_cancel_raises():
             read_key=_fake_keys(["CANCEL"]),
             print_fn=lambda _: None,
         )
+
+
+@pytest.mark.unit
+def test_read_line_uses_the_shared_non_tty_input_contract(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _prompt: " typed ")
+    assert read_line("Value: ") == "typed"
+
+
+@pytest.mark.unit
+def test_read_line_ctrl_c_is_a_hard_cancel(monkeypatch):
+    def interrupt(_prompt):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", interrupt)
+    with pytest.raises(MenuCancelled) as exc_info:
+        read_line("Value: ")
+    assert exc_info.value.hard is True
+
+
+@pytest.mark.unit
+def test_secret_read_rejects_non_ascii_input(monkeypatch):
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-ключ")
+    with pytest.raises(ValueError, match="ASCII"):
+        read_line("Token: ", secret=True)
 
 
 @pytest.mark.unit

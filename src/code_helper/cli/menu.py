@@ -19,12 +19,19 @@ mirroring how :func:`code_helper.services.secrets.resolve_token` injects
 
 from __future__ import annotations
 
+import getpass
 import os
 import shutil
 import sys
 from collections.abc import Callable, Sequence
 
-__all__ = ["select_from_menu", "MenuCancelled", "press_any_key", "MAX_DIGIT_ITEMS"]
+__all__ = [
+    "select_from_menu",
+    "read_line",
+    "MenuCancelled",
+    "press_any_key",
+    "MAX_DIGIT_ITEMS",
+]
 
 #: How many items can get a digit shortcut. There are only nine single-key
 #: digits (``0`` is not used — it would read as "tenth"), so a longer menu
@@ -407,6 +414,100 @@ def select_from_menu(
     finally:
         if redraw:
             print_fn(show_cursor)
+
+
+def _read_line_raw(
+    prompt: str,
+    *,
+    secret: bool,
+    stream,
+    output,
+) -> str:
+    """Read one editable line while preserving the TUI cancellation contract."""
+    import select
+    import termios
+    import tty
+
+    fd = stream.fileno()
+    output.write(prompt)
+    output.flush()
+    old = termios.tcgetattr(fd)
+    chars: list[str] = []
+    invalid_secret_char = False
+
+    def read_more(timeout: float | None = None) -> str | None:
+        ready, _, _ = select.select([fd], [], [], timeout)
+        if not ready:
+            return None
+        return os.read(fd, 1).decode("utf-8", errors="replace")
+
+    try:
+        tty.setraw(fd)
+        while True:
+            first = read_more()
+            if first is None:
+                continue
+            if first == "\x03":
+                raise MenuCancelled(hard=True)
+            if first == "\x1b":
+                # A lone Escape is Back. Consume a cursor/function-key
+                # sequence instead of accidentally treating its bytes as text.
+                nxt = read_more(_ESC_TIMEOUT)
+                if nxt is None:
+                    raise MenuCancelled(hard=False)
+                if nxt in ("[", "O"):
+                    while True:
+                        tail = read_more(_ESC_TIMEOUT)
+                        if tail is None or ord(tail) in _CSI_FINAL:
+                            break
+                continue
+            if first in ("\r", "\n"):
+                output.write("\n")
+                output.flush()
+                if secret and invalid_secret_char:
+                    raise ValueError("secret input must contain ASCII characters")
+                return "".join(chars).strip()
+            if first in ("\x08", "\x7f"):
+                if chars:
+                    chars.pop()
+                    output.write("\b \b")
+                    output.flush()
+                continue
+            if secret and (first == "\ufffd" or ord(first) > 127):
+                invalid_secret_char = True
+                continue
+            chars.append(first)
+            output.write("•" if secret else first)
+            output.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def read_line(
+    prompt: str = "",
+    *,
+    secret: bool = False,
+    stream=None,
+    output=None,
+) -> str:
+    """Read text with uniform TUI semantics: Esc goes back, Ctrl-C quits.
+
+    Non-TTY callers retain the injectable ``input``/``getpass`` behavior used
+    by the CLI and tests. Real TTY callers use the raw reader so text fields
+    obey exactly the same cancellation rules as selection menus.
+    """
+    stream = sys.stdin if stream is None else stream
+    output = sys.stdout if output is None else output
+    if not stream.isatty() or not output.isatty():
+        try:
+            value = getpass.getpass(prompt) if secret else input(prompt)
+        except KeyboardInterrupt:
+            raise MenuCancelled(hard=True) from None
+        value = value.strip()
+        if secret and not value.isascii():
+            raise ValueError("secret input must contain ASCII characters")
+        return value
+    return _read_line_raw(prompt, secret=secret, stream=stream, output=output)
 
 
 def press_any_key(prompt: str = "") -> None:

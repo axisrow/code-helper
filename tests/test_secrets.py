@@ -24,14 +24,18 @@ import pytest
 
 from code_helper.services.paths import Paths
 from code_helper.services.secrets import (
+    DEFAULT_PROFILE,
     SOURCE_CACHE,
     SOURCE_ENV,
     SOURCE_PROMPT,
     credential_for,
     invalidate_cached_credential,
     load_credentials,
+    profile_names,
+    rename_profile,
     resolve_token,
     save_credential,
+    seed_default_profile,
     token_for_discovery,
 )
 
@@ -78,14 +82,14 @@ def test_load_credentials_skips_non_string_values(tmp_path):
     _write_credentials_file(
         paths, json.dumps({"litellm": "sk-1", "zai": 12345, "": "empty-key"})
     )
-    assert load_credentials(paths) == {"litellm": "sk-1"}
+    assert load_credentials(paths) == {"litellm": {DEFAULT_PROFILE: "sk-1"}}
 
 
 @pytest.mark.unit
 def test_load_credentials_skips_empty_values(tmp_path):
     paths = _paths(tmp_path)
     _write_credentials_file(paths, json.dumps({"litellm": "", "zai": "sk-real"}))
-    assert load_credentials(paths) == {"zai": "sk-real"}
+    assert load_credentials(paths) == {"zai": {DEFAULT_PROFILE: "sk-real"}}
 
 
 @pytest.mark.unit
@@ -120,7 +124,10 @@ def test_save_credential_does_not_clobber_another_provider(tmp_path):
     save_credential(paths, "litellm", "sk-1")
     save_credential(paths, "zai", "sk-2")
     creds = load_credentials(paths)
-    assert creds == {"litellm": "sk-1", "zai": "sk-2"}
+    assert creds == {
+        "litellm": {DEFAULT_PROFILE: "sk-1"},
+        "zai": {DEFAULT_PROFILE: "sk-2"},
+    }
 
 
 @pytest.mark.unit
@@ -129,6 +136,58 @@ def test_save_credential_overwrites_same_provider(tmp_path):
     save_credential(paths, "litellm", "sk-old")
     save_credential(paths, "litellm", "sk-new")
     assert credential_for(paths, "litellm") == "sk-new"
+
+
+@pytest.mark.unit
+def test_save_credential_keeps_multiple_profiles_for_one_provider(tmp_path):
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-one", "work")
+    save_credential(paths, "zai", "sk-two", "personal")
+
+    assert profile_names(paths, "zai") == ("personal", "work")
+    assert credential_for(paths, "zai", "work") == "sk-one"
+    assert credential_for(paths, "zai", "personal") == "sk-two"
+
+
+@pytest.mark.unit
+def test_seed_default_profile_recovers_only_when_provider_has_no_profiles(tmp_path):
+    paths = _paths(tmp_path)
+
+    assert seed_default_profile(paths, "zai", "sk-existing") is True
+    assert credential_for(paths, "zai") == "sk-existing"
+
+    # A second recovery must not replace the existing default token.
+    assert seed_default_profile(paths, "zai", "sk-other") is False
+    assert credential_for(paths, "zai") == "sk-existing"
+
+
+@pytest.mark.unit
+def test_seed_default_profile_leaves_malformed_cache_untouched(tmp_path):
+    paths = _paths(tmp_path)
+    _write_credentials_file(paths, "not json")
+
+    assert seed_default_profile(paths, "zai", "sk-existing") is False
+    assert paths.credentials_file().read_text() == "not json"
+
+
+@pytest.mark.unit
+def test_flat_legacy_credential_is_read_as_default_profile(tmp_path):
+    paths = _paths(tmp_path)
+    _write_credentials_file(paths, json.dumps({"zai": "sk-legacy"}))
+
+    assert profile_names(paths, "zai") == (DEFAULT_PROFILE,)
+    assert credential_for(paths, "zai") == "sk-legacy"
+
+
+@pytest.mark.unit
+def test_rename_profile_preserves_the_token(tmp_path):
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-one")
+
+    rename_profile(paths, "zai", DEFAULT_PROFILE, "work")
+
+    assert credential_for(paths, "zai", DEFAULT_PROFILE) == ""
+    assert credential_for(paths, "zai", "work") == "sk-one"
 
 
 @pytest.mark.unit
@@ -145,7 +204,10 @@ def test_save_credential_preserves_foreign_file_content(tmp_path):
     _write_credentials_file(paths, json.dumps({"future-provider": "sk-x"}))
     save_credential(paths, "litellm", "sk-1")
     creds = load_credentials(paths)
-    assert creds == {"future-provider": "sk-x", "litellm": "sk-1"}
+    assert creds == {
+        "future-provider": {DEFAULT_PROFILE: "sk-x"},
+        "litellm": {DEFAULT_PROFILE: "sk-1"},
+    }
 
 
 # --------------------------------------------------------------------------- #

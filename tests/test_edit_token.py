@@ -33,6 +33,22 @@ def test_edit_token_with_name_rewrites_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_edit_token_can_rotate_a_named_profile(tmp_path, monkeypatch):
+    import code_helper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "zai", _OLD_TOKEN, "work")
+    assert main(["add", "glm", "--profile", "work"]) == 0
+
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: _NEW_TOKEN)
+    assert main(["edit-token", "glm", "--profile", "work"]) == 0
+
+    assert secrets.credential_for(paths, "zai", "work") == _NEW_TOKEN
+    body = paths.script_for("glm").read_text(encoding="utf-8")
+    assert _NEW_TOKEN in body
+
+
+@pytest.mark.integration
 def test_edit_token_unknown_name_exits_1(tmp_path, capsys):
     code = main(["edit-token", "nope"])
     assert code == 1
