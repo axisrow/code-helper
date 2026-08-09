@@ -19,6 +19,7 @@ import pathlib
 import pytest
 
 from code_helper.errors import CodeHelperError
+from code_helper.services.model import get_provider, with_base_url
 from code_helper.services.paths import Paths
 from code_helper.services.spec import build_spec
 from code_helper.services.wrappers import install_wrapper
@@ -38,6 +39,15 @@ def _secret(alias: str = "w"):
 
 def _literal(alias: str = "w", model: str = "qwen3"):
     return build_spec(agent="claude", provider="ollama", model=model, alias=alias)
+
+
+def _secret_openai_toml(alias: str = "w"):
+    """A secret-auth OPENAI_TOML wrapper — its token travels in an ``export``
+    line in the wrapper script itself, same as the ANTHROPIC_ENV case, but
+    the shape also writes a sibling ``.codex/<alias>.config.toml`` profile.
+    """
+    provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
+    return build_spec(agent="codex", provider=provider, model="gpt-4o", alias=alias)
 
 
 def _boom(_path):  # pragma: no cover - reached only on a regression
@@ -128,3 +138,51 @@ def test_an_identical_reinstall_is_still_a_no_op(tmp_path):
     install_wrapper(paths, _secret(), token="tok")
 
     assert install_wrapper(paths, _secret(), token="tok", confirm=_boom) is False
+
+
+# --- OPENAI_TOML secret wrapper with a missing/corrupt profile sibling -----
+#
+# Cycle-review round 3, finding C1: spec_from_installed needs the sibling
+# .codex/<alias>.config.toml to recover the MODEL for an OPENAI_TOML wrapper.
+# If that profile is missing or corrupt, spec_from_installed correctly
+# returns None (per its own "cannot fully reconstruct" contract) — but
+# _discards_only_secret was reading that None as "not a secret wrapper,
+# nothing at stake" and letting a replacement through silently, with no
+# --force and no confirm prompt, destroying the token embedded in the
+# wrapper script even though the profile never carried it in the first
+# place. The marker line alone (unaffected by the profile's state) already
+# names the provider as secret-auth; the guard must consult that.
+
+
+def test_discarding_a_toml_secret_survives_a_missing_profile_sibling(tmp_path):
+    paths = _bin(tmp_path)
+    install_wrapper(paths, _secret_openai_toml(), token="ONLY-COPY")
+    paths.codex_config_for("w").unlink()  # the sibling profile is gone
+
+    with pytest.raises(CodeHelperError, match="only copy of its token"):
+        install_wrapper(paths, _literal(), confirm=None)
+
+    assert "ONLY-COPY" in (paths.bin_dir / "w").read_text(), "token was destroyed"
+
+
+def test_discarding_a_toml_secret_survives_a_corrupted_profile_sibling(tmp_path):
+    paths = _bin(tmp_path)
+    install_wrapper(paths, _secret_openai_toml(), token="ONLY-COPY")
+    paths.codex_config_for("w").write_text("not valid toml {{{", encoding="utf-8")
+
+    with pytest.raises(CodeHelperError, match="only copy of its token"):
+        install_wrapper(paths, _literal(), confirm=None)
+
+    assert "ONLY-COPY" in (paths.bin_dir / "w").read_text(), "token was destroyed"
+
+
+def test_toml_secret_with_a_missing_profile_still_honours_force(tmp_path):
+    """--force still overrides, same as every other secret-discard case —
+    this fallback path must not become a NEW, stricter guard than the one it
+    patches a gap in.
+    """
+    paths = _bin(tmp_path)
+    install_wrapper(paths, _secret_openai_toml(), token="ONLY-COPY")
+    paths.codex_config_for("w").unlink()
+
+    assert install_wrapper(paths, _literal(), force=True, confirm=_boom) is True

@@ -162,6 +162,47 @@ def is_managed(paths: Paths, name: str) -> bool:
     return _marker_at(paths.script_for(name))
 
 
+def _installed_marker_provider_is_secret(paths: Paths, name: str) -> bool:
+    """True iff the installed wrapper's OWN marker names a secret-auth provider.
+
+    A narrower, more failure-tolerant cousin of :func:`spec_from_installed`,
+    used ONLY as the fallback in :func:`_discards_only_secret` (cycle-review
+    finding, PR #12 round 3): the marker's ``agent=``/``provider=`` fields are
+    parsed straight from the wrapper script and never depend on an
+    ``OPENAI_TOML`` sibling profile existing or parsing — unlike
+    ``spec_from_installed``, which additionally needs the profile to recover
+    the MODEL and returns ``None`` (a "could not reconstruct a full spec"
+    answer) the moment that profile is missing or corrupt. That ``None`` is
+    correct for ``spec_from_installed``'s own contract, but
+    ``_discards_only_secret`` was reading it as "not a secret, safe to
+    replace" — silently destroying an ``OPENAI_TOML`` secret wrapper's only
+    token the instant its profile sibling went missing, with no ``--force``
+    needed. This function answers the one narrower question the guard
+    actually needs — "was this a secret provider?" — from information that
+    survives a missing/corrupt profile.
+
+    Returns False (never raises) for a missing/unmarked/unrecognised file —
+    the same fail-open-to-"not secret" default the guard already had, just no
+    longer reachable via a corrupt profile specifically.
+    """
+    body = _read_text_or_none(paths.script_for(name))
+    if body is None:
+        return False
+    marker = next(
+        (ln for ln in body.split("\n")[:2] if ln.startswith(MARKER_PREFIX)), None
+    )
+    if marker is None:
+        return False
+    fields = dict(re.findall(r"(\w+)=([^,()\s]+)", marker[len(MARKER_PREFIX) :]))
+    provider_name = fields.get("provider")
+    if not provider_name:
+        return False
+    try:
+        return get_provider(provider_name).auth == "secret"
+    except CodeHelperError:
+        return False
+
+
 def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     """Reconstruct the spec of an installed wrapper from its own marker line.
 
@@ -614,7 +655,15 @@ def _discards_only_secret(paths: Paths, spec: WrapperSpec, script: Path) -> bool
     if spec.auth == "secret":
         return False
     installed = spec_from_installed(paths, script.name)
-    return installed is not None and installed.auth == "secret"
+    if installed is not None:
+        return installed.auth == "secret"
+    # spec_from_installed returned None. That is ambiguous on its own: it
+    # means either "not one of our wrappers" (truly nothing at stake) OR
+    # "an OPENAI_TOML wrapper whose sibling profile is missing/corrupt, so
+    # the model could not be recovered" (a secret token IS still at stake —
+    # the marker alone already proves the provider). Fall back to the
+    # narrower, profile-independent check before concluding "not a secret".
+    return _installed_marker_provider_is_secret(paths, script.name)
 
 
 def _respec_from_body(spec: WrapperSpec, body: str) -> WrapperSpec | None:

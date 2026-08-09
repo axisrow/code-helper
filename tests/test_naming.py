@@ -208,3 +208,19 @@ def test_too_long_base_url_rejected():
     url = "http://" + "x" * MAX_BASE_URL_LENGTH
     with pytest.raises(CodeHelperError, match="too long"):
         validate_base_url(url)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("url", ["http://[bad", "http://[bad]", "http://[::1", "http://["])
+def test_malformed_ipv6_bracket_url_raises_codehelpererror_not_valueerror(url):
+    """urlsplit raises a bare ValueError (not CodeHelperError) for an
+    unterminated/invalid IPv6-bracket host (cycle-review round 3, finding
+    C2). Every caller of validate_base_url — with_base_url, and
+    transitively spec_from_installed's base_url recovery — expects
+    CodeHelperError as the only failure mode; an uncaught ValueError here
+    escaped spec_from_installed's `except CodeHelperError` and broke its
+    documented never-raises contract for a recovered value from a
+    hand-edited/truncated wrapper.
+    """
+    with pytest.raises(CodeHelperError, match="malformed"):
+        validate_base_url(url)

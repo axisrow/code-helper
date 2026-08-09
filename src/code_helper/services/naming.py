@@ -147,7 +147,18 @@ def validate_base_url(url: str) -> None:
     if any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in stripped):
         raise CodeHelperError(f"base URL must not contain whitespace: {url!r}")
 
-    parts = urlsplit(stripped)
+    try:
+        parts = urlsplit(stripped)
+    except ValueError as exc:
+        # urlsplit raises ValueError (not CodeHelperError) on some malformed
+        # inputs — e.g. an unterminated IPv6 bracket ("http://[bad") raises
+        # "Invalid IPv6 URL". Every caller of this function (with_base_url,
+        # and transitively spec_from_installed's base_url recovery) expects
+        # CodeHelperError as the ONLY failure mode this raises, so a bare
+        # ValueError here would escape spec_from_installed's
+        # `except CodeHelperError` and break its documented never-raises
+        # contract for a recovered value from a hand-edited/truncated file.
+        raise CodeHelperError(f"base URL is malformed: {stripped!r} ({exc})") from exc
 
     if parts.scheme not in ("http", "https"):
         raise CodeHelperError(
