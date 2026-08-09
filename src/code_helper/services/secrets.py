@@ -375,16 +375,24 @@ def resolve_token(
     Raises:
         CodeHelperError: if none of env/cache/prompt yields a non-empty token.
 
-    An explicitly selected profile wins over the environment so a user can
-    deliberately choose a named profile even when ``ZAI_API_KEY`` is set. Without an
-    explicit profile, the environment wins for backward-compatible headless
-    operation, followed by the default profile. A prompt-resolved value is the only one
-    a caller should cache — see :func:`save_credential`.
+    An explicitly selected profile's own cached value wins over the
+    environment, so a user can deliberately choose a named profile even when
+    ``ZAI_API_KEY`` is set. But a brand-new profile with nothing cached yet
+    still falls back to the environment before prompting — otherwise a
+    first-time ``--profile`` use in a headless/CI run would hang on a
+    prompt nobody is there to answer, purely because the profile happened
+    to be new. Without an explicit profile, the environment wins outright,
+    followed by the default profile. A prompt-resolved value is the only
+    one a caller should cache — see :func:`save_credential`.
     """
     if profile_name:
-        cached = credential_for(paths, provider_name, profile_name)
-        if cached:
-            return ResolvedToken(cached, SOURCE_CACHE)
+        if base_url_policy == "fixed":
+            cached = credential_for(paths, provider_name, profile_name)
+            if cached:
+                return ResolvedToken(cached, SOURCE_CACHE)
+        env_value = environ.get(env_var)
+        if env_value:
+            return ResolvedToken(env_value, SOURCE_ENV)
     else:
         env_value = environ.get(env_var)
         if env_value:
@@ -442,6 +450,8 @@ def token_for_discovery(
     if provider.auth != "secret":
         return ""
     if profile_name:
+        if provider.base_url_policy != "fixed":
+            return ""
         return credential_for(paths, provider.name, profile_name)
     env_value = environ.get(provider.token_env_var, "")
     if env_value:

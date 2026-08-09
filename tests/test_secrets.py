@@ -383,6 +383,82 @@ def test_resolve_token_ignores_cache_for_a_runtime_address_provider(tmp_path):
 
 
 @pytest.mark.unit
+def test_resolve_token_ignores_a_profiled_cache_for_a_runtime_address_provider(
+    tmp_path,
+):
+    """The same host-isolation guard must hold for a NAMED profile too.
+
+    Before this fix, the profile branch returned a cached profile token
+    unconditionally, skipping the ``base_url_policy`` check the no-profile
+    branch already enforced — a token cached under profile ``work`` for one
+    ``--base-url`` could be silently reused against a different host given
+    on a later ``--profile work --base-url ...`` invocation.
+    """
+    paths = _paths(tmp_path)
+    save_credential(paths, "litellm", "sk-cached-for-host-a", "work")
+
+    def _fake_prompt(_prompt):
+        return "sk-typed-for-host-b"
+
+    resolved = resolve_token(
+        env_var="LITELLM_API_KEY",
+        prompt="token: ",
+        paths=paths,
+        provider_name="litellm",
+        profile_name="work",
+        base_url_policy="required",
+        environ={},
+        getpass_fn=_fake_prompt,
+    )
+    assert resolved.value == "sk-typed-for-host-b"
+    assert resolved.source == SOURCE_PROMPT
+
+
+@pytest.mark.unit
+def test_resolve_token_still_uses_a_profiled_cache_for_a_fixed_provider(tmp_path):
+    """A named profile's cache is still safe to reuse for a FIXED provider."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-cached", "work")
+    resolved = resolve_token(
+        env_var="ZAI_API_KEY",
+        prompt="token: ",
+        paths=paths,
+        provider_name="zai",
+        profile_name="work",
+        base_url_policy="fixed",
+        environ={},
+        getpass_fn=_no_prompt,
+    )
+    assert resolved.value == "sk-cached"
+    assert resolved.source == SOURCE_CACHE
+
+
+@pytest.mark.unit
+def test_resolve_token_falls_back_to_env_for_a_brand_new_uncached_profile(tmp_path):
+    """A NEW profile with nothing cached yet must still consult the env var.
+
+    Before this fix, naming an explicit profile skipped the environment
+    check outright, so a first-time ``--profile`` use in a headless/CI run
+    (no cached token for that profile yet) fell straight to an interactive
+    ``getpass`` prompt instead of honouring an already-set env var — a
+    scripted install with a brand-new profile name would hang.
+    """
+    paths = _paths(tmp_path)
+    resolved = resolve_token(
+        env_var="ZAI_API_KEY",
+        prompt="token: ",
+        paths=paths,
+        provider_name="zai",
+        profile_name="brand-new",
+        base_url_policy="fixed",
+        environ={"ZAI_API_KEY": "sk-env"},
+        getpass_fn=_no_prompt,
+    )
+    assert resolved.value == "sk-env"
+    assert resolved.source == SOURCE_ENV
+
+
+@pytest.mark.unit
 def test_resolve_token_still_uses_cache_for_a_fixed_provider(tmp_path):
     """The pre-existing behaviour is preserved for FIXED providers, where the
     address never varies and the cache is safe to reuse."""
@@ -529,6 +605,48 @@ def test_token_for_discovery_ignores_cache_for_a_runtime_address_provider(tmp_pa
         base_url_policy="required",
     )
     assert token_for_discovery(paths, provider, environ={}) == ""
+
+
+@pytest.mark.unit
+def test_token_for_discovery_ignores_a_profiled_cache_for_a_runtime_address_provider(
+    tmp_path,
+):
+    """Same host-isolation guard, for a NAMED profile.
+
+    Before this fix, ``token_for_discovery``'s profile branch returned a
+    cached profile token unconditionally, ignoring ``base_url_policy`` — a
+    token cached under profile ``work`` for one ``--base-url`` would be
+    handed to model discovery against a *different* ``--base-url`` given on
+    a later invocation with the same profile name.
+    """
+    paths = _paths(tmp_path)
+    save_credential(paths, "litellm", "sk-cached", "work")
+    provider = _Provider(
+        auth="secret",
+        token_env_var="LITELLM_API_KEY",
+        name="litellm",
+        base_url_policy="required",
+    )
+    assert token_for_discovery(paths, provider, profile_name="work", environ={}) == ""
+
+
+@pytest.mark.unit
+def test_token_for_discovery_still_uses_a_profiled_cache_for_a_fixed_provider(
+    tmp_path,
+):
+    """A named profile's cache is still safe to reuse for a FIXED provider."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-cached", "work")
+    provider = _Provider(
+        auth="secret",
+        token_env_var="ZAI_API_KEY",
+        name="zai",
+        base_url_policy="fixed",
+    )
+    assert (
+        token_for_discovery(paths, provider, profile_name="work", environ={})
+        == "sk-cached"
+    )
 
 
 @pytest.mark.unit

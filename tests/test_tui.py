@@ -217,7 +217,19 @@ def test_replacing_selected_profile_changes_only_that_profile(monkeypatch):
 
 
 @pytest.mark.integration
-def test_litellm_uses_selected_profile_for_model_discovery(monkeypatch):
+def test_litellm_model_discovery_does_not_trust_a_cached_profile_token(monkeypatch):
+    """A REQUIRED-policy provider's cached profile token must not be handed to
+    discovery for an address the cache carries no record of matching.
+
+    The cache is keyed by provider name, not by host, so a token cached for
+    ``litellm`` under profile ``work`` may have been cached against a
+    *different* ``--base-url`` than the one just typed here — reusing it
+    would silently send a possibly-wrong-host secret to whatever address the
+    user names next (the install-path analogue is pinned by
+    ``test_add_ignores_a_cached_token_for_a_runtime_address_provider_on_install``
+    in ``test_cli_add.py``). Discovery instead goes out unauthenticated, per
+    ``token_for_discovery``'s documented never-prompts/never-raises contract.
+    """
     import code_helper.services.models_api as api
     import code_helper.services.secrets as secrets
 
@@ -237,7 +249,7 @@ def test_litellm_uses_selected_profile_for_model_discovery(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _prompt: next(typed))
 
     assert main(["tui"]) == 0
-    assert captured == [("http://proxy.example/v1", "sk-work")]
+    assert captured == [("http://proxy.example/v1", "")]
 
 
 @pytest.mark.integration
