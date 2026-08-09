@@ -384,12 +384,20 @@ def resolve_token(
     to be new. Without an explicit profile, the environment wins outright,
     followed by the default profile. A prompt-resolved value is the only
     one a caller should cache — see :func:`save_credential`.
+
+    ``base_url_policy`` gates only the UNNAMED/default cache: reusing it
+    across a changed ``--base-url`` would be a silent, accidental leak,
+    since nothing chose it for the current invocation. A NAMED profile is
+    the opposite — the user typed ``--profile <name>`` on purpose, the same
+    deliberate choice that already lets a profile win over the environment,
+    so its cache is trusted for any ``base_url_policy`` (this is what makes
+    profiles usable at all for a REQUIRED-policy provider like ``litellm``,
+    which the profile feature explicitly supports — see the README).
     """
     if profile_name:
-        if base_url_policy == "fixed":
-            cached = credential_for(paths, provider_name, profile_name)
-            if cached:
-                return ResolvedToken(cached, SOURCE_CACHE)
+        cached = credential_for(paths, provider_name, profile_name)
+        if cached:
+            return ResolvedToken(cached, SOURCE_CACHE)
         env_value = environ.get(env_var)
         if env_value:
             return ResolvedToken(env_value, SOURCE_ENV)
@@ -437,22 +445,30 @@ def token_for_discovery(
     fine edge, but this helper reads only three attributes and staying free of
     the import keeps the dependency arrow one-directional at call sites).
 
-    The cache is consulted **only for a** ``BaseUrlPolicy.FIXED`` **provider.**
-    The cache key is the provider *name*, not an address — safe as long as a
-    provider has exactly one true address (``FIXED``), but a ``REQUIRED``/
-    ``OVERRIDABLE`` provider's ``base_url`` can be a different, caller-supplied
-    host on every invocation (that is the whole point of ``--base-url``). Handing
-    a cached secret to whatever host the caller names next would silently send
-    it to an address it was never cached for. An explicit env var is still
-    honoured either way: the caller set it for *this* invocation, so it carries
-    no such cross-invocation ambiguity.
+    The UNNAMED/default cache is consulted **only for a**
+    ``BaseUrlPolicy.FIXED`` **provider.** Its cache key is the provider
+    *name*, not an address — safe as long as a provider has exactly one
+    true address (``FIXED``), but a ``REQUIRED``/``OVERRIDABLE`` provider's
+    ``base_url`` can be a different, caller-supplied host on every
+    invocation (that is the whole point of ``--base-url``). Handing a
+    cached secret to whatever host the caller names next would silently
+    send it to an address it was never cached for.
+
+    A NAMED profile is different: the caller chose it deliberately for
+    *this* invocation (mirroring :func:`resolve_token`'s same distinction),
+    so its cache is trusted regardless of ``base_url_policy`` — otherwise
+    profiles would be unusable for a REQUIRED-policy provider like
+    ``litellm``, which the profile feature explicitly supports. An explicit
+    env var is honoured either way: the caller set it for *this*
+    invocation, so it carries no cross-invocation ambiguity.
     """
     if provider.auth != "secret":
         return ""
     if profile_name:
-        if provider.base_url_policy != "fixed":
-            return ""
-        return credential_for(paths, provider.name, profile_name)
+        cached = credential_for(paths, provider.name, profile_name)
+        if cached:
+            return cached
+        return environ.get(provider.token_env_var, "")
     env_value = environ.get(provider.token_env_var, "")
     if env_value:
         return env_value

@@ -383,22 +383,20 @@ def test_resolve_token_ignores_cache_for_a_runtime_address_provider(tmp_path):
 
 
 @pytest.mark.unit
-def test_resolve_token_ignores_a_profiled_cache_for_a_runtime_address_provider(
+def test_resolve_token_trusts_a_named_profiles_cache_for_a_runtime_address_provider(
     tmp_path,
 ):
-    """The same host-isolation guard must hold for a NAMED profile too.
+    """A NAMED profile's cache is trusted for ANY base_url_policy.
 
-    Before this fix, the profile branch returned a cached profile token
-    unconditionally, skipping the ``base_url_policy`` check the no-profile
-    branch already enforced — a token cached under profile ``work`` for one
-    ``--base-url`` could be silently reused against a different host given
-    on a later ``--profile work --base-url ...`` invocation.
+    Unlike the unnamed/default cache (host-isolation guarded elsewhere in
+    this file), a profile the user explicitly named via ``--profile`` is a
+    deliberate per-invocation choice — the same reasoning that already lets
+    an explicit profile win over the environment. This is what makes named
+    profiles usable at all for a REQUIRED-policy provider like ``litellm``,
+    which the profile feature explicitly documents supporting.
     """
     paths = _paths(tmp_path)
-    save_credential(paths, "litellm", "sk-cached-for-host-a", "work")
-
-    def _fake_prompt(_prompt):
-        return "sk-typed-for-host-b"
+    save_credential(paths, "litellm", "sk-cached-for-work", "work")
 
     resolved = resolve_token(
         env_var="LITELLM_API_KEY",
@@ -408,10 +406,10 @@ def test_resolve_token_ignores_a_profiled_cache_for_a_runtime_address_provider(
         profile_name="work",
         base_url_policy="required",
         environ={},
-        getpass_fn=_fake_prompt,
+        getpass_fn=_no_prompt,
     )
-    assert resolved.value == "sk-typed-for-host-b"
-    assert resolved.source == SOURCE_PROMPT
+    assert resolved.value == "sk-cached-for-work"
+    assert resolved.source == SOURCE_CACHE
 
 
 @pytest.mark.unit
@@ -608,16 +606,16 @@ def test_token_for_discovery_ignores_cache_for_a_runtime_address_provider(tmp_pa
 
 
 @pytest.mark.unit
-def test_token_for_discovery_ignores_a_profiled_cache_for_a_runtime_address_provider(
+def test_token_for_discovery_trusts_a_named_profiles_cache_for_a_runtime_address_provider(
     tmp_path,
 ):
-    """Same host-isolation guard, for a NAMED profile.
+    """A NAMED profile's cache is trusted for ANY base_url_policy.
 
-    Before this fix, ``token_for_discovery``'s profile branch returned a
-    cached profile token unconditionally, ignoring ``base_url_policy`` — a
-    token cached under profile ``work`` for one ``--base-url`` would be
-    handed to model discovery against a *different* ``--base-url`` given on
-    a later invocation with the same profile name.
+    Mirrors ``resolve_token``'s same distinction: an explicitly named
+    profile is a deliberate per-invocation choice, unlike the unnamed
+    cache (still host-isolation guarded below). Without this, model
+    discovery could never use an already-cached profile token for a
+    REQUIRED-policy provider like ``litellm``.
     """
     paths = _paths(tmp_path)
     save_credential(paths, "litellm", "sk-cached", "work")
@@ -627,7 +625,10 @@ def test_token_for_discovery_ignores_a_profiled_cache_for_a_runtime_address_prov
         name="litellm",
         base_url_policy="required",
     )
-    assert token_for_discovery(paths, provider, profile_name="work", environ={}) == ""
+    assert (
+        token_for_discovery(paths, provider, profile_name="work", environ={})
+        == "sk-cached"
+    )
 
 
 @pytest.mark.unit
@@ -647,6 +648,34 @@ def test_token_for_discovery_still_uses_a_profiled_cache_for_a_fixed_provider(
         token_for_discovery(paths, provider, profile_name="work", environ={})
         == "sk-cached"
     )
+
+
+@pytest.mark.unit
+def test_token_for_discovery_falls_back_to_env_for_a_brand_new_uncached_profile(
+    tmp_path,
+):
+    """A NEW profile with nothing cached yet must still consult the env var.
+
+    Before this fix, naming a profile with no cached entry returned ""
+    immediately without ever checking the environment, so ``--list-models
+    --profile NAME`` on a first-time profile sent an unauthenticated
+    request even when the provider's env var was set — inconsistent with
+    ``resolve_token``'s same env fallback for a brand-new profile.
+    """
+    paths = _paths(tmp_path)
+    provider = _Provider(
+        auth="secret",
+        token_env_var="ZAI_API_KEY",
+        name="zai",
+        base_url_policy="fixed",
+    )
+    result = token_for_discovery(
+        paths,
+        provider,
+        profile_name="brand-new",
+        environ={"ZAI_API_KEY": "sk-env"},
+    )
+    assert result == "sk-env"
 
 
 @pytest.mark.unit
