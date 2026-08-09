@@ -855,3 +855,31 @@ def test_slot_without_restore_is_rejected(tmp_path, monkeypatch, capsys):
         == 1
     )
     assert "--slot only applies together with --restore" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Service layer: resolve_default_patch refuses a REQUIRED provider with no
+# base_url (the CLI --base-url flag itself is Part 2/2 — see feat/base-url-cli)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolve_default_patch_refuses_a_required_provider_with_no_base_url():
+    """The service-layer invariant added alongside build_spec's: a
+    REQUIRED-policy provider (its base_url is the user's own server) must
+    never resolve a patch with an unresolved empty base_url, independent of
+    whether any CLI entry point has grown a --base-url flag yet.
+    """
+    with pytest.raises(CodeHelperError, match="requires a base URL"):
+        resolve_default_patch(CODEX, get_provider("litellm"), "gpt-4o", "/x/model.json")
+
+
+@pytest.mark.unit
+def test_resolve_default_patch_uses_the_substituted_provider():
+    """A unit-level pin: resolve_default_patch itself is provider-agnostic —
+    it is the CALLER's job (cli/parser.py) to substitute base_url in first."""
+    from code_helper.services.model import with_base_url
+
+    litellm = with_base_url(get_provider("litellm"), "http://h:4000/v1")
+    result = resolve_default_patch(CODEX, litellm, "gpt-4o", "/x/model.json")
+    assert result.base_url == "http://h:4000/v1/"

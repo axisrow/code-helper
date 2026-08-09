@@ -16,6 +16,7 @@ from code_helper.services.model import (
     AGENTS,
     PROVIDERS,
     Agent,
+    BaseUrlPolicy,
     ConfigShape,
     ModelListAPI,
     Provider,
@@ -23,6 +24,7 @@ from code_helper.services.model import (
     get_agent,
     get_provider,
     resolve_shape,
+    with_base_url,
 )
 
 # A provider that speaks ONLY the OpenAI protocol — the shape NVIDIA and
@@ -50,8 +52,8 @@ def test_registry_has_claude_and_codex():
 
 
 @pytest.mark.unit
-def test_registry_has_ollama_and_zai():
-    assert {p.name for p in PROVIDERS} == {"ollama", "zai"}
+def test_registry_has_ollama_and_zai_and_litellm():
+    assert {p.name for p in PROVIDERS} == {"ollama", "zai", "litellm"}
 
 
 @pytest.mark.unit
@@ -122,6 +124,30 @@ def test_claude_zai_uses_env():
 
 
 @pytest.mark.unit
+def test_litellm_declares_both_shapes():
+    """A LiteLLM proxy serves both protocols off one host — the registry must
+    say so honestly, the way test_ollama_declares_three_shapes does for
+    ollama's three mechanisms."""
+    litellm = get_provider("litellm")
+    assert litellm.shapes == {ConfigShape.ANTHROPIC_ENV, ConfigShape.OPENAI_TOML}
+    assert litellm.wire_api == "chat"
+    assert litellm.base_url_policy is BaseUrlPolicy.REQUIRED
+    assert litellm.base_url == ""
+
+
+@pytest.mark.unit
+def test_claude_litellm_resolves_to_anthropic_env():
+    shape = resolve_shape(get_agent("claude"), get_provider("litellm"))
+    assert shape is ConfigShape.ANTHROPIC_ENV
+
+
+@pytest.mark.unit
+def test_codex_litellm_resolves_to_openai_toml():
+    shape = resolve_shape(get_agent("codex"), get_provider("litellm"))
+    assert shape is ConfigShape.OPENAI_TOML
+
+
+@pytest.mark.unit
 def test_openai_only_provider_is_incompatible_with_claude():
     """The headline case: an OpenAI-only endpoint cannot drive Claude Code.
 
@@ -188,13 +214,17 @@ def test_compatible_providers_for_claude():
     assert {p.name for p in compatible_providers(get_agent("claude"))} == {
         "ollama",
         "zai",
+        "litellm",
     }
 
 
 @pytest.mark.unit
 def test_compatible_providers_for_codex_excludes_zai():
     """z.ai is Anthropic-only, and codex cannot speak that protocol."""
-    assert {p.name for p in compatible_providers(get_agent("codex"))} == {"ollama"}
+    assert {p.name for p in compatible_providers(get_agent("codex"))} == {
+        "ollama",
+        "litellm",
+    }
 
 
 @pytest.mark.unit
@@ -236,3 +266,176 @@ def test_validate_registries_rejects_shapeless_agent(monkeypatch):
     monkeypatch.setattr(m, "AGENTS", (Agent("x", "x", frozenset()),))
     with pytest.raises(CodeHelperError, match="no config shapes"):
         m._validate_registries()
+
+
+# --------------------------------------------------------------------------- #
+# BaseUrlPolicy / with_base_url — runtime base_url substitution
+# --------------------------------------------------------------------------- #
+
+# Built OUTSIDE the registry, same technique as _OPENAI_ONLY above: proves the
+# rules are computed from the policy value, not enumerated per provider name.
+_RUNTIME_REQUIRED = Provider(
+    name="runtime-required",
+    shapes=frozenset({ConfigShape.ANTHROPIC_ENV}),
+    base_url="",
+    base_url_policy=BaseUrlPolicy.REQUIRED,
+    auth="secret",
+    token_env_var="RUNTIME_API_KEY",
+)
+
+_RUNTIME_OVERRIDABLE = Provider(
+    name="runtime-overridable",
+    shapes=frozenset({ConfigShape.ANTHROPIC_ENV}),
+    base_url="http://default-host:1/v1",
+    base_url_policy=BaseUrlPolicy.OVERRIDABLE,
+    auth="secret",
+    token_env_var="RUNTIME_API_KEY",
+)
+
+
+@pytest.mark.unit
+def test_fixed_provider_passes_through_with_no_url():
+    ollama = get_provider("ollama")
+    assert with_base_url(ollama, None) is ollama
+
+
+@pytest.mark.unit
+def test_fixed_provider_refuses_an_override():
+    ollama = get_provider("ollama")
+    with pytest.raises(CodeHelperError, match="fixed base URL"):
+        with_base_url(ollama, "http://x/v1")
+
+
+@pytest.mark.unit
+def test_required_provider_refuses_without_a_url():
+    with pytest.raises(CodeHelperError, match="needs a base URL"):
+        with_base_url(_RUNTIME_REQUIRED, None)
+
+
+@pytest.mark.unit
+def test_required_provider_refuses_an_empty_url():
+    with pytest.raises(CodeHelperError, match="needs a base URL"):
+        with_base_url(_RUNTIME_REQUIRED, "")
+
+
+@pytest.mark.unit
+def test_required_provider_accepts_a_valid_url():
+    got = with_base_url(_RUNTIME_REQUIRED, "http://host:4000/v1")
+    assert got.base_url == "http://host:4000/v1"
+    # The original registry object is untouched (frozen dataclass + replace).
+    assert _RUNTIME_REQUIRED.base_url == ""
+
+
+@pytest.mark.unit
+def test_required_provider_propagates_url_validation():
+    with pytest.raises(CodeHelperError, match="http:// or https://"):
+        with_base_url(_RUNTIME_REQUIRED, "ftp://x")
+
+
+@pytest.mark.unit
+def test_overridable_provider_keeps_the_default_with_no_override():
+    assert with_base_url(_RUNTIME_OVERRIDABLE, None) is _RUNTIME_OVERRIDABLE
+
+
+@pytest.mark.unit
+def test_overridable_provider_accepts_an_override():
+    got = with_base_url(_RUNTIME_OVERRIDABLE, "http://custom-host:9/v1")
+    assert got.base_url == "http://custom-host:9/v1"
+
+
+@pytest.mark.unit
+def test_fixed_refusal_message_lists_runtime_providers_from_the_registry(
+    monkeypatch,
+):
+    """The error text is DERIVED from PROVIDERS, not a hard-coded name list."""
+    import code_helper.services.model as m
+
+    monkeypatch.setattr(m, "PROVIDERS", (get_provider("ollama"), _RUNTIME_REQUIRED))
+    with pytest.raises(CodeHelperError, match="runtime-required"):
+        with_base_url(get_provider("ollama"), "http://x/v1")
+
+
+# --------------------------------------------------------------------------- #
+# BaseUrlPolicy — registry validation
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_required_policy_with_a_registry_url_is_rejected():
+    import code_helper.services.model as m
+
+    bad = Provider(
+        name="bad",
+        shapes=frozenset({ConfigShape.ANTHROPIC_ENV}),
+        base_url="http://should-not-be-here",
+        base_url_policy=BaseUrlPolicy.REQUIRED,
+    )
+    with pytest.raises(CodeHelperError, match="base_url_policy=REQUIRED"):
+        m._validate_provider(bad)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("policy", [BaseUrlPolicy.FIXED, BaseUrlPolicy.OVERRIDABLE])
+def test_non_required_policy_with_an_empty_url_is_rejected(policy):
+    import code_helper.services.model as m
+
+    bad = Provider(
+        name="bad",
+        shapes=frozenset({ConfigShape.ANTHROPIC_ENV}),
+        base_url="",
+        base_url_policy=policy,
+    )
+    with pytest.raises(CodeHelperError, match="no registry base_url"):
+        m._validate_provider(bad)
+
+
+@pytest.mark.unit
+def test_lowercase_token_env_var_is_rejected():
+    import code_helper.services.model as m
+
+    bad = Provider(
+        name="bad",
+        shapes=frozenset({ConfigShape.ANTHROPIC_ENV}),
+        base_url="http://x",
+        token_env_var="lower_case_key",
+    )
+    with pytest.raises(CodeHelperError, match="invalid token_env_var"):
+        m._validate_provider(bad)
+
+
+@pytest.mark.unit
+def test_uppercase_token_env_var_is_accepted():
+    import code_helper.services.model as m
+
+    ok = Provider(
+        name="ok",
+        shapes=frozenset({ConfigShape.ANTHROPIC_ENV}),
+        base_url="http://x",
+        token_env_var="MY_API_KEY",
+    )
+    m._validate_provider(ok)  # must not raise
+
+
+@pytest.mark.unit
+def test_secret_provider_with_no_token_env_var_is_rejected():
+    """A registry-authoring mistake this import-time check exists to catch
+    (cycle-review re-review finding on PR #12): auth='secret' with an empty
+    token_env_var would let an OPENAI_TOML wrapper install successfully with
+    NO credential wired in at all — openai_env_key returns "" for an empty
+    token_env_var, so neither the profile's env_key nor the wrapper's
+    `export` line gets written. No shipped provider hits this (zai/litellm
+    both carry a real token_env_var); this pins the registry-validation net
+    that would catch a future one that doesn't.
+    """
+    import code_helper.services.model as m
+
+    bad = Provider(
+        name="bad-secret",
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        base_url="https://api.bad.invalid/v1",
+        auth="secret",
+        token_env_var="",  # missing — the whole point of this test
+        wire_api="responses",
+    )
+    with pytest.raises(CodeHelperError, match="declares auth='secret' but has no"):
+        m._validate_provider(bad)

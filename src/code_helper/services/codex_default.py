@@ -38,7 +38,13 @@ from pathlib import Path
 
 from code_helper.backends._atomic import atomic_write
 from code_helper.errors import CodeHelperError
-from code_helper.services.model import Agent, ConfigShape, Provider, resolve_shape
+from code_helper.services.model import (
+    Agent,
+    BaseUrlPolicy,
+    ConfigShape,
+    Provider,
+    resolve_shape,
+)
 from code_helper.services.paths import Paths
 from code_helper.services.render import (
     CATALOG_MANAGED_BY_KEY,
@@ -104,6 +110,18 @@ def resolve_default_patch(
             a future registry entry skips import-time validation somehow.
     """
     resolve_shape(agent, provider, preferred=ConfigShape.OPENAI_TOML)
+
+    # Same invariant as build_spec (services/spec.py): a REQUIRED-policy
+    # provider (its address is the user's own server) must never reach a
+    # renderer/patch with an unresolved empty base_url — that would silently
+    # patch config.toml to point Codex at "/v1/". The caller is expected to
+    # substitute a real address via model.with_base_url before calling here;
+    # if nobody did, refuse rather than resolve a malformed patch.
+    if provider.base_url_policy is BaseUrlPolicy.REQUIRED and not provider.base_url:
+        raise CodeHelperError(
+            f"provider {provider.name!r} requires a base URL — supply one "
+            f"via model.with_base_url(provider, url) before resolve_default_patch"
+        )
 
     if provider.wire_api not in ("responses", "chat"):
         raise CodeHelperError(
@@ -343,7 +361,7 @@ def _require_tomllib():
 
     ``tomllib`` entered the stdlib in Python 3.11 — that is *why* this whole
     project's ``requires-python`` floor is 3.11, not merely a coincidence.
-    Unlike ``wrappers._model_from_toml_profile`` — which accepts a no-op when
+    Unlike ``wrappers._toml_profile_data`` — which accepts a no-op when
     ``tomllib`` is unavailable, because it verifies a file this tool owns and
     wrote wholesale — ``set-default`` regex-patches the user's own
     hand-maintained ``config.toml``. Its patcher has documented blind spots

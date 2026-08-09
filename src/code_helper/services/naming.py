@@ -27,10 +27,17 @@ function still cannot escape ``bin_dir``. The duplication is deliberate.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 from code_helper.errors import CodeHelperError
 
-__all__ = ["validate_alias", "MAX_ALIAS_LENGTH", "RESERVED_ALIASES"]
+__all__ = [
+    "validate_alias",
+    "MAX_ALIAS_LENGTH",
+    "RESERVED_ALIASES",
+    "validate_base_url",
+    "MAX_BASE_URL_LENGTH",
+]
 
 #: Cap on alias length. Not a filesystem limit (those are far higher) — a
 #: sanity bound so a pasted blob can't become a file name.
@@ -101,3 +108,67 @@ def validate_alias(alias: str) -> str:
         )
 
     return alias
+
+
+#: Sanity bound, same class as MAX_ALIAS_LENGTH — not a real protocol limit,
+#: just a ceiling so a pasted blob can't become a generated script's URL.
+MAX_BASE_URL_LENGTH = 512
+
+
+def validate_base_url(url: str) -> None:
+    """Gate on a user-supplied ``base_url`` (``--base-url`` / a TUI prompt).
+
+    An allow-list, the same shape as :func:`validate_alias`: reject anything
+    not explicitly known-safe rather than enumerate what's dangerous.
+
+    This is NOT injection defense — it does not need to be. Every channel a
+    ``base_url`` reaches (a shell ``export`` via ``_shell_single_quote``, a
+    TOML value via ``toml_string``) already quotes it correctly regardless of
+    content, and stays the ONLY defense on those channels. This function
+    exists purely to catch typos and copy-paste mistakes early, with a
+    message that says what's wrong — quoting must never be weakened on the
+    assumption that this function already filtered the input.
+
+    Raises:
+        CodeHelperError: empty input, a scheme other than http/https (or none
+            at all — the single most common typo), no host, a query string or
+            fragment, embedded whitespace/control bytes, or over
+            :data:`MAX_BASE_URL_LENGTH` characters.
+    """
+    stripped = url.strip()
+    if not stripped:
+        raise CodeHelperError("base URL is empty")
+
+    if len(stripped) > MAX_BASE_URL_LENGTH:
+        raise CodeHelperError(
+            f"base URL is too long ({len(stripped)} > {MAX_BASE_URL_LENGTH})"
+        )
+
+    if any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in stripped):
+        raise CodeHelperError(f"base URL must not contain whitespace: {url!r}")
+
+    try:
+        parts = urlsplit(stripped)
+    except ValueError as exc:
+        # urlsplit raises ValueError (not CodeHelperError) on some malformed
+        # inputs — e.g. an unterminated IPv6 bracket ("http://[bad") raises
+        # "Invalid IPv6 URL". Every caller of this function (with_base_url,
+        # and transitively spec_from_installed's base_url recovery) expects
+        # CodeHelperError as the ONLY failure mode this raises, so a bare
+        # ValueError here would escape spec_from_installed's
+        # `except CodeHelperError` and break its documented never-raises
+        # contract for a recovered value from a hand-edited/truncated file.
+        raise CodeHelperError(f"base URL is malformed: {stripped!r} ({exc})") from exc
+
+    if parts.scheme not in ("http", "https"):
+        raise CodeHelperError(
+            f"base URL must start with http:// or https:// (got: {stripped!r})"
+        )
+
+    if not parts.netloc:
+        raise CodeHelperError(f"base URL has no host: {stripped!r}")
+
+    if parts.query or parts.fragment:
+        raise CodeHelperError(
+            f"base URL must not carry a query string or fragment: {stripped!r}"
+        )

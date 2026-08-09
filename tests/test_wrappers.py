@@ -18,6 +18,8 @@ from code_helper.services.model import (
     ConfigShape,
     ModelListAPI,
     Provider,
+    get_provider,
+    with_base_url,
 )
 from code_helper.services.paths import Paths
 from code_helper.services.render import (
@@ -628,6 +630,95 @@ def test_openai_toml_body_quoted_model_with_colon_and_dot():
 
 
 @pytest.mark.unit
+def test_openai_toml_wrapper_body_is_unchanged_for_a_literal_provider():
+    """GOLDEN: byte-exact output for a non-secret (``ollama``, literal) provider.
+
+    A literal string, not a re-render of the same function — proving the
+    function equals itself proves nothing. This is what pins the OPENAI_TOML
+    wrapper's structure across the env_key/export change added for a secret
+    provider (e.g. a runtime-``base_url`` LiteLLM proxy): for ``ollama`` the
+    output MUST stay exactly what it already is, or every previously-installed
+    ``codex × ollama`` wrapper stops matching ``_decide``'s SKIP path and gets
+    silently rewritten on the next ``add``.
+    """
+    spec = _toml_spec(model="glm-5.2:cloud", alias="glm-5-codex")
+    body = render_script(spec, "")
+    assert body == (
+        "#!/bin/bash\n"
+        "# code-helper: managed wrapper (agent=codex, provider=ollama, "
+        "shape=openai-toml)\n"
+        "exec codex --profile 'glm-5-codex' \"$@\"\n"
+    )
+
+
+@pytest.mark.unit
+def test_openai_toml_profile_has_no_env_key_for_a_literal_provider():
+    """GOLDEN: no env_key line for a non-secret provider (ollama)."""
+    spec = _toml_spec(model="glm-5.2:cloud", alias="glm-5-codex")
+    body = openai_toml_body(spec, "/home/u/.codex/glm-5-codex.model.json")
+    assert "env_key" not in body
+
+
+def _secret_toml_provider(name: str = "secret-openai") -> Provider:
+    return Provider(
+        name=name,
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        base_url="https://api.secret.invalid/v1",
+        auth="secret",
+        token_env_var="SECRET_API_KEY",
+        model_list_api=ModelListAPI.OPENAI_V1,
+        wire_api="chat",
+    )
+
+
+@pytest.mark.unit
+def test_openai_toml_wrapper_exports_the_token_for_a_secret_provider():
+    spec = build_spec(
+        agent="codex", provider=_secret_toml_provider(), model="m", alias="x"
+    )
+    body = render_script(spec, "tok")
+    export_idx = body.index("export SECRET_API_KEY='tok'")
+    exec_idx = body.index("exec codex")
+    assert export_idx < exec_idx  # the export must precede exec
+
+
+@pytest.mark.unit
+def test_openai_toml_profile_carries_env_key_for_a_secret_provider():
+    spec = build_spec(
+        agent="codex", provider=_secret_toml_provider(), model="m", alias="x"
+    )
+    body = openai_toml_body(spec, "/x.json")
+    assert 'env_key = "SECRET_API_KEY"' in body
+
+
+@pytest.mark.unit
+def test_secret_openai_toml_token_with_a_quote_is_shell_safe():
+    """Injection regression on the NEW channel: token in an OPENAI_TOML wrapper."""
+    spec = build_spec(
+        agent="codex", provider=_secret_toml_provider(), model="m", alias="x"
+    )
+    evil_token = "a'; rm -rf /tmp/pwned; echo '"
+    body = render_script(spec, evil_token)
+    assert "export SECRET_API_KEY='a'\"'\"'; rm -rf /tmp/pwned; echo '\"'\"''" in body
+
+
+@pytest.mark.unit
+def test_an_existing_ollama_wrapper_reinstalls_as_a_no_op(tmp_path):
+    """The install-time proof, not just the render-time one.
+
+    Installs `codex × ollama`, reinstalls the identical spec, and asserts
+    `install_wrapper` returns False (`_decide`'s SKIP path) — this is the
+    thing the golden byte tests above exist to protect: a structural change to
+    the renderer that DOES change ollama's output would turn this into a
+    silent rewrite instead of a no-op.
+    """
+    paths = Paths.from_home(tmp_path)
+    spec = _toml_spec(model="glm-5.2:cloud", alias="glm-5-codex")
+    assert install_wrapper(paths, spec, token="") is True
+    assert install_wrapper(paths, spec, token="") is False
+
+
+@pytest.mark.unit
 def test_openai_catalog_body_has_context_window_for_unknown_model():
     """The catalog gives Codex a context window for models it does not know."""
     import json
@@ -919,6 +1010,197 @@ def test_spec_from_installed_returns_none_when_profile_missing(tmp_path):
     assert spec_from_installed(paths, "glm-5-codex") is None
 
 
+# --------------------------------------------------------------------------- #
+# spec_from_installed — round-trip base_url for a non-FIXED provider
+#
+# Rule: the FILE wins for anything but a FIXED base_url (REQUIRED/OVERRIDABLE
+# have no legitimate registry value to fall back to, and edit-token must not
+# be licence to silently change an unrelated setting — same reasoning as
+# reading all three env-shape tiers instead of one).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_spec_from_installed_recovers_base_url_anthropic_env(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
+    spec = build_spec(agent="claude", provider=provider, model="gpt-4o", alias="lm")
+    install_wrapper(paths, spec, token="tok")
+
+    recovered = spec_from_installed(paths, "lm")
+    assert recovered is not None
+    assert recovered.provider.base_url == "http://h:4000/v1"
+
+
+@pytest.mark.integration
+def test_spec_from_installed_never_raises_on_a_corrupted_base_url(tmp_path):
+    """spec_from_installed's documented contract is that it never raises —
+    a recovered base_url that fails validate_base_url (a hand-edited or
+    truncated wrapper) must degrade to None, not propagate CodeHelperError
+    uncaught to a caller like edit-token/add --alias (cycle-review round 2,
+    finding R1).
+    """
+    paths = Paths.from_home(tmp_path)
+    provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
+    spec = build_spec(agent="claude", provider=provider, model="gpt-4o", alias="lm")
+    install_wrapper(paths, spec, token="tok")
+
+    script = paths.script_for("lm")
+    body = script.read_text(encoding="utf-8")
+    # Corrupt the recovered value with an embedded tab — a single-quoted
+    # shell value validate_base_url rejects (embedded control byte), but
+    # that _env_value's single-line regex still matches and hands back
+    # unchanged, so with_base_url/validate_base_url is what has to catch it.
+    hacked = body.replace(
+        "export ANTHROPIC_BASE_URL='http://h:4000/v1'",
+        "export ANTHROPIC_BASE_URL='http://h:4000/v1\tbad'",
+    )
+    assert hacked != body  # sanity: the replace actually matched
+    script.write_text(hacked, encoding="utf-8")
+
+    # Must return None, not raise.
+    assert spec_from_installed(paths, "lm") is None
+
+
+@pytest.mark.integration
+def test_spec_from_installed_recovers_base_url_openai_toml(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
+    spec = build_spec(agent="codex", provider=provider, model="gpt-4o", alias="lm")
+    install_wrapper(paths, spec, token="tok")
+
+    recovered = spec_from_installed(paths, "lm")
+    assert recovered is not None
+    # openai_base_url appended /v1/ when writing the profile.
+    assert recovered.provider.base_url == "http://h:4000/v1/"
+
+
+@pytest.mark.integration
+def test_reinstalling_a_recovered_openai_toml_spec_is_byte_identical(tmp_path):
+    """Pins openai_base_url's idempotence across a round-trip: without it,
+    re-deriving /v1/ from an already-/v1/-suffixed value would double it."""
+    paths = Paths.from_home(tmp_path)
+    provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
+    spec = build_spec(agent="codex", provider=provider, model="gpt-4o", alias="lm")
+    install_wrapper(paths, spec, token="tok")
+
+    recovered = spec_from_installed(paths, "lm")
+    assert recovered is not None
+    assert install_wrapper(paths, recovered, token="tok") is False  # no-op
+
+
+@pytest.mark.integration
+def test_spec_from_installed_falls_back_to_the_default_for_overridable(
+    tmp_path, monkeypatch
+):
+    """OVERRIDABLE with nothing recovered from the file: the registry default
+    stands rather than refusing — unlike REQUIRED, there IS a legitimate
+    value to fall back to, so refusing would be needless.
+
+    No shipped provider is OVERRIDABLE today, so this monkeypatches ollama's
+    policy for the duration of the test — the same out-of-registry technique
+    test_model.py's _RUNTIME_OVERRIDABLE uses, applied here at the install
+    layer instead of the pure-function layer.
+    """
+    from dataclasses import replace
+
+    import code_helper.services.model as model_mod
+    from code_helper.services.model import BaseUrlPolicy
+
+    ollama = get_provider("ollama")
+    patched = replace(ollama, base_url_policy=BaseUrlPolicy.OVERRIDABLE)
+    monkeypatch.setattr(
+        model_mod,
+        "PROVIDERS",
+        tuple(patched if p.name == "ollama" else p for p in model_mod.PROVIDERS),
+    )
+
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="claude", provider=patched, model="m", alias="ov")
+    install_wrapper(paths, spec, token="")
+
+    recovered = spec_from_installed(paths, "ov")
+    assert recovered is not None
+    assert recovered.provider.base_url == "http://127.0.0.1:11434"
+
+
+@pytest.mark.integration
+def test_spec_from_installed_returns_none_when_a_required_provider_lost_its_url(
+    tmp_path,
+):
+    """REQUIRED with no registry fallback: an unrecoverable base_url must
+    refuse to reconstruct rather than hand back a spec with an empty one —
+    edit-token would otherwise silently reinstall the wrapper pointed at
+    nothing."""
+    paths = Paths.from_home(tmp_path)
+    provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
+    spec = build_spec(agent="codex", provider=provider, model="gpt-4o", alias="lm")
+    install_wrapper(paths, spec, token="tok")
+
+    # Strip the base_url line from the profile — simulate a hand-edit.
+    config_path = paths.codex_config_for("lm")
+    body = config_path.read_text(encoding="utf-8")
+    stripped = "\n".join(
+        line for line in body.split("\n") if not line.startswith("base_url")
+    )
+    config_path.write_text(stripped, encoding="utf-8")
+
+    assert spec_from_installed(paths, "lm") is None
+
+
+@pytest.mark.integration
+def test_spec_from_installed_ignores_a_file_base_url_for_a_fixed_provider(tmp_path):
+    """FIXED: the registry wins even over a hand-edited file — there is no
+    axis on which the file could carry a legitimate override, so honouring
+    it would let a hand-edit silently redirect a wrapper's endpoint."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="claude", provider="ollama", model="m", alias="ollama-t")
+    install_wrapper(paths, spec, token="")
+
+    script = paths.script_for("ollama-t")
+    body = script.read_text(encoding="utf-8")
+    hacked = body.replace(
+        "export ANTHROPIC_BASE_URL='http://127.0.0.1:11434'",
+        "export ANTHROPIC_BASE_URL='http://hacked/v1'",
+    )
+    assert hacked != body  # sanity: the replace actually matched
+    script.write_text(hacked, encoding="utf-8")
+
+    recovered = spec_from_installed(paths, "ollama-t")
+    assert recovered is not None
+    assert recovered.provider.base_url == "http://127.0.0.1:11434"
+
+
+@pytest.mark.integration
+def test_edit_token_preserves_the_base_url(tmp_path, monkeypatch):
+    """Rotating a litellm token via the edit-token CLI command must not touch
+    the base_url the wrapper was installed with.
+
+    Installation itself goes through the service layer directly
+    (build_spec/with_base_url/install_wrapper) rather than ``add --base-url``
+    — that CLI flag is wired in Part 2/2 (feat/base-url-cli); ``edit-token``
+    is unconditional CLI here in Part 1/2 and needs no such flag, so it is
+    the one piece of this round-trip this branch can actually exercise
+    end-to-end.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import getpass
+
+    from code_helper.__main__ import main
+
+    paths = Paths.from_home(tmp_path)
+    provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
+    spec = build_spec(agent="claude", provider=provider, model="gpt-4o", alias="lm")
+    install_wrapper(paths, spec, token="old-tok")
+
+    monkeypatch.setattr(getpass, "getpass", lambda *_a, **_kw: "new-tok")
+    assert main(["edit-token", "lm"]) == 0
+
+    body = paths.script_for("lm").read_text(encoding="utf-8")
+    assert "export ANTHROPIC_BASE_URL='http://h:4000/v1'" in body
+    assert "export ANTHROPIC_AUTH_TOKEN='new-tok'" in body
+
+
 @pytest.mark.integration
 def test_shape_switch_cleans_up_orphaned_openai_toml_siblings(tmp_path):
     """Reusing an alias for a non-OPENAI_TOML shape removes the old siblings (F8).
@@ -983,14 +1265,14 @@ def test_shape_switch_leaves_foreign_siblings(tmp_path):
 
 
 @pytest.mark.unit
-def test_build_spec_refuses_secret_auth_with_openai_toml():
-    """secret + OPENAI_TOML is rejected before any token prompt (F9).
+def test_build_spec_allows_secret_auth_with_openai_toml():
+    """secret + OPENAI_TOML is now VALID — this used to be F9's refusal.
 
-    The OPENAI_TOML wrapper carries no token (it dispatches
-    ``codex --profile``) and the profile has no env_key field this renderer
-    writes, so a secret-auth provider would silently produce a wrapper with no
-    way to pass its credential — and edit-token would be a no-op. Refuse at
-    build_spec, before resolve_token is ever called.
+    ``openai_toml_body`` writes ``env_key`` for a secret provider and
+    ``_render_openai_toml`` exports the matching variable before ``exec``, so
+    the shape can carry a token now. This is the enabling change for a
+    runtime-``base_url`` provider (e.g. a LiteLLM proxy) that needs secret
+    auth on Codex.
     """
     secret_provider = Provider(
         name="secret-openai",
@@ -1001,54 +1283,9 @@ def test_build_spec_refuses_secret_auth_with_openai_toml():
         model_list_api=ModelListAPI.OPENAI_V1,
         wire_api="chat",
     )
-    with pytest.raises(CodeHelperError, match="no way to carry a token"):
-        build_spec(agent="codex", provider=secret_provider, model="m")
-
-
-@pytest.mark.integration
-def test_add_secret_auth_openai_toml_refuses_before_token_prompt(tmp_path, monkeypatch):
-    """The F9 refusal fires in the CLI flow BEFORE resolve_token runs.
-
-    Mirrors the existing validate-before-prompt pin for incompatible pairings:
-    a secret + OPENAI_TOML provider must never trigger an interactive prompt
-    for a wrapper that will not be written. resolve_token is patched to explode
-    so any reach is a hard failure.
-    """
-    secret_provider = Provider(
-        name="secret-openai",
-        shapes=frozenset({ConfigShape.OPENAI_TOML}),
-        base_url="https://api.secret.invalid/v1",
-        auth="secret",
-        token_env_var="SECRET_API_KEY",
-        model_list_api=ModelListAPI.OPENAI_V1,
-        wire_api="chat",
-    )
-    # Register the out-of-registry provider so the CLI can look it up by name.
-    import code_helper.services.model as model_mod
-
-    monkeypatch.setattr(
-        model_mod, "PROVIDERS", model_mod.PROVIDERS + (secret_provider,)
-    )
-
-    def _explode(*_a, **_kw):  # pragma: no cover - must not be reached
-        raise AssertionError("resolve_token must not run for a refused spec")
-
-    monkeypatch.setattr("code_helper.services.secrets.resolve_token", _explode)
-
-    from code_helper.__main__ import main
-
-    code = main(
-        [
-            "add",
-            "--agent",
-            "codex",
-            "--provider",
-            "secret-openai",
-            "--model",
-            "m",
-        ]
-    )
-    assert code != 0  # refused, not prompted
+    spec = build_spec(agent="codex", provider=secret_provider, model="m")
+    assert spec.auth == "secret"
+    assert spec.shape is ConfigShape.OPENAI_TOML
 
 
 # --------------------------------------------------------------------------- #
@@ -1320,3 +1557,62 @@ def test_validate_registries_rejects_openai_toml_provider_without_wire_api():
         # objects for ConfigShape/Provider/etc, breaking identity comparisons
         # (`is`) any test running after this one relies on.
         model_mod.PROVIDERS = original
+
+
+@pytest.mark.unit
+def test_toml_profile_data_fallback_scopes_base_url_to_its_own_table(
+    monkeypatch, tmp_path
+):
+    """The sub-3.11 fallback regex path must not attribute a sibling table's
+    base_url to the matched table (F1 from PR #12's cycle-review round 1).
+
+    The real ``tomllib.loads`` path naturally nests per table; the defensive
+    fallback used three independent whole-file regex searches instead, so a
+    profile with more than one ``[model_providers.*]`` table (reachable via a
+    hand-edited or ``--force``-adopted legacy file) could hand the SECOND
+    table's ``base_url`` to the FIRST table's name. Force the fallback branch
+    by making the ``tomllib`` import inside ``_toml_profile_data`` raise
+    ``ModuleNotFoundError``, regardless of the interpreter's real version.
+    """
+    import builtins
+
+    import code_helper.services.wrappers as wrappers_mod
+
+    real_import = builtins.__import__
+
+    def _no_tomllib(name, *args, **kwargs):
+        if name == "tomllib":
+            raise ModuleNotFoundError("simulated: no tomllib")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_tomllib)
+
+    paths = Paths.from_home(tmp_path)
+    profile_path = paths.codex_config_for("glm-5-codex")
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    # Two tables: the first (matched by the un-scoped regex first) has NO
+    # base_url; the second carries one. A buggy whole-file search would still
+    # find `base_url_found` (it's present somewhere in the file) and wrongly
+    # attach it to the first table's name.
+    profile_path.write_text(
+        'model = "glm-5.2:cloud"\n'
+        "\n"
+        "[model_providers.first-table]\n"
+        'name = "First"\n'
+        'wire_api = "responses"\n'
+        "\n"
+        "[model_providers.second-table]\n"
+        'name = "Second"\n'
+        'base_url = "https://second.example.com/v1/"\n'
+        'wire_api = "responses"\n',
+        encoding="utf-8",
+    )
+
+    data = wrappers_mod._toml_profile_data(paths, "glm-5-codex")
+
+    assert data is not None
+    # The fallback only ever recovers ONE table (the first match) by design —
+    # what matters is that when it does, it does NOT smuggle in a base_url
+    # that belongs to a different table.
+    assert "first-table" in data["model_providers"]
+    assert data["model_providers"]["first-table"]["base_url"] is None

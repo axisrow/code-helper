@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from code_helper.errors import CodeHelperError
 from code_helper.services.model import (
     Agent,
+    BaseUrlPolicy,
     ConfigShape,
     Provider,
     get_agent,
@@ -162,26 +163,40 @@ def build_spec(
     agent_obj = get_agent(agent) if isinstance(agent, str) else agent
     provider_obj = get_provider(provider) if isinstance(provider, str) else provider
 
+    # A REQUIRED-policy provider (its endpoint is the user's own server, e.g.
+    # a self-hosted LiteLLM proxy) has an empty registry base_url by
+    # construction (see BaseUrlPolicy / _validate_provider). The only way to
+    # get a real address into it is model.with_base_url, called by the
+    # caller BEFORE build_spec runs. If nobody called it, provider_obj still
+    # carries the empty registry default here — refuse rather than silently
+    # rendering/patching a malformed address (an OPENAI_TOML profile's
+    # base_url derives "/v1/" from an empty root, and ANTHROPIC_BASE_URL
+    # would export as an empty string). This is a service-layer invariant,
+    # independent of whether any particular CLI/TUI entry point has grown a
+    # --base-url flag yet — build_spec must never produce a spec for a
+    # REQUIRED provider with no address, no matter how it was reached.
+    if (
+        provider_obj.base_url_policy is BaseUrlPolicy.REQUIRED
+        and not provider_obj.base_url
+    ):
+        raise CodeHelperError(
+            f"provider {provider_obj.name!r} requires a base URL — supply one "
+            f"via model.with_base_url(provider, url) before build_spec"
+        )
+
     chosen = resolve_shape(agent_obj, provider_obj, preferred=shape)
 
-    # OPENAI_TOML carries the token NOWHERE: the wrapper is just
-    # ``exec codex --profile <alias> "$@"`` and the profile has no ``env_key``
-    # field this renderer writes — so a ``secret``-auth provider resolves to a
-    # wrapper that has no way to pass its credential, and ``edit-token`` would
-    # be a silent no-op. Refuse here, BEFORE any caller resolves a token, so a
-    # typo or an impossible pairing never triggers an interactive prompt for a
-    # wrapper that cannot be written — the same contract the missing-model
-    # check below upholds. (No shipped provider hits this today: ollama is
-    # ``literal``. The guard is for a future OpenAI-compatible provider whose
-    # owner declares it ``secret`` without realising OPENAI_TOML cannot carry
-    # that — better a clear error now than a silent credential drop later.)
-    if chosen is ConfigShape.OPENAI_TOML and provider_obj.auth == "secret":
-        raise CodeHelperError(
-            f"provider {provider_obj.name!r} uses secret auth, but the "
-            f"openai-toml shape has no way to carry a token — "
-            f"{agent_obj.name} + {provider_obj.name} cannot be configured "
-            f"this way"
-        )
+    # There used to be a refusal here: OPENAI_TOML + auth == "secret" was
+    # rejected outright, because the wrapper was a one-line
+    # ``exec codex --profile <alias> "$@"`` and the profile had no ``env_key``
+    # field — a secret provider had no way to carry its token. That is no
+    # longer true: ``openai_toml_body`` now writes ``env_key`` (conditionally,
+    # only for a secret provider — see ``render.openai_env_key``), and
+    # ``_render_openai_toml`` exports that variable before ``exec``, so the
+    # token reaches ``codex`` through the process environment instead of
+    # through the profile file. The token still lives NOWHERE but the
+    # generated script (mode 0o700), so ``_discards_only_secret`` protects it
+    # here exactly as it already does for ``ANTHROPIC_ENV``.
 
     if not model and tier_models is None:
         raise CodeHelperError(

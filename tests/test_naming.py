@@ -16,8 +16,10 @@ import pytest
 from code_helper.errors import CodeHelperError
 from code_helper.services.naming import (
     MAX_ALIAS_LENGTH,
+    MAX_BASE_URL_LENGTH,
     RESERVED_ALIASES,
     validate_alias,
+    validate_base_url,
 )
 from code_helper.services.paths import Paths
 
@@ -143,3 +145,84 @@ def test_script_for_still_does_no_io(tmp_path):
     paths = Paths.from_home(tmp_path)
     paths.script_for("glm")
     assert not paths.bin_dir.exists()
+
+
+# --- validate_base_url ------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:4000/v1",
+        "https://litellm.example.com/v1",
+        "http://127.0.0.1:4000",
+        "https://api.example.com:8443/v1/",
+    ],
+)
+def test_valid_base_urls_pass(url):
+    validate_base_url(url)  # must not raise
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("url", ["", "   "])
+def test_empty_base_url_rejected(url):
+    with pytest.raises(CodeHelperError, match="empty"):
+        validate_base_url(url)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "url",
+    ["ftp://host", "localhost:4000", "host.example.com", "ws://host/v1"],
+)
+def test_base_url_without_http_scheme_rejected(url):
+    with pytest.raises(CodeHelperError, match=r"http:// or https://"):
+        validate_base_url(url)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("url", ["http://", "https://"])
+def test_base_url_without_a_host_rejected(url):
+    with pytest.raises(CodeHelperError, match="no host"):
+        validate_base_url(url)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "url", ["http://host/v1?x=1", "http://host/v1#frag", "http://host?x=1#f"]
+)
+def test_base_url_with_query_or_fragment_rejected(url):
+    with pytest.raises(CodeHelperError, match="query string or fragment"):
+        validate_base_url(url)
+
+
+@pytest.mark.unit
+def test_base_url_with_embedded_whitespace_rejected():
+    with pytest.raises(CodeHelperError, match="whitespace"):
+        validate_base_url("http://host with space/v1")
+
+
+@pytest.mark.unit
+def test_too_long_base_url_rejected():
+    url = "http://" + "x" * MAX_BASE_URL_LENGTH
+    with pytest.raises(CodeHelperError, match="too long"):
+        validate_base_url(url)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "url", ["http://[bad", "http://[bad]", "http://[::1", "http://["]
+)
+def test_malformed_ipv6_bracket_url_raises_codehelpererror_not_valueerror(url):
+    """urlsplit raises a bare ValueError (not CodeHelperError) for an
+    unterminated/invalid IPv6-bracket host (cycle-review round 3, finding
+    C2). Every caller of validate_base_url — with_base_url, and
+    transitively spec_from_installed's base_url recovery — expects
+    CodeHelperError as the only failure mode; an uncaught ValueError here
+    escaped spec_from_installed's `except CodeHelperError` and broke its
+    documented never-raises contract for a recovered value from a
+    hand-edited/truncated wrapper.
+    """
+    with pytest.raises(CodeHelperError, match="malformed"):
+        validate_base_url(url)

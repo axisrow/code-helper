@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from code_helper.errors import CodeHelperError
-from code_helper.services.model import ConfigShape
+from code_helper.services.model import ConfigShape, Provider
 from code_helper.services.spec import WrapperSpec
 
 __all__ = [
@@ -36,6 +36,7 @@ __all__ = [
     "openai_toml_body",
     "openai_catalog_body",
     "openai_base_url",
+    "openai_env_key",
     "toml_string",
     "MARKER_PREFIX",
     "CATALOG_MANAGED_BY_KEY",
@@ -124,20 +125,42 @@ def _render_openai_toml(spec: WrapperSpec, token: str) -> str:
 
     The model, base URL, and wire protocol live in a sibling TOML profile
     (``openai_toml_body``) plus a model catalog (``openai_catalog_body``),
-    both written alongside this script by ``install_wrapper``. The wrapper
-    itself is just the dispatch line, so ``token`` is unused: ollama is
-    ``literal``-auth and the daemon takes care of authentication itself.
+    both written alongside this script by ``install_wrapper``.
+
+    For a non-secret provider (``ollama``, ``literal``-auth) ``token`` is
+    unused and the wrapper is just the dispatch line — the daemon
+    authenticates itself. For a SECRET provider (:func:`openai_env_key`
+    non-empty), one ``export`` line precedes ``exec``: Codex has no
+    ``OPENAI_BASE_URL``-style env config, but a TOML profile CAN name an
+    ``env_key`` to read its token from, and this is the writer of that
+    variable — the matching ``env_key`` line lives in ``openai_toml_body``.
+    ``export`` + ``exec`` rather than ``exec env {key}=... codex ...``: the
+    latter would replace the process image with ``env`` (breaking ``$0``) and
+    add a dependency on ``env`` being on ``PATH`` for no benefit — no
+    subshell is needed either, since ``exec`` is the last line and nothing
+    after it could see the leaked variable.
+
+    Conditional on purpose: for a non-secret provider this must render
+    BYTE-IDENTICAL to before the env_key/export mechanism existed, or every
+    already-installed ``codex × ollama`` wrapper stops matching the ownership
+    guard's byte comparison and gets rewritten on the next ``add``.
 
     ``agent.binary`` is interpolated bare (registry constant, constrained at
     import time); ``spec.alias`` is user-chosen, so it is single-quoted — the
-    same structural-vs-quoted split as the launch renderer's ``--model``.
+    same structural-vs-quoted split as the launch renderer's ``--model``. The
+    exported token goes through the same single-quoting.
+
+    Note the exported variable is visible to ``codex`` and every child
+    process it spawns (including MCP servers it launches) — that is the
+    mechanism by which ``codex`` receives the credential, not an oversight.
     """
     q = _shell_single_quote
-    return (
-        "#!/bin/bash\n"
-        f"{_marker(spec)}\n"
-        f'exec {spec.agent.binary} --profile {q(spec.alias)} "$@"\n'
-    )
+    lines = ["#!/bin/bash", _marker(spec)]
+    env_key = openai_env_key(spec.provider)
+    if env_key:
+        lines.append(f"export {env_key}={q(token)}")
+    lines.append(f'exec {spec.agent.binary} --profile {q(spec.alias)} "$@"')
+    return "\n".join(lines) + "\n"
 
 
 #: ``model_catalog_json`` floors for models the catalog describes. No axis
@@ -166,6 +189,31 @@ def openai_base_url(provider_base_url: str) -> str:
     if root.endswith("/v1"):
         return root + "/"
     return root + "/v1/"
+
+
+def openai_env_key(provider: Provider) -> str:
+    """The env var name a secret ``provider`` carries its token under, or ``""``.
+
+    ``""`` for anything but ``auth == "secret"`` — the two writers below
+    (:func:`openai_toml_body`'s ``env_key`` line, ``_render_openai_toml``'s
+    ``export``) both branch on this return value being non-empty, so a
+    non-secret provider (``ollama``, ``literal``-auth) gets neither: the
+    OPENAI_TOML wrapper's output for it must stay byte-identical to before
+    this function existed, or every previously-installed ``codex × ollama``
+    wrapper stops matching the ownership guard's byte comparison.
+
+    One function so both writers agree on the name — the same reasoning that
+    makes :func:`openai_base_url`/:func:`toml_string` public and shared with
+    ``codex_default.py`` rather than each writer deriving its own value.
+
+    ``provider.token_env_var`` is validated at import time
+    (``model._validate_provider``) to match ``[A-Z][A-Z0-9_]*`` precisely
+    because this value is interpolated into the wrapper UNQUOTED, left of
+    ``=`` in ``export {key}=...`` — shell syntax has no quoting form there.
+    """
+    if provider.auth != "secret":
+        return ""
+    return provider.token_env_var
 
 
 def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
@@ -203,21 +251,33 @@ def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
     what lets the ownership guard recognise this as ours. Every quoted value
     goes through :func:`toml_string`; the table key is the only bare
     interpolation, safe by the import-time check.
+
+    A secret provider (:func:`openai_env_key` non-empty) gets one more line,
+    ``env_key``, LAST in the table — Codex reads the named env var for its
+    Authorization header, and the matching ``export`` is written by
+    ``_render_openai_toml`` in the sibling wrapper script. Conditional and
+    appended last so a non-secret provider's output (``ollama``) is byte-
+    identical to before this field existed — required for the ownership
+    guard's byte comparison on already-installed wrappers to keep matching.
     """
     table = spec.provider.name
     display_name = spec.provider.description or spec.provider.name
     base_url = openai_base_url(spec.provider.base_url)
-    return (
-        f"{_marker(spec)}\n"
-        f'model = "{toml_string(spec.model)}"\n'
-        f'model_provider = "{toml_string(table)}"\n'
-        f'model_catalog_json = "{toml_string(catalog_path)}"\n'
-        "\n"
-        f"[model_providers.{table}]\n"
-        f'name = "{toml_string(display_name)}"\n'
-        f'base_url = "{toml_string(base_url)}"\n'
-        f'wire_api = "{toml_string(spec.provider.wire_api)}"\n'
-    )
+    lines = [
+        f"{_marker(spec)}\n",
+        f'model = "{toml_string(spec.model)}"\n',
+        f'model_provider = "{toml_string(table)}"\n',
+        f'model_catalog_json = "{toml_string(catalog_path)}"\n',
+        "\n",
+        f"[model_providers.{table}]\n",
+        f'name = "{toml_string(display_name)}"\n',
+        f'base_url = "{toml_string(base_url)}"\n',
+        f'wire_api = "{toml_string(spec.provider.wire_api)}"\n',
+    ]
+    env_key = openai_env_key(spec.provider)
+    if env_key:
+        lines.append(f'env_key = "{toml_string(env_key)}"\n')
+    return "".join(lines)
 
 
 #: Top-level marker key in the catalog JSON — the JSON equivalent of
