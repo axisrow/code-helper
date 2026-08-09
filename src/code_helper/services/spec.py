@@ -175,7 +175,10 @@ def build_spec(
     # independent of whether any particular CLI/TUI entry point has grown a
     # --base-url flag yet — build_spec must never produce a spec for a
     # REQUIRED provider with no address, no matter how it was reached.
-    if provider_obj.base_url_policy is BaseUrlPolicy.REQUIRED and not provider_obj.base_url:
+    if (
+        provider_obj.base_url_policy is BaseUrlPolicy.REQUIRED
+        and not provider_obj.base_url
+    ):
         raise CodeHelperError(
             f"provider {provider_obj.name!r} requires a base URL — supply one "
             f"via model.with_base_url(provider, url) before build_spec"

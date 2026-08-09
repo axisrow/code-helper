@@ -501,7 +501,9 @@ def _toml_profile_data(paths: Paths, alias: str) -> dict | None:
                 table_body_start + next_header.start() if next_header else len(profile)
             )
             base_url_found = re.search(
-                r'^base_url = "(.*)"$', profile[table_body_start:table_body_end], re.MULTILINE
+                r'^base_url = "(.*)"$',
+                profile[table_body_start:table_body_end],
+                re.MULTILINE,
             )
         return {
             "model": _toml_unescape(model_found.group(1)) if model_found else None,

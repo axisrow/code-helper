@@ -211,7 +211,9 @@ def test_too_long_base_url_rejected():
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("url", ["http://[bad", "http://[bad]", "http://[::1", "http://["])
+@pytest.mark.parametrize(
+    "url", ["http://[bad", "http://[bad]", "http://[::1", "http://["]
+)
 def test_malformed_ipv6_bracket_url_raises_codehelpererror_not_valueerror(url):
     """urlsplit raises a bare ValueError (not CodeHelperError) for an
     unterminated/invalid IPv6-bracket host (cycle-review round 3, finding

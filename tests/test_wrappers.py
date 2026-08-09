@@ -1560,7 +1560,9 @@ def test_validate_registries_rejects_openai_toml_provider_without_wire_api():
 
 
 @pytest.mark.unit
-def test_toml_profile_data_fallback_scopes_base_url_to_its_own_table(monkeypatch, tmp_path):
+def test_toml_profile_data_fallback_scopes_base_url_to_its_own_table(
+    monkeypatch, tmp_path
+):
     """The sub-3.11 fallback regex path must not attribute a sibling table's
     base_url to the matched table (F1 from PR #12's cycle-review round 1).
 
