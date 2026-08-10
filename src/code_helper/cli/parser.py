@@ -84,7 +84,22 @@ def _handle_list(args: argparse.Namespace) -> int:
     if what != "wrappers":
         return _handle_list_axes(what)
 
-    list_wrappers(Paths.default())
+    # CLI visibility for the TUI's active-profile pre-selection (issue #23): a
+    # one-line header naming the active provider/profile, when one is set and
+    # still valid. Kept in the parser (not wrappers.describe_all, which three
+    # call sites share) because this is CLI presentation, not a wrapper row.
+    from code_helper.services.secrets import valid_active_profile
+    from code_helper.services.state import active_selection
+
+    paths = Paths.default()
+    selection = active_selection(paths)
+    if selection is not None:
+        provider, _ = selection
+        profile = valid_active_profile(paths, provider)
+        if profile:
+            print(f"Active profile: {provider}/{profile}")
+
+    list_wrappers(paths)
     return 0
 
 
@@ -161,6 +176,7 @@ def _handle_add(args: argparse.Namespace) -> int:
         get_agent,
         get_provider,
         resolve_shape,
+        with_auth,
         with_base_url,
     )
     from code_helper.services.models_api import list_models
@@ -176,6 +192,7 @@ def _handle_add(args: argparse.Namespace) -> int:
         rename_profile,
         resolve_token,
         token_for_discovery,
+        valid_active_profile,
     )
     from code_helper.services.spec import (
         build_spec,
@@ -196,11 +213,25 @@ def _handle_add(args: argparse.Namespace) -> int:
     model = getattr(args, "model", None)
     alias = getattr(args, "alias", None)
     base_url = getattr(args, "base_url", None)
+    auth = getattr(args, "auth", None)
     profile_name = getattr(args, "profile", None)
     profile_token = getattr(args, "profile_token", None)
     profile_rename_from = getattr(args, "profile_rename_from", None)
     profile_rename_to = getattr(args, "profile_rename_to", None)
     using_axes = agent_name is not None or provider_name is not None
+
+    # Issue #23: an explicit --profile always wins; otherwise the CLI picks up
+    # the TUI's stored active profile for this provider as a default, if it
+    # still exists (valid_active_profile cross-checks against profile_names).
+    # The implicit injection applies ONLY to the provider's own default
+    # endpoint: a caller-supplied --base-url names a host the stored active
+    # profile was never authorized for, so the caller must opt in explicitly
+    # with --profile (or an env token) there — never a silent persisted
+    # pointer. The constructor branch knows the provider immediately; the
+    # preset branch (no custom base-url possible) falls back right after
+    # get_preset, below.
+    if profile_name is None and provider_name and base_url is None:
+        profile_name = valid_active_profile(paths, provider_name)
 
     if using_axes and name:
         raise CodeHelperError(
@@ -215,6 +246,12 @@ def _handle_add(args: argparse.Namespace) -> int:
             "(--agent/--provider) — a preset carries its own provider"
         )
 
+    if not using_axes and auth:
+        raise CodeHelperError(
+            "--auth applies to the constructor form only "
+            "(--agent/--provider) — a preset carries its own provider"
+        )
+
     if using_axes:
         if not agent_name or not provider_name:
             raise CodeHelperError("--agent and --provider must be given together")
@@ -223,8 +260,10 @@ def _handle_add(args: argparse.Namespace) -> int:
         # (list_models below, resolve_shape/build_spec, the eventual
         # renderer) reads it off this provider object, so subbing it in here
         # — before --list-models, before build_spec — is enough for all of
-        # them to see the right value.
+        # them to see the right value. with_auth is the matching substitution
+        # for auth (--auth secret), same reasoning, same call order.
         provider = with_base_url(get_provider(provider_name), base_url)
+        provider = with_auth(provider, want_secret=auth == "secret")
 
         if getattr(args, "list_models", False):
             result = list_models(
@@ -274,6 +313,12 @@ def _handle_add(args: argparse.Namespace) -> int:
                 f"try: code-helper add --agent {name} --provider ollama "
                 f"--model <model>"
             ) from None
+        # Issue #23 preset-branch fallback (the constructor branch handled the
+        # axes case above): pick up the stored active profile for the preset's
+        # own provider when --profile is absent, before profile_name feeds
+        # spec_from_preset / suggest_alias.
+        if profile_name is None:
+            profile_name = valid_active_profile(paths, preset.provider)
         spec = spec_from_preset(
             preset,
             model_override=model,
@@ -743,6 +788,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="backend URL for a provider with no address in the registry "
         "(e.g. litellm: http://localhost:4000/v1); constructor form only",
+    )
+    p_add.add_argument(
+        "--auth",
+        default=None,
+        choices=["secret"],
+        help="override a provider's default auth mode to a secret token "
+        "(e.g. ollama behind a reverse proxy or Ollama Cloud); only for "
+        "providers that declare it overridable; constructor form only",
     )
     p_add.add_argument(
         "--profile",

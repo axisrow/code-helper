@@ -217,6 +217,14 @@ def test_ctrl_c_is_a_distinct_hard_cancel():
 
 
 @pytest.mark.unit
+def test_tab_is_a_distinct_key():
+    # The Tab key is its own key name (issue #23 — profile switching from the
+    # TUI main menu). Like HARD_CANCEL it must stay distinct from the escape
+    # sequence bytes; select_from_menu ignores it unless on_tab is given.
+    assert _translate("\t", _fake_read_more([])) == "TAB"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("key", ["k", "K"])
 def test_vim_up(key):
     assert _translate(key, _fake_read_more([])) == "UP"

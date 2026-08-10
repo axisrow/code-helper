@@ -110,7 +110,9 @@ def _translate(
     soft "go back" cancel), ``"HARD_CANCEL"`` (Ctrl-C — raw ``\\x03``; in raw
     terminal mode ``ISIG`` is off, so this never raises ``KeyboardInterrupt``
     on its own and MUST be handled as a distinct key, not folded into
-    ``CANCEL``), ``"DIGIT_1"``..``"DIGIT_9"``, ``"OTHER"``.
+    ``CANCEL``), ``"TAB"`` (the Tab key — a caller-side hook key, see
+    :func:`select_from_menu`'s ``on_tab``; without one it is ignored just like
+    ``"OTHER"``), ``"DIGIT_1"``..``"DIGIT_9"``, ``"OTHER"``.
     """
     if first == "\x1b":
         nxt = read_more(_ESC_TIMEOUT)
@@ -153,6 +155,8 @@ def _translate(
         return "ENTER"
     if first == "\x03":
         return "HARD_CANCEL"
+    if first == "\t":
+        return "TAB"
     if first in ("q", "Q"):
         return "CANCEL"
     if first in ("k", "K"):
@@ -271,8 +275,9 @@ def _fit(line: str, width: int) -> str:
 def select_from_menu(
     items: Sequence[str | tuple[str, str]],
     *,
-    prompt: str = "select:",
-    hint: str | None = None,
+    prompt: str | Callable[[], str] = "select:",
+    hint: str | None | Callable[[], str] = None,
+    on_tab: Callable[[], None] | None = None,
     unnumbered: frozenset[str] = frozenset(),
     read_key: Callable[[], str] = _read_key_raw,
     print_fn: Callable[[str], None] = print,
@@ -288,10 +293,22 @@ def select_from_menu(
             show a human description without control flow depending on
             display text (formerly a ``str.startswith`` on the rendered
             label — see ``cli/tui.py`` history).
-        prompt: Heading line printed above the list.
+        prompt: Heading line printed above the list. May be a callable
+            evaluated FRESH each frame — a menu whose header must reflect state
+            an ``on_tab`` handler mutated (e.g. the active profile) can pass
+            ``lambda: _header()`` and the header tracks the change. A callable
+            must return a single logical line with no ``\\n`` — the frame's line
+            count must not depend on it (see ``frame_lines`` below).
         hint: Optional key-hint line printed BELOW the list (e.g. "↑/↓ ·
             Enter · Esc back"). Adds two lines to the erasable frame — see
-            ``frame_lines`` below.
+            ``frame_lines`` below. May be a callable; it is evaluated ONCE when
+            the menu starts (before ``frame_lines`` is computed), not per frame.
+        on_tab: Optional handler invoked on a ``"TAB"`` keypress, after which
+            the menu simply redraws. The handler mutates external state; the
+            frame is NOT rebuilt from it (only a callable ``prompt`` re-evaluates
+            per frame). Without ``on_tab``, Tab is silently ignored — the key
+            resolves to ``"TAB"`` but the loop treats it like ``"OTHER"``, so it
+            never starts doing anything in a menu that did not opt in.
         unnumbered: Values that should NOT get a digit shortcut (e.g. a
             trailing "← назад"/"quit" entry). Digits are assigned by the
             menu itself — the same place that handles ``DIGIT_<n>`` below —
@@ -351,8 +368,11 @@ def select_from_menu(
     # has to know about them — get it wrong and the in-place redraw erases
     # the wrong number of rows and the menu creeps down the screen. Off a
     # TTY there is no redraw to protect and the legacy single-leading-blank
-    # layout is kept as-is.
-    frame_lines = len(pairs) + 2 + (2 if hint else 0)
+    # layout is kept as-is. A callable hint is resolved ONCE here — before the
+    # frame line count is computed — so the count cannot depend on what the
+    # callable would return later; the TUI's hint is static per menu anyway.
+    hint_text = hint() if callable(hint) else hint
+    frame_lines = len(pairs) + 2 + (2 if hint_text else 0)
     clear_seq = f"\033[{frame_lines}A\033[J"
     clear_screen = "\033[2J\033[H"
     hide_cursor = "\033[?25l"
@@ -365,8 +385,11 @@ def select_from_menu(
             # `_fit` only ever wraps the VISIBLE text (`prompt`, a row's
             # label, `hint`) — never a string with ANSI escapes or an
             # embedded newline spliced in, since `_fit` counts `len()` as
-            # columns and either would throw that count off.
-            heading = _fit(prompt, width) if redraw else prompt
+            # columns and either would throw that count off. A callable
+            # `prompt` is evaluated FRESH here, each frame, so a header that
+            # reflects state an `on_tab` handler mutated stays current.
+            prompt_text = prompt() if callable(prompt) else prompt
+            heading = _fit(prompt_text, width) if redraw else prompt_text
             if redraw:
                 # After the first frame, always erase-and-redraw in place;
                 # only the very first frame considers `clear` (a full-screen
@@ -380,13 +403,15 @@ def select_from_menu(
                 digit = str(digit_of[value]) if value in digit_of else "·"
                 row = f"{digit} {marker} {label}"
                 print_fn(f" {_fit(row, width - 1) if redraw else row}")
-            if hint:
-                fitted_hint = _fit(hint, width) if redraw else hint
+            if hint_text:
+                fitted_hint = _fit(hint_text, width) if redraw else hint_text
                 print_fn(f"\n {fitted_hint}" if redraw else f" {fitted_hint}")
             first = False
 
             key = read_key()
-            if key == "UP":
+            if key == "TAB" and on_tab is not None:
+                on_tab()
+            elif key == "UP":
                 index = (index - 1) % len(pairs)
             elif key == "DOWN":
                 index = (index + 1) % len(pairs)

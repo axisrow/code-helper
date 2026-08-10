@@ -57,6 +57,7 @@ __all__ = [
     "seed_default_profile",
     "rename_profile",
     "credential_for",
+    "valid_active_profile",
     "save_credential",
     "invalidate_cached_credential",
     "cache_freshly_typed_token",
@@ -135,6 +136,32 @@ def profile_names(paths: Paths, provider_name: str) -> tuple[str, ...]:
     """Return the provider's profiles in stable display order."""
     names = set(load_credentials(paths).get(provider_name, {}))
     return tuple(sorted(names, key=lambda name: (name != DEFAULT_PROFILE, name)))
+
+
+def valid_active_profile(paths: Paths, provider_name: str) -> str | None:
+    """The stored active profile for ``provider_name`` if it still exists.
+
+    Cross-checks ``state.active_selection`` against the live
+    ``profile_names``: a saved profile can go stale (renamed via
+    :func:`rename_profile` or dropped via
+    :func:`invalidate_cached_credential`), and every reader must fall back to
+    ``None`` on a miss rather than let a pre-selection install a wrapper under
+    a nonexistent profile. Also returns ``None`` when the active selection's
+    provider is not ``provider_name`` — the store now holds a single
+    (provider, profile) pointer (issue #23 follow-up), not one slot per
+    provider, so a profile only "belongs" to the provider it was last
+    selected for. Lives here (not in ``state.py``) because it needs
+    ``profile_names``, and ``state.py`` must not depend on this module.
+    """
+    from code_helper.services.state import active_selection
+
+    selection = active_selection(paths)
+    if selection is None:
+        return None
+    active_provider_name, name = selection
+    if active_provider_name != provider_name:
+        return None
+    return name if name in profile_names(paths, provider_name) else None
 
 
 def seed_default_profile(paths: Paths, provider_name: str, token: str) -> bool:
