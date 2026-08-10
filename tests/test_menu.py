@@ -467,3 +467,82 @@ def test_select_from_menu_digit_still_selects_correct_item_with_unnumbered_entry
         print_fn=lambda _: None,
     )
     assert result == "c"
+
+
+# --- on_tab / callable prompt & hint (issue #23) ---------------------------
+
+
+@pytest.mark.unit
+def test_select_from_menu_tab_ignored_without_on_tab():
+    # Without on_tab, Tab must stay silently ignored (like OTHER) — it must
+    # not start doing something in every other menu in the app.
+    result = select_from_menu(
+        ["a", "b"],
+        read_key=_fake_keys(["TAB", "DOWN", "ENTER"]),
+        print_fn=lambda _: None,
+    )
+    assert result == "b"
+
+
+@pytest.mark.unit
+def test_select_from_menu_on_tab_invoked_and_frame_redraws(monkeypatch):
+    calls = []
+    fake = _FakeTTY()
+    monkeypatch.setattr(sys, "stdout", fake)
+
+    def on_tab():
+        calls.append("tab")
+
+    select_from_menu(["a", "b"], read_key=_fake_keys(["TAB", "ENTER"]), on_tab=on_tab)
+    joined = "".join(fake.writes)
+    assert calls == ["tab"]
+    # The Tab handler ran and the menu redrew in place (clear-to-end escape).
+    assert "\x1b[J" in joined
+
+
+@pytest.mark.unit
+def test_select_from_menu_callable_prompt_is_re_evaluated_each_frame():
+    renderings = []
+
+    def prompt():
+        renderings.append("frame")
+        return "header"
+
+    select_from_menu(
+        ["a", "b"],
+        prompt=prompt,
+        read_key=_fake_keys(["DOWN", "ENTER"]),
+        print_fn=lambda _: None,
+    )
+    # Invoked once per frame (initial render + the DOWN redraw), not bound
+    # once before the loop — that freshness is what lets a header track an
+    # on_tab mutation.
+    assert len(renderings) == 2
+
+
+@pytest.mark.unit
+def test_select_from_menu_callable_hint_is_rendered():
+    lines = []
+    select_from_menu(
+        ["a", "b"],
+        hint=lambda: "custom hint",
+        read_key=_fake_keys(["ENTER"]),
+        print_fn=lines.append,
+    )
+    assert any("custom hint" in line for line in lines)
+
+
+@pytest.mark.unit
+def test_select_from_menu_callable_hint_keeps_frame_lines_stable(monkeypatch):
+    # A callable hint resolves once, BEFORE frame_lines, so the redraw count
+    # matches a plain-string hint (2 items + heading + spacer + hint = 6).
+    joined = _run_menu(monkeypatch, ["DOWN", "ENTER"], hint=lambda: "↑/↓")
+    assert "\x1b[6A" in joined
+
+
+@pytest.mark.unit
+def test_select_from_menu_callable_hint_none_adds_no_frame_lines(monkeypatch):
+    # A callable hint returning None/empty must not silently add two lines to
+    # the erasable frame (a count drift that creeps the menu down the screen).
+    joined = _run_menu(monkeypatch, ["DOWN", "ENTER"], hint=lambda: None)
+    assert "\x1b[4A" in joined  # 2 items + heading spacer = 4, no hint lines

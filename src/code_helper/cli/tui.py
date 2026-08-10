@@ -12,13 +12,14 @@ leaves the TUI from any depth.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 __all__ = ["run_tui"]
 
 _LIST = "list"
 _ADD = "add"
 _SETTINGS = "settings"
+_PROFILE = "profile"
 _QUIT = "quit"
 _BACK = "__back__"
 _NEW_PROFILE = "__new_profile__"
@@ -29,13 +30,16 @@ _REPLACE_TOKEN = "__replace_token__"
 ProfileChoice = tuple[str, str | None, str | None, str | None]
 
 
-def _hint(numbered_count: int, *, exit_word: str) -> str:
+def _hint(numbered_count: int, *, exit_word: str, tab: bool = False) -> str:
     """Return the uniform navigation hint for a menu."""
     from code_helper.cli.menu import MAX_DIGIT_ITEMS
 
     usable = min(numbered_count, MAX_DIGIT_ITEMS)
     digits = "1" if usable == 1 else f"1-{usable}"
-    return f"Up/Down · {digits} · Enter select · Esc {exit_word} · Ctrl-C quit"
+    hint = f"Up/Down · {digits} · Enter select · Esc {exit_word} · Ctrl-C quit"
+    if tab:
+        hint += " · Tab profile"
+    return hint
 
 
 def run_tui(args: argparse.Namespace) -> int:
@@ -57,8 +61,15 @@ def run_tui(args: argparse.Namespace) -> int:
         profile_names,
         seed_default_profile,
         token_for_discovery,
+        valid_active_profile,
     )
     from code_helper.services.spec import suggest_alias
+    from code_helper.services.state import (
+        active_profile,
+        active_provider,
+        set_active_profile,
+        set_active_provider,
+    )
     from code_helper.services.wrappers import (
         WRAPPERS,
         describe_all,
@@ -69,14 +80,19 @@ def run_tui(args: argparse.Namespace) -> int:
     )
 
     def _pick(
-        items: Sequence[tuple[str, str]], prompt: str, *, exit_word: str = "back"
+        items: Sequence[tuple[str, str]],
+        prompt: str | Callable[[], str],
+        *,
+        exit_word: str = "back",
+        on_tab: Callable[[], None] | None = None,
     ) -> str:
         numbered = sum(1 for value, _ in items if value not in (_BACK, _QUIT))
         try:
             return select_from_menu(
                 items,
                 prompt=prompt,
-                hint=_hint(numbered, exit_word=exit_word),
+                hint=_hint(numbered, exit_word=exit_word, tab=on_tab is not None),
+                on_tab=on_tab,
                 unnumbered=frozenset({_BACK, _QUIT}),
                 clear=True,
             )
@@ -181,9 +197,19 @@ def run_tui(args: argparse.Namespace) -> int:
             if not names:
                 return _new_profile(names, provider_name)
 
-            items = [
-                (name, "default" if name == DEFAULT_PROFILE else name) for name in names
-            ]
+            # The stored active profile is the pre-selection: put it FIRST with
+            # a marker so the cursor (index 0) lands on it and Enter accepts it,
+            # while arrows/digits can still pick another — a default, not a trap.
+            # A stale/missing profile yields None and the normal order stands.
+            active = valid_active_profile(Paths.default(), provider_name)
+            items: list[tuple[str, str]] = []
+            for name in names:
+                label = "default" if name == DEFAULT_PROFILE else name
+                if name == active:
+                    label = f"{label} (active)"
+                    items.insert(0, (name, label))
+                else:
+                    items.append((name, label))
             items.extend(((_NEW_PROFILE, "Add profile"), (_BACK, "Back")))
             selected = _pick(items, f"Token profile for {provider_name}:")
             if selected == _BACK:
@@ -384,17 +410,74 @@ def run_tui(args: argparse.Namespace) -> int:
                 return
             args.debug = not debug
 
+    def _run_profile_screen() -> None:
+        """Choose the active provider and its active profile (the Tab cycle)."""
+        paths = Paths.default()
+        provider_items = [
+            (p.name, f"{p.name} — {p.description}")
+            for p in PROVIDERS
+            if p.auth == "secret"
+        ]
+        provider = _pick([*provider_items, (_BACK, "Back")], "Active profile provider:")
+        if provider == _BACK:
+            return
+        names = list(profile_names(paths, provider))
+        if not names:
+            print(f"No profiles for {provider}.")
+            return
+        current = valid_active_profile(paths, provider)
+        items = [
+            (
+                name,
+                f"{'default' if name == DEFAULT_PROFILE else name}"
+                f"{' (active)' if name == current else ''}",
+            )
+            for name in names
+        ]
+        items.extend([(_BACK, "Back")])
+        choice = _pick(items, f"Active profile for {provider}:")
+        if choice == _BACK:
+            return
+        set_active_provider(paths, provider)
+        set_active_profile(paths, provider, choice)
+
+    def _main_prompt() -> str:
+        """Live main-menu header, showing the active provider/profile."""
+        paths = Paths.default()
+        provider = active_provider(paths)
+        if not provider:
+            return "code-helper"
+        profile = valid_active_profile(paths, provider)
+        if profile:
+            return f"code-helper — {provider}/{profile}"
+        return f"code-helper — {provider}"
+
+    def _on_tab() -> None:
+        """Cycle the active profile of the current provider on Tab."""
+        paths = Paths.default()
+        provider = active_provider(paths)
+        if not provider:
+            return
+        names = list(profile_names(paths, provider))
+        if not names:
+            return
+        current = active_profile(paths, provider)
+        idx = names.index(current) if current in names else -1
+        set_active_profile(paths, provider, names[(idx + 1) % len(names)])
+
     try:
         while True:
             choice = _pick(
                 [
                     (_LIST, "List"),
                     (_ADD, "Add"),
+                    (_PROFILE, "Profile"),
                     (_SETTINGS, "Settings"),
                     (_QUIT, "Quit"),
                 ],
-                "code-helper",
+                _main_prompt,
                 exit_word="quit",
+                on_tab=_on_tab,
             )
             if choice in (_BACK, _QUIT):
                 return 0
@@ -402,6 +485,8 @@ def run_tui(args: argparse.Namespace) -> int:
                 _run_list()
             elif choice == _ADD:
                 _run_add()
+            elif choice == _PROFILE:
+                _run_profile_screen()
             else:
                 _run_settings()
     except MenuCancelled as exc:

@@ -205,3 +205,18 @@ class Paths:
         the next ``add``/``--list-models`` will prompt for the token again.
         """
         return self.config_dir / "credentials.json"
+
+    def state_file(self) -> Path:
+        """``~/.config/code-helper/state.json`` — the active-profile pre-selection.
+
+        A small JSON object holding UI pre-selection state — currently the
+        active token profile per provider and the active provider — that must
+        survive across ``code-helper`` runs. Deliberately separate from
+        ``credentials.json``: that file's schema cannot grow without a versioned
+        migration (``load_credentials`` treats every top-level key as a provider
+        name — see issue #19), while ``state.json`` uses named top-level keys
+        from the start. Owned and written only by ``services/state.py``; holds no
+        secrets. Pure arithmetic, no IO, no existence check — same contract as
+        every other accessor here.
+        """
+        return self.config_dir / "state.json"

@@ -1158,3 +1158,121 @@ def test_edit_token_caches_even_on_a_byte_identical_noop(tmp_path, monkeypatch):
     monkeypatch.setattr("getpass.getpass", lambda _p="": "sk-same")
     assert main(["edit-token", "glm"]) == 0  # no-op: same token, byte-identical
     assert secrets.credential_for(paths, "zai") == "sk-same"
+
+
+# --------------------------------------------------------------------------- #
+# Issue #23: CLI parity — the active profile is picked up by `add`/shown by `list`
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_add_without_profile_picks_up_the_active_profile(tmp_path, monkeypatch):
+    """CLI ``add`` without ``--profile`` falls back to the stored active profile.
+
+    An explicit ``--profile`` always wins (see the next test); without one, the
+    TUI's pre-selection is the default — same deliberate named-profile trust as
+    ``--profile`` itself (issue #19). Proved by patching getpass to explode: if
+    the active profile's cached token were NOT reused, ``add`` would have to
+    prompt and the test would fail.
+    """
+    import code_helper.services.secrets as secrets
+    from code_helper.services.state import set_active_profile
+
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "litellm", "sk-active-work", "work")
+    set_active_profile(paths, "litellm", "work")
+
+    def _explode(_prompt):  # pragma: no cover - must not run
+        raise AssertionError("must not prompt when the active profile has a token")
+
+    monkeypatch.setattr("code_helper.services.secrets.getpass.getpass", _explode)
+
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://host:4000/v1",
+            "--model",
+            "gpt-4o",
+            "--alias",
+            "lite-active",
+        ]
+    )
+    assert code == 0
+    assert "export ANTHROPIC_AUTH_TOKEN='sk-active-work'" in _body(
+        tmp_path, "lite-active"
+    )
+
+
+@pytest.mark.integration
+def test_add_explicit_profile_wins_over_the_active_profile(tmp_path, monkeypatch):
+    """An explicit ``--profile`` overrides the stored active profile (unconditional).
+
+    The active profile is invisible state; the flag must always win over it.
+    """
+    import code_helper.services.secrets as secrets
+    from code_helper.services.state import set_active_profile
+
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "litellm", "sk-active-work", "work")
+    secrets.save_credential(paths, "litellm", "sk-explicit-personal", "personal")
+    set_active_profile(paths, "litellm", "work")
+
+    def _explode(_prompt):  # pragma: no cover - must not run
+        raise AssertionError("must not prompt when the explicit profile has a token")
+
+    monkeypatch.setattr("code_helper.services.secrets.getpass.getpass", _explode)
+
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://host:4000/v1",
+            "--model",
+            "gpt-4o",
+            "--alias",
+            "lite-explicit",
+            "--profile",
+            "personal",
+        ]
+    )
+    assert code == 0
+    # The explicit --profile personal won, not the active "work".
+    assert "export ANTHROPIC_AUTH_TOKEN='sk-explicit-personal'" in _body(
+        tmp_path, "lite-explicit"
+    )
+
+
+@pytest.mark.integration
+def test_list_shows_the_active_profile_header(tmp_path, capsys):
+    """``list`` surfaces the stored active profile as a one-line header.
+
+    A user coming from the TUI can see, from the CLI, which profile is active
+    without re-entering the menu.
+    """
+    import code_helper.services.secrets as secrets
+    from code_helper.services.state import set_active_profile, set_active_provider
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "litellm", "sk-work", "work")
+    set_active_provider(paths, "litellm")
+    set_active_profile(paths, "litellm", "work")
+
+    assert main(["list"]) == 0
+    assert "Active profile: litellm/work" in capsys.readouterr().out
+
+
+@pytest.mark.integration
+def test_list_omits_the_active_profile_header_when_unset(tmp_path, capsys):
+    assert main(["list"]) == 0
+    assert "Active profile:" not in capsys.readouterr().out

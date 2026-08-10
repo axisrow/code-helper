@@ -57,7 +57,8 @@ def test_add_order_is_provider_model_agent_alias(monkeypatch):
     answers = iter(["add", "ollama", "model-x", "codex", "quit"])
 
     def _select(_items, *, prompt, **_kwargs):
-        seen.append(prompt)
+        # The main-menu header is a callable (live active-profile display).
+        seen.append(prompt() if callable(prompt) else prompt)
         return next(answers)
 
     import code_helper.services.models_api as api
@@ -86,7 +87,8 @@ def test_literal_provider_skips_profile_screen(monkeypatch):
     answers = iter(["add", "ollama", "model-x", "claude", "quit"])
 
     def _select(_items, *, prompt, **_kwargs):
-        seen.append(prompt)
+        # The main-menu header is a callable (live active-profile display).
+        seen.append(prompt() if callable(prompt) else prompt)
         return next(answers)
 
     import code_helper.services.models_api as api
@@ -365,3 +367,138 @@ def test_provider_first_flow_through_a_real_pty(tmp_path):
         child.wait(timeout=2)
         os.close(master_fd)
         os.close(slave_fd)
+
+
+# --- active token-profile pre-selection (issue #23) --------------------------
+
+
+@pytest.mark.integration
+def test_tui_profile_screen_sets_active_and_persists_across_runs(monkeypatch):
+    import code_helper.services.secrets as secrets
+    from code_helper.services.state import active_profile, active_provider
+
+    paths = Paths.default()
+    secrets.save_credential(paths, "litellm", "sk-work", "work")
+
+    # Run 1: establish the active profile via the Profile screen.
+    _menu_sequence(monkeypatch, ["profile", "litellm", "work", "quit"])
+    assert main(["tui"]) == 0
+
+    # Run 2: state.json survives — capture the main-menu header callable and
+    # verify it now renders the profile the first run wrote.
+    prompts = []
+
+    def _select(_items, *, prompt, **_kwargs):
+        prompts.append(prompt)
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+    assert prompts and prompts[0]() == "code-helper — litellm/work"
+    assert active_provider(paths) == "litellm"
+    assert active_profile(paths, "litellm") == "work"
+
+
+@pytest.mark.integration
+def test_tui_tab_cycles_the_active_profile(monkeypatch):
+    import code_helper.services.secrets as secrets
+    from code_helper.services.state import (
+        active_profile,
+        set_active_profile,
+        set_active_provider,
+    )
+
+    paths = Paths.default()
+    secrets.save_credential(paths, "litellm", "sk-work", "work")
+    secrets.save_credential(paths, "litellm", "sk-personal", "personal")
+    set_active_provider(paths, "litellm")
+    set_active_profile(paths, "litellm", "work")
+
+    # The main menu's on_tab handler cycles profiles; a single Tab advances
+    # work -> personal (profile_names order: default, then alpha).
+    def _select(_items, *, on_tab=None, **_kwargs):
+        if on_tab is not None:
+            on_tab()
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+    assert active_profile(paths, "litellm") == "personal"
+
+
+@pytest.mark.integration
+def test_tui_add_preselects_the_active_profile_first(monkeypatch):
+    import code_helper.services.models_api as api
+    import code_helper.services.secrets as secrets
+    from code_helper.services.state import set_active_profile
+
+    paths = Paths.default()
+    secrets.save_credential(paths, "litellm", "sk-work", "work")
+    secrets.save_credential(paths, "litellm", "sk-personal", "personal")
+    set_active_profile(paths, "litellm", "work")
+
+    seen_items: list[list] = []
+    answers = iter(
+        ["add", "litellm", "work", "__use_profile__", "gpt-test", "codex", "quit"]
+    )
+
+    def _select(_items, **_kwargs):
+        seen_items.append(list(_items))
+        return next(answers)
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr(
+        api,
+        "list_models",
+        lambda *_a, **_k: api.ModelListResult(("gpt-test",), "fake"),
+    )
+    typed = iter(["http://proxy.example/v1", "litellm-wrapper"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(typed))
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-anything")
+
+    assert main(["tui"]) == 0
+    assert paths.script_for("litellm-wrapper").exists()
+    # seen_items order: [0] main, [1] provider, [2] profile picker, ...
+    profile_picker = seen_items[2]
+    # The active profile is FIRST, pre-selected (cursor lands on it), marked.
+    assert profile_picker[0] == ("work", "work (active)")
+    assert "personal" in [value for value, _ in profile_picker]
+
+
+@pytest.mark.integration
+def test_tui_stale_active_profile_falls_back_without_crashing(monkeypatch):
+    import code_helper.services.models_api as api
+    import code_helper.services.secrets as secrets
+    from code_helper.services.state import set_active_profile
+
+    paths = Paths.default()
+    secrets.save_credential(paths, "litellm", "sk-work", "work")
+    # The stored active profile "ghost" no longer exists in the cache (it was
+    # renamed/dropped) — the pre-selection must not install a wrapper under it.
+    set_active_profile(paths, "litellm", "ghost")
+
+    seen_items: list[list] = []
+    answers = iter(
+        ["add", "litellm", "work", "__use_profile__", "gpt-test", "codex", "quit"]
+    )
+
+    def _select(_items, **_kwargs):
+        seen_items.append(list(_items))
+        return next(answers)
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr(
+        api,
+        "list_models",
+        lambda *_a, **_k: api.ModelListResult(("gpt-test",), "fake"),
+    )
+    typed = iter(["http://proxy.example/v1", "litellm-wrapper"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(typed))
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-anything")
+
+    assert main(["tui"]) == 0
+    assert paths.script_for("litellm-wrapper").exists()
+    profile_picker = seen_items[2]
+    # No (active) marker, and the stale "ghost" was never offered.
+    assert all("(active)" not in label for _v, label in profile_picker)
+    assert "ghost" not in [value for value, _ in profile_picker]
