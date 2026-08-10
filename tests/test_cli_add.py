@@ -1200,6 +1200,50 @@ def test_list_models_ignores_a_cached_token_for_a_runtime_address_provider(
 
 
 @pytest.mark.integration
+def test_list_models_does_not_use_the_implicit_active_profile_for_a_custom_base_url(
+    tmp_path, monkeypatch
+):
+    """Issue #23's CLI parity must not silently hand the persisted active
+    profile's cached token to a caller-supplied ``--base-url``. The implicit
+    injection (when ``--profile`` is omitted) applies only to the provider's
+    own default endpoint; with a custom ``--base-url`` the caller must
+    authorize explicitly (``--profile`` or env), so the discovery token stays
+    empty. Guards the trust-boundary hole the active-profile injection opened
+    (parser.py)."""
+    import code_helper.services.models_api as models_api
+    import code_helper.services.secrets as secrets
+    from code_helper.services.state import set_active_selection
+
+    paths = Paths.from_home(tmp_path)
+    # A named profile is cached AND is the persisted active selection.
+    secrets.save_credential(paths, "litellm", "sk-active", "work")
+    set_active_selection(paths, "litellm", "work")
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+
+    seen = {}
+
+    def _fake_list_models(provider, *, token=""):
+        seen["token"] = token
+        return models_api.ModelListResult(models=("m1",), source="fake")
+
+    monkeypatch.setattr(models_api, "list_models", _fake_list_models)
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://localhost:4000/v1",
+            "--list-models",
+        ]
+    )
+    assert code == 0
+    assert seen["token"] == ""
+
+
+@pytest.mark.integration
 def test_list_models_uses_a_named_profile_for_a_runtime_address_provider(
     tmp_path, monkeypatch
 ):
@@ -1289,21 +1333,23 @@ def test_edit_token_caches_even_on_a_byte_identical_noop(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_add_without_profile_picks_up_the_active_profile(tmp_path, monkeypatch):
-    """CLI ``add`` without ``--profile`` falls back to the stored active profile.
+    """CLI ``add`` without ``--profile`` falls back to the stored active profile
+    when the provider's own endpoint is used (no caller-supplied ``--base-url``).
 
-    An explicit ``--profile`` always wins (see the next test); without one, the
-    TUI's pre-selection is the default — same deliberate named-profile trust as
-    ``--profile`` itself (issue #19). Proved by patching getpass to explode: if
-    the active profile's cached token were NOT reused, ``add`` would have to
-    prompt and the test would fail.
+    An explicit ``--profile`` always wins (next test); and a custom
+    ``--base-url`` never silently reuses the persisted pointer (see the
+    custom-base-url test) — the implicit fallback is only for the provider's
+    default endpoint, where the cached profile token is legitimate. Proved by
+    patching getpass to explode: if the active profile's cached token were NOT
+    reused, ``add`` would have to prompt and the test would fail.
     """
     import code_helper.services.secrets as secrets
     from code_helper.services.state import set_active_selection
 
-    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
     paths = Paths.from_home(tmp_path)
-    secrets.save_credential(paths, "litellm", "sk-active-work", "work")
-    set_active_selection(paths, "litellm", "work")
+    secrets.save_credential(paths, "zai", "sk-active-work", "work")
+    set_active_selection(paths, "zai", "work")
 
     def _explode(_prompt):  # pragma: no cover - must not run
         raise AssertionError("must not prompt when the active profile has a token")
@@ -1316,11 +1362,9 @@ def test_add_without_profile_picks_up_the_active_profile(tmp_path, monkeypatch):
             "--agent",
             "claude",
             "--provider",
-            "litellm",
-            "--base-url",
-            "http://host:4000/v1",
+            "zai",
             "--model",
-            "gpt-4o",
+            "glm-5",
             "--alias",
             "lite-active",
         ]

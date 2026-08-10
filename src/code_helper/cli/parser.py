@@ -223,9 +223,14 @@ def _handle_add(args: argparse.Namespace) -> int:
     # Issue #23: an explicit --profile always wins; otherwise the CLI picks up
     # the TUI's stored active profile for this provider as a default, if it
     # still exists (valid_active_profile cross-checks against profile_names).
-    # The constructor branch knows the provider immediately; the preset branch
-    # falls back right after get_preset, below.
-    if profile_name is None and provider_name:
+    # The implicit injection applies ONLY to the provider's own default
+    # endpoint: a caller-supplied --base-url names a host the stored active
+    # profile was never authorized for, so the caller must opt in explicitly
+    # with --profile (or an env token) there — never a silent persisted
+    # pointer. The constructor branch knows the provider immediately; the
+    # preset branch (no custom base-url possible) falls back right after
+    # get_preset, below.
+    if profile_name is None and provider_name and base_url is None:
         profile_name = valid_active_profile(paths, provider_name)
 
     if using_axes and name:
