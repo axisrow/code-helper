@@ -30,15 +30,24 @@ _REPLACE_TOKEN = "__replace_token__"
 ProfileChoice = tuple[str, str | None, str | None, str | None]
 
 
-def _hint(numbered_count: int, *, exit_word: str, tab: bool = False) -> str:
-    """Return the uniform navigation hint for a menu."""
+def _hint(
+    numbered_count: int, *, exit_word: str, tab_provider: str | None = None
+) -> str:
+    """Return the uniform navigation hint for a menu.
+
+    ``tab_provider``, when given, names the provider Tab would cycle — e.g.
+    ``"zai"`` renders ``· Tab: zai profile`` — so the hint says what Tab does
+    rather than just that it does something. It cycles *profiles within one
+    provider*, never providers themselves (that is what the Profile screen is
+    for), and this makes the distinction visible instead of implied.
+    """
     from code_helper.cli.menu import MAX_DIGIT_ITEMS
 
     usable = min(numbered_count, MAX_DIGIT_ITEMS)
     digits = "1" if usable == 1 else f"1-{usable}"
     hint = f"Up/Down · {digits} · Enter select · Esc {exit_word} · Ctrl-C quit"
-    if tab:
-        hint += " · Tab profile"
+    if tab_provider:
+        hint += f" · Tab: {tab_provider} profile"
     return hint
 
 
@@ -50,8 +59,11 @@ def run_tui(args: argparse.Namespace) -> int:
     from code_helper.services.model import (
         AGENTS,
         PROVIDERS,
+        AuthPolicy,
         BaseUrlPolicy,
+        Provider,
         resolve_shape,
+        with_auth,
         with_base_url,
     )
     from code_helper.services.models_api import list_models
@@ -64,12 +76,7 @@ def run_tui(args: argparse.Namespace) -> int:
         valid_active_profile,
     )
     from code_helper.services.spec import suggest_alias
-    from code_helper.services.state import (
-        active_profile,
-        active_provider,
-        set_active_profile,
-        set_active_provider,
-    )
+    from code_helper.services.state import active_selection, set_active_selection
     from code_helper.services.wrappers import (
         WRAPPERS,
         describe_all,
@@ -85,13 +92,14 @@ def run_tui(args: argparse.Namespace) -> int:
         *,
         exit_word: str = "back",
         on_tab: Callable[[], None] | None = None,
+        tab_provider: str | None = None,
     ) -> str:
         numbered = sum(1 for value, _ in items if value not in (_BACK, _QUIT))
         try:
             return select_from_menu(
                 items,
                 prompt=prompt,
-                hint=_hint(numbered, exit_word=exit_word, tab=on_tab is not None),
+                hint=_hint(numbered, exit_word=exit_word, tab_provider=tab_provider),
                 on_tab=on_tab,
                 unnumbered=frozenset({_BACK, _QUIT}),
                 clear=True,
@@ -286,17 +294,40 @@ def run_tui(args: argparse.Namespace) -> int:
 
     def _run_add() -> None:
         """Create a wrapper through provider → profile → model → agent → name."""
-        provider_items = [
-            (provider.name, f"{provider.name} — {provider.description}")
-            for provider in PROVIDERS
-        ]
-        while True:  # provider level
-            provider_name = _pick(
-                [*provider_items, (_BACK, "Back")], "Select a provider:"
+        # An OVERRIDABLE provider (auth_policy) gets a SECOND row rather than
+        # an extra interstitial screen: `ollama` (registry default, no token)
+        # and `ollama (with token)` (--auth secret equivalent) both pick the
+        # same provider — so the common "just want ollama" path stays a
+        # single Enter, exactly as before this axis existed. Each row's menu
+        # value is its own unique key into `provider_choices`, a direct
+        # lookup rather than string-encoding the auth choice into the value
+        # itself (`select_from_menu` already separates `value` from the
+        # rendered `label` for exactly this reason).
+        provider_items: list[tuple[str, str]] = []
+        provider_choices: dict[str, tuple[Provider, bool]] = {}
+        for provider in PROVIDERS:
+            provider_items.append(
+                (provider.name, f"{provider.name} — {provider.description}")
             )
-            if provider_name == _BACK:
+            provider_choices[provider.name] = (provider, False)
+            if (
+                provider.auth_policy is AuthPolicy.OVERRIDABLE
+                and provider.auth != "secret"
+            ):
+                secret_value = f"{provider.name}:secret"
+                provider_items.append(
+                    (
+                        secret_value,
+                        f"{provider.name} (with token) — reverse proxy / cloud auth",
+                    )
+                )
+                provider_choices[secret_value] = (provider, True)
+        while True:  # provider level
+            selection = _pick([*provider_items, (_BACK, "Back")], "Select a provider:")
+            if selection == _BACK:
                 return
-            provider = next(item for item in PROVIDERS if item.name == provider_name)
+            provider, want_secret_auth = provider_choices[selection]
+            provider = with_auth(provider, want_secret=want_secret_auth)
 
             typed_url: str | None = None
             if provider.base_url_policy is not BaseUrlPolicy.FIXED:
@@ -386,6 +417,7 @@ def run_tui(args: argparse.Namespace) -> int:
                         args.alias = alias or default_alias
                         args.shape = None
                         args.base_url = typed_url
+                        args.auth = "secret" if want_secret_auth else None
                         args.profile = profile_name or None
                         args.profile_token = profile_token
                         args.profile_rename_from = rename_from
@@ -414,9 +446,7 @@ def run_tui(args: argparse.Namespace) -> int:
         """Choose the active provider and its active profile (the Tab cycle)."""
         paths = Paths.default()
         provider_items = [
-            (p.name, f"{p.name} — {p.description}")
-            for p in PROVIDERS
-            if p.auth == "secret"
+            (p.name, f"{p.name} — {p.description}") for p in _secret_providers()
         ]
         provider = _pick([*provider_items, (_BACK, "Back")], "Active profile provider:")
         if provider == _BACK:
@@ -438,46 +468,135 @@ def run_tui(args: argparse.Namespace) -> int:
         choice = _pick(items, f"Active profile for {provider}:")
         if choice == _BACK:
             return
-        set_active_provider(paths, provider)
-        set_active_profile(paths, provider, choice)
+        set_active_selection(paths, provider, choice)
 
-    def _main_prompt() -> str:
-        """Live main-menu header, showing the active provider/profile."""
+    def _secret_providers() -> list:
+        """Providers that can have named token profiles at all.
+
+        NOT just ``p.auth == "secret"``: an OVERRIDABLE provider's registry
+        entry always keeps its default ``auth`` (``with_auth`` returns a
+        RUNTIME copy, never mutates ``PROVIDERS`` — see ``services/model.py``)
+        — so ``ollama`` stays ``auth="literal"`` in this list even after an
+        `add --auth secret` install has cached real profiles for it under
+        that same provider name. Filtering on ``auth_policy`` instead of the
+        registry's snapshot ``auth`` is what keeps the Profile screen and
+        Tab's fallback scan able to find those profiles.
+        """
+        return [
+            p
+            for p in PROVIDERS
+            if p.auth == "secret" or p.auth_policy is AuthPolicy.OVERRIDABLE
+        ]
+
+    def _resolve_tab_provider() -> str | None:
+        """Resolve which provider Tab/the header should act on.
+
+        The stored active selection is preferred, but it is only ever
+        *written* from the Profile screen (`_run_profile_screen`) or a prior
+        Tab press — on a fresh install (or after credentials were cleared)
+        nothing has ever written it, which used to make Tab a permanent
+        no-op with no indication why. Falling back to whichever secret
+        provider already has cached profiles makes Tab work immediately,
+        matching issue #23's intent of skipping the manual walk rather than
+        requiring one first.
+        """
         paths = Paths.default()
-        provider = active_provider(paths)
-        if not provider:
-            return "code-helper"
-        profile = valid_active_profile(paths, provider)
-        if profile:
-            return f"code-helper — {provider}/{profile}"
-        return f"code-helper — {provider}"
+        selection = active_selection(paths)
+        if selection is not None:
+            stored, _ = selection
+            if profile_names(paths, stored):
+                return stored
+        for provider in _secret_providers():
+            if profile_names(paths, provider.name):
+                return provider.name
+        return None
+
+    def _tab_profile(provider: str) -> str | None:
+        """The profile Tab currently shows/would land on for ``provider``.
+
+        Mirrors ``_on_tab``'s own fallback: a stored-but-stale or never-set
+        active profile is treated as "before the first profile", so this
+        agrees with what one Tab press would select — without writing
+        anything (``valid_active_profile`` only reads; nothing here has the
+        side effect ``_on_tab`` has via ``set_active_selection``).
+        """
+        paths = Paths.default()
+        stored = valid_active_profile(paths, provider)
+        if stored:
+            return stored
+        names = profile_names(paths, provider)
+        return names[0] if names else None
+
+    def _active_label(tab_provider: str | None) -> str:
+        """``"provider/profile"``, ``"provider"``, or ``""`` for the header
+        and the Profile row — the one place both derive their text from.
+
+        Takes the already-resolved provider rather than re-resolving it
+        (see the cache in the main loop below) — ``_resolve_tab_provider``
+        reads ``state.json`` and, on its fallback path, loops every secret
+        provider's cached profiles, so re-deriving it per caller here would
+        turn one main-menu redraw into several rounds of that I/O.
+        """
+        if not tab_provider:
+            return ""
+        profile = _tab_profile(tab_provider)
+        return f"{tab_provider}/{profile}" if profile else tab_provider
 
     def _on_tab() -> None:
         """Cycle the active profile of the current provider on Tab."""
         paths = Paths.default()
-        provider = active_provider(paths)
+        provider = _tab_provider_cache["value"]
         if not provider:
             return
         names = list(profile_names(paths, provider))
         if not names:
             return
-        current = active_profile(paths, provider)
+        current = _tab_profile(provider)
         idx = names.index(current) if current in names else -1
-        set_active_profile(paths, provider, names[(idx + 1) % len(names)])
+        set_active_selection(paths, provider, names[(idx + 1) % len(names)])
+        # The selection just changed — invalidate so the header/row/hint
+        # reflect it on the next read instead of the pre-Tab provider.
+        _tab_provider_cache["value"] = _resolve_tab_provider()
+
+    # `_resolve_tab_provider()` does real I/O (a `state.json` read and,
+    # on its fallback path, a `profile_names` scan of every secret
+    # provider) — too expensive to re-run on every menu redraw frame.
+    # `_main_prompt`, a callable, IS re-evaluated every frame (see
+    # CLAUDE.md's callable-prompt contract), so it reads this cache
+    # instead of calling `_resolve_tab_provider()` itself; the cache is
+    # refreshed once per main-loop iteration and again by `_on_tab` the
+    # moment Tab actually changes the selection.
+    _tab_provider_cache: dict[str, str | None] = {"value": None}
+
+    def _main_prompt() -> str:
+        """Live main-menu header, showing the active provider/profile."""
+        label = _active_label(_tab_provider_cache["value"])
+        return f"code-helper — {label}" if label else "code-helper"
+
+    def _profile_row_label(tab_provider: str | None) -> str:
+        label = _active_label(tab_provider)
+        return f"Profile: {label}" if label else "Profile"
 
     try:
         while True:
+            # Resolved ONCE per loop iteration and reused for the row
+            # label, the hint gate, and (via the cache) the live header —
+            # see the comments on `_active_label`/`_main_prompt` above for
+            # why re-deriving it per reader would multiply the I/O.
+            tab_provider = _resolve_tab_provider()
+            _tab_provider_cache["value"] = tab_provider
             choice = _pick(
                 [
                     (_LIST, "List"),
                     (_ADD, "Add"),
-                    (_PROFILE, "Profile"),
+                    (_PROFILE, _profile_row_label(tab_provider)),
                     (_SETTINGS, "Settings"),
                     (_QUIT, "Quit"),
                 ],
                 _main_prompt,
                 exit_word="quit",
                 on_tab=_on_tab,
+                tab_provider=tab_provider,
             )
             if choice in (_BACK, _QUIT):
                 return 0

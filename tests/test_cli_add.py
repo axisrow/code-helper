@@ -6,6 +6,8 @@ not just the handler.
 
 from __future__ import annotations
 
+import stat
+
 import pytest
 
 from code_helper.__main__ import main
@@ -260,6 +262,126 @@ def test_add_rejects_an_empty_base_url(tmp_path, capsys):
     )
     assert code == 1
     assert "needs a base URL" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# --auth (AuthPolicy.OVERRIDABLE runtime override)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_add_ollama_with_auth_secret_writes_a_secret_mode_wrapper(
+    tmp_path, monkeypatch
+):
+    """--auth secret overrides ollama's default literal token to a real secret
+    — the wrapper carries the token, not the registry's "ollama" literal, and
+    is written 0o700 like any other secret-backed wrapper."""
+    monkeypatch.setenv("OLLAMA_API_KEY", "sk-ollama-proxy")
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "ollama",
+            "--auth",
+            "secret",
+            "--model",
+            "glm-5:cloud",
+            "--alias",
+            "ollama-secure",
+        ]
+    )
+    assert code == 0
+    body = _body(tmp_path, "ollama-secure")
+    assert "export ANTHROPIC_AUTH_TOKEN='sk-ollama-proxy'" in body
+    mode = stat.S_IMODE(
+        Paths.from_home(tmp_path).script_for("ollama-secure").stat().st_mode
+    )
+    assert mode == 0o700
+
+
+@pytest.mark.integration
+def test_add_ollama_without_auth_flag_keeps_the_literal_default(tmp_path):
+    """The default (no --auth) is completely unchanged: ollama's literal
+    "ollama" token, no prompt, 0o755."""
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "ollama",
+            "--model",
+            "glm-5:cloud",
+            "--alias",
+            "ollama-default",
+        ]
+    )
+    assert code == 0
+    body = _body(tmp_path, "ollama-default")
+    assert "export ANTHROPIC_AUTH_TOKEN='ollama'" in body
+    mode = stat.S_IMODE(
+        Paths.from_home(tmp_path).script_for("ollama-default").stat().st_mode
+    )
+    assert mode == 0o755
+
+
+@pytest.mark.integration
+def test_add_auth_secret_on_an_already_secret_provider_is_a_no_op(
+    tmp_path, monkeypatch
+):
+    """zai is already auth='secret' and FIXED — --auth secret must not refuse
+    there, since with_auth treats "already secret" as nothing to override
+    (see test_fixed_auth_provider_already_secret_ignores_override_request in
+    test_model.py). The FIXED+not-yet-secret refusal itself has no shipped
+    provider to exercise it against and is pinned at the model layer only,
+    via an out-of-registry provider
+    (test_fixed_auth_provider_refuses_an_override_when_not_already_secret)."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-test")
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "zai",
+            "--auth",
+            "secret",
+            "--model",
+            "glm-5",
+        ]
+    )
+    assert code == 0
+
+
+@pytest.mark.integration
+def test_add_auth_applies_to_the_constructor_form_only(tmp_path, capsys):
+    code = main(["add", "deepseek", "--auth", "secret"])
+    assert code == 1
+    assert "constructor form only" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_add_auth_rejects_an_unknown_value(tmp_path, capsys):
+    # argparse's own `choices` gate rejects this before code-helper ever sees
+    # it — SystemExit(2), the same as any other invalid-choice flag, not a
+    # CodeHelperError main() would turn into exit code 1.
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "add",
+                "--agent",
+                "claude",
+                "--provider",
+                "ollama",
+                "--auth",
+                "bogus",
+                "--model",
+                "m",
+            ]
+        )
+    assert exc_info.value.code == 2
 
 
 @pytest.mark.integration
@@ -1176,12 +1298,12 @@ def test_add_without_profile_picks_up_the_active_profile(tmp_path, monkeypatch):
     prompt and the test would fail.
     """
     import code_helper.services.secrets as secrets
-    from code_helper.services.state import set_active_profile
+    from code_helper.services.state import set_active_selection
 
     monkeypatch.delenv("LITELLM_API_KEY", raising=False)
     paths = Paths.from_home(tmp_path)
     secrets.save_credential(paths, "litellm", "sk-active-work", "work")
-    set_active_profile(paths, "litellm", "work")
+    set_active_selection(paths, "litellm", "work")
 
     def _explode(_prompt):  # pragma: no cover - must not run
         raise AssertionError("must not prompt when the active profile has a token")
@@ -1216,13 +1338,13 @@ def test_add_explicit_profile_wins_over_the_active_profile(tmp_path, monkeypatch
     The active profile is invisible state; the flag must always win over it.
     """
     import code_helper.services.secrets as secrets
-    from code_helper.services.state import set_active_profile
+    from code_helper.services.state import set_active_selection
 
     monkeypatch.delenv("LITELLM_API_KEY", raising=False)
     paths = Paths.from_home(tmp_path)
     secrets.save_credential(paths, "litellm", "sk-active-work", "work")
     secrets.save_credential(paths, "litellm", "sk-explicit-personal", "personal")
-    set_active_profile(paths, "litellm", "work")
+    set_active_selection(paths, "litellm", "work")
 
     def _explode(_prompt):  # pragma: no cover - must not run
         raise AssertionError("must not prompt when the explicit profile has a token")
@@ -1261,12 +1383,11 @@ def test_list_shows_the_active_profile_header(tmp_path, capsys):
     without re-entering the menu.
     """
     import code_helper.services.secrets as secrets
-    from code_helper.services.state import set_active_profile, set_active_provider
+    from code_helper.services.state import set_active_selection
 
     paths = Paths.from_home(tmp_path)
     secrets.save_credential(paths, "litellm", "sk-work", "work")
-    set_active_provider(paths, "litellm")
-    set_active_profile(paths, "litellm", "work")
+    set_active_selection(paths, "litellm", "work")
 
     assert main(["list"]) == 0
     assert "Active profile: litellm/work" in capsys.readouterr().out

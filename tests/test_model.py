@@ -16,6 +16,7 @@ from code_helper.services.model import (
     AGENTS,
     PROVIDERS,
     Agent,
+    AuthPolicy,
     BaseUrlPolicy,
     ConfigShape,
     ModelListAPI,
@@ -24,6 +25,7 @@ from code_helper.services.model import (
     get_agent,
     get_provider,
     resolve_shape,
+    with_auth,
     with_base_url,
 )
 
@@ -439,3 +441,139 @@ def test_secret_provider_with_no_token_env_var_is_rejected():
     )
     with pytest.raises(CodeHelperError, match="declares auth='secret' but has no"):
         m._validate_provider(bad)
+
+
+# --------------------------------------------------------------------------- #
+# AuthPolicy / with_auth — runtime auth override
+# --------------------------------------------------------------------------- #
+
+# Built OUTSIDE the registry, same "prove it's computed, not enumerated"
+# technique as _OPENAI_ONLY / _RUNTIME_REQUIRED above.
+_RUNTIME_AUTH_OVERRIDABLE = Provider(
+    name="runtime-auth-overridable",
+    shapes=frozenset({ConfigShape.ANTHROPIC_ENV}),
+    base_url="http://default-host:1/v1",
+    auth="literal",
+    auth_value="default-token",
+    auth_policy=AuthPolicy.OVERRIDABLE,
+    token_env_var="RUNTIME_AUTH_API_KEY",
+)
+
+# A FIXED provider whose auth is not already "secret" — no shipped provider
+# is FIXED+non-secret, so this out-of-registry stand-in is what exercises
+# with_auth's refusal branch. Shared by both tests that need one.
+_FIXED_LITERAL = Provider(
+    name="fixed-literal",
+    shapes=frozenset({ConfigShape.ANTHROPIC_ENV}),
+    base_url="http://x",
+    auth="literal",
+    auth_value="x",
+    auth_policy=AuthPolicy.FIXED,
+)
+
+
+@pytest.mark.unit
+def test_fixed_auth_provider_passes_through_with_no_override():
+    zai = get_provider("zai")
+    assert with_auth(zai, want_secret=False) is zai
+
+
+@pytest.mark.unit
+def test_fixed_auth_provider_already_secret_ignores_override_request():
+    """A FIXED provider that is already auth='secret' (zai, litellm) has
+    nothing to override to — want_secret=True is a no-op, not a refusal, so a
+    caller need not know which providers are already secret."""
+    zai = get_provider("zai")
+    assert with_auth(zai, want_secret=True) is zai
+
+
+@pytest.mark.unit
+def test_fixed_auth_provider_refuses_an_override_when_not_already_secret():
+    with pytest.raises(CodeHelperError, match="fixed auth mode"):
+        with_auth(_FIXED_LITERAL, want_secret=True)
+
+
+@pytest.mark.unit
+def test_overridable_auth_provider_keeps_the_default_with_no_override():
+    assert (
+        with_auth(_RUNTIME_AUTH_OVERRIDABLE, want_secret=False)
+        is _RUNTIME_AUTH_OVERRIDABLE
+    )
+
+
+@pytest.mark.unit
+def test_overridable_auth_provider_accepts_an_override():
+    got = with_auth(_RUNTIME_AUTH_OVERRIDABLE, want_secret=True)
+    assert got.auth == "secret"
+    assert got.auth_value == ""  # the literal value must not linger, unused
+    # The original registry object is untouched (frozen dataclass + replace).
+    assert _RUNTIME_AUTH_OVERRIDABLE.auth == "literal"
+
+
+@pytest.mark.unit
+def test_auth_refusal_message_lists_overridable_providers_from_the_registry(
+    monkeypatch,
+):
+    """The error text is DERIVED from PROVIDERS, not a hard-coded name list."""
+    import code_helper.services.model as m
+
+    monkeypatch.setattr(m, "PROVIDERS", (_FIXED_LITERAL, _RUNTIME_AUTH_OVERRIDABLE))
+    with pytest.raises(CodeHelperError, match="runtime-auth-overridable"):
+        with_auth(_FIXED_LITERAL, want_secret=True)
+
+
+@pytest.mark.unit
+def test_ollama_declares_overridable_auth_with_a_token_env_var():
+    """ollama's real registry entry: OVERRIDABLE, with a token_env_var already
+    present so with_auth has something to substitute in — pins the fix for
+    the (incorrect) assumption that a local daemon can never sit behind auth
+    (a reverse proxy, or Ollama Cloud, both routinely do)."""
+    ollama = get_provider("ollama")
+    assert ollama.auth_policy is AuthPolicy.OVERRIDABLE
+    assert ollama.auth == "literal"
+    assert ollama.token_env_var
+
+    got = with_auth(ollama, want_secret=True)
+    assert got.auth == "secret"
+    assert got.token_env_var == ollama.token_env_var
+
+
+# --------------------------------------------------------------------------- #
+# AuthPolicy — registry validation
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_overridable_auth_policy_without_token_env_var_is_rejected():
+    import code_helper.services.model as m
+
+    bad = Provider(
+        name="bad-overridable",
+        shapes=frozenset({ConfigShape.ANTHROPIC_ENV}),
+        base_url="http://x",
+        auth="literal",
+        auth_value="x",
+        auth_policy=AuthPolicy.OVERRIDABLE,
+        token_env_var="",  # missing — the whole point of this test
+    )
+    with pytest.raises(CodeHelperError, match="auth_policy=OVERRIDABLE"):
+        m._validate_provider(bad)
+
+
+@pytest.mark.unit
+def test_fixed_auth_policy_without_token_env_var_is_accepted():
+    """FIXED doesn't need a token_env_var unless auth='secret' itself (a
+    separate, pre-existing check) — a literal-only provider like the
+    registry's own ollama-before-this-change shape must stay valid."""
+    import code_helper.services.model as m
+
+    ok = Provider(
+        name="ok-fixed",
+        shapes=frozenset({ConfigShape.ANTHROPIC_ENV}),
+        base_url="http://x",
+        auth="literal",
+        auth_value="x",
+        auth_policy=AuthPolicy.FIXED,
+        token_env_var="",
+    )
+    m._validate_provider(ok)  # must not raise

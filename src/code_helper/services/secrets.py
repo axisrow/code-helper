@@ -141,18 +141,25 @@ def profile_names(paths: Paths, provider_name: str) -> tuple[str, ...]:
 def valid_active_profile(paths: Paths, provider_name: str) -> str | None:
     """The stored active profile for ``provider_name`` if it still exists.
 
-    Cross-checks ``state.active_profile`` against the live
+    Cross-checks ``state.active_selection`` against the live
     ``profile_names``: a saved profile can go stale (renamed via
     :func:`rename_profile` or dropped via
     :func:`invalidate_cached_credential`), and every reader must fall back to
     ``None`` on a miss rather than let a pre-selection install a wrapper under
-    a nonexistent profile. Lives here (not in ``state.py``) because it needs
+    a nonexistent profile. Also returns ``None`` when the active selection's
+    provider is not ``provider_name`` — the store now holds a single
+    (provider, profile) pointer (issue #23 follow-up), not one slot per
+    provider, so a profile only "belongs" to the provider it was last
+    selected for. Lives here (not in ``state.py``) because it needs
     ``profile_names``, and ``state.py`` must not depend on this module.
     """
-    from code_helper.services.state import active_profile
+    from code_helper.services.state import active_selection
 
-    name = active_profile(paths, provider_name)
-    if name is None:
+    selection = active_selection(paths)
+    if selection is None:
+        return None
+    active_provider_name, name = selection
+    if active_provider_name != provider_name:
         return None
     return name if name in profile_names(paths, provider_name) else None
 

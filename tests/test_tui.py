@@ -375,7 +375,7 @@ def test_provider_first_flow_through_a_real_pty(tmp_path):
 @pytest.mark.integration
 def test_tui_profile_screen_sets_active_and_persists_across_runs(monkeypatch):
     import code_helper.services.secrets as secrets
-    from code_helper.services.state import active_profile, active_provider
+    from code_helper.services.state import active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "litellm", "sk-work", "work")
@@ -395,24 +395,18 @@ def test_tui_profile_screen_sets_active_and_persists_across_runs(monkeypatch):
     monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
     assert prompts and prompts[0]() == "code-helper — litellm/work"
-    assert active_provider(paths) == "litellm"
-    assert active_profile(paths, "litellm") == "work"
+    assert active_selection(paths) == ("litellm", "work")
 
 
 @pytest.mark.integration
 def test_tui_tab_cycles_the_active_profile(monkeypatch):
     import code_helper.services.secrets as secrets
-    from code_helper.services.state import (
-        active_profile,
-        set_active_profile,
-        set_active_provider,
-    )
+    from code_helper.services.state import active_selection, set_active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "litellm", "sk-work", "work")
     secrets.save_credential(paths, "litellm", "sk-personal", "personal")
-    set_active_provider(paths, "litellm")
-    set_active_profile(paths, "litellm", "work")
+    set_active_selection(paths, "litellm", "work")
 
     # The main menu's on_tab handler cycles profiles; a single Tab advances
     # work -> personal (profile_names order: default, then alpha).
@@ -423,19 +417,109 @@ def test_tui_tab_cycles_the_active_profile(monkeypatch):
 
     monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
-    assert active_profile(paths, "litellm") == "personal"
+    assert active_selection(paths) == ("litellm", "personal")
+
+
+@pytest.mark.integration
+def test_tui_tab_works_on_a_fresh_install_with_no_prior_profile_screen_visit(
+    monkeypatch,
+):
+    """Reproduces the reported bug: Tab did nothing until the Profile screen
+    had been visited once, because the stored selection is only ever written
+    there. Deliberately does NOT call set_active_selection — only cached
+    credentials exist, matching a real first-time install."""
+    import code_helper.services.secrets as secrets
+    from code_helper.services.state import active_selection
+
+    paths = Paths.default()
+    secrets.save_credential(paths, "zai", "sk-one", "axisrow")
+    secrets.save_credential(paths, "zai", "sk-two", "bemyownrobot")
+
+    def _select(_items, *, on_tab=None, **_kwargs):
+        if on_tab is not None:
+            on_tab()
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+    selection = active_selection(paths)
+    assert selection is not None
+    provider, profile = selection
+    assert provider == "zai"
+    assert profile in ("axisrow", "bemyownrobot")
+
+
+@pytest.mark.integration
+def test_tui_tab_is_a_silent_noop_with_no_cached_profiles(monkeypatch):
+    from code_helper.services.state import load_state
+
+    paths = Paths.default()
+
+    def _select(_items, *, on_tab=None, **_kwargs):
+        if on_tab is not None:
+            on_tab()
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+    assert not paths.state_file().exists()
+    assert load_state(paths) == {}
+
+
+@pytest.mark.integration
+def test_tui_tab_falls_through_a_stale_stored_provider(monkeypatch):
+    """A stored active selection whose provider has no live profiles (e.g.
+    credentials were cleared after the selection was made) must not wedge Tab
+    silently — it should fall through to a provider that still has cached
+    profiles."""
+    import code_helper.services.secrets as secrets
+    from code_helper.services.state import active_selection, set_active_selection
+
+    paths = Paths.default()
+    secrets.save_credential(paths, "zai", "sk-one", "work")
+    # Stale: litellm has no cached profiles at all, unlike zai.
+    set_active_selection(paths, "litellm", "ghost")
+
+    def _select(_items, *, on_tab=None, **_kwargs):
+        if on_tab is not None:
+            on_tab()
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+    assert active_selection(paths) == ("zai", "work")
+
+
+@pytest.mark.integration
+def test_tui_header_shows_active_profile_without_a_prior_profile_screen_visit(
+    monkeypatch,
+):
+    import code_helper.services.secrets as secrets
+
+    paths = Paths.default()
+    secrets.save_credential(paths, "zai", "sk-one", "work")
+
+    prompts = []
+
+    def _select(_items, *, prompt, **_kwargs):
+        prompts.append(prompt)
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+    assert prompts and prompts[0]() == "code-helper — zai/work"
 
 
 @pytest.mark.integration
 def test_tui_add_preselects_the_active_profile_first(monkeypatch):
     import code_helper.services.models_api as api
     import code_helper.services.secrets as secrets
-    from code_helper.services.state import set_active_profile
+    from code_helper.services.state import set_active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "litellm", "sk-work", "work")
     secrets.save_credential(paths, "litellm", "sk-personal", "personal")
-    set_active_profile(paths, "litellm", "work")
+    set_active_selection(paths, "litellm", "work")
 
     seen_items: list[list] = []
     answers = iter(
@@ -469,13 +553,13 @@ def test_tui_add_preselects_the_active_profile_first(monkeypatch):
 def test_tui_stale_active_profile_falls_back_without_crashing(monkeypatch):
     import code_helper.services.models_api as api
     import code_helper.services.secrets as secrets
-    from code_helper.services.state import set_active_profile
+    from code_helper.services.state import set_active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "litellm", "sk-work", "work")
     # The stored active profile "ghost" no longer exists in the cache (it was
     # renamed/dropped) — the pre-selection must not install a wrapper under it.
-    set_active_profile(paths, "litellm", "ghost")
+    set_active_selection(paths, "litellm", "ghost")
 
     seen_items: list[list] = []
     answers = iter(
@@ -502,3 +586,80 @@ def test_tui_stale_active_profile_falls_back_without_crashing(monkeypatch):
     # No (active) marker, and the stale "ghost" was never offered.
     assert all("(active)" not in label for _v, label in profile_picker)
     assert "ghost" not in [value for value, _ in profile_picker]
+
+
+# --- overridable provider auth (ollama can be literal OR secret) ------------
+
+
+@pytest.mark.integration
+def test_tui_provider_list_offers_ollama_with_a_token(monkeypatch):
+    """An OVERRIDABLE provider gets a SECOND provider-list row rather than an
+    extra interstitial screen — the common "just want ollama" path stays a
+    single Enter (see cli/tui.py's _run_add)."""
+    seen_items: list[list] = []
+    answers = iter(["add", "__back__", "quit"])
+
+    def _select(_items, **_kwargs):
+        seen_items.append(list(_items))
+        return next(answers)
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+    # seen_items order: [0] main menu, [1] provider list.
+    provider_list = seen_items[1]
+    values = [value for value, _label in provider_list]
+    assert "ollama" in values
+    assert "ollama:secret" in values
+    # litellm/zai are FIXED — no second row for either.
+    assert "litellm:secret" not in values
+    assert "zai:secret" not in values
+
+
+@pytest.mark.integration
+def test_tui_add_ollama_with_token_installs_a_secret_wrapper(monkeypatch):
+    import code_helper.services.models_api as api
+
+    answers = iter(["add", "ollama:secret", "model-x", "claude", "quit"])
+
+    def _select(_items, **_kwargs):
+        return next(answers)
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr(
+        api,
+        "list_models",
+        lambda *_a, **_k: api.ModelListResult(("model-x",), "fake"),
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "ollama-tok")
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-ollama-proxy")
+
+    assert main(["tui"]) == 0
+    paths = Paths.default()
+    body = paths.script_for("ollama-tok").read_text(encoding="utf-8")
+    assert "export ANTHROPIC_AUTH_TOKEN='sk-ollama-proxy'" in body
+    mode = paths.script_for("ollama-tok").stat().st_mode & 0o777
+    assert mode == 0o700
+
+
+@pytest.mark.integration
+def test_tui_profile_screen_finds_ollama_profiles_after_a_token_install(
+    monkeypatch,
+):
+    """Cached profiles for an OVERRIDABLE provider (ollama) must be reachable
+    from the Profile screen / Tab even though ollama's registry entry stays
+    auth="literal" (with_auth returns a runtime copy, never mutates
+    PROVIDERS) — see _secret_providers in cli/tui.py."""
+    import code_helper.services.secrets as secrets
+    from code_helper.services.state import active_selection
+
+    paths = Paths.default()
+    secrets.save_credential(paths, "ollama", "sk-ollama-proxy", "proxy")
+
+    def _select(_items, *, on_tab=None, **_kwargs):
+        if on_tab is not None:
+            on_tab()
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+    assert active_selection(paths) == ("ollama", "proxy")

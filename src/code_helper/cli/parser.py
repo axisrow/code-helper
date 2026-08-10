@@ -89,11 +89,12 @@ def _handle_list(args: argparse.Namespace) -> int:
     # still valid. Kept in the parser (not wrappers.describe_all, which three
     # call sites share) because this is CLI presentation, not a wrapper row.
     from code_helper.services.secrets import valid_active_profile
-    from code_helper.services.state import active_provider
+    from code_helper.services.state import active_selection
 
     paths = Paths.default()
-    provider = active_provider(paths)
-    if provider:
+    selection = active_selection(paths)
+    if selection is not None:
+        provider, _ = selection
         profile = valid_active_profile(paths, provider)
         if profile:
             print(f"Active profile: {provider}/{profile}")
@@ -175,6 +176,7 @@ def _handle_add(args: argparse.Namespace) -> int:
         get_agent,
         get_provider,
         resolve_shape,
+        with_auth,
         with_base_url,
     )
     from code_helper.services.models_api import list_models
@@ -211,6 +213,7 @@ def _handle_add(args: argparse.Namespace) -> int:
     model = getattr(args, "model", None)
     alias = getattr(args, "alias", None)
     base_url = getattr(args, "base_url", None)
+    auth = getattr(args, "auth", None)
     profile_name = getattr(args, "profile", None)
     profile_token = getattr(args, "profile_token", None)
     profile_rename_from = getattr(args, "profile_rename_from", None)
@@ -238,6 +241,12 @@ def _handle_add(args: argparse.Namespace) -> int:
             "(--agent/--provider) — a preset carries its own provider"
         )
 
+    if not using_axes and auth:
+        raise CodeHelperError(
+            "--auth applies to the constructor form only "
+            "(--agent/--provider) — a preset carries its own provider"
+        )
+
     if using_axes:
         if not agent_name or not provider_name:
             raise CodeHelperError("--agent and --provider must be given together")
@@ -246,8 +255,10 @@ def _handle_add(args: argparse.Namespace) -> int:
         # (list_models below, resolve_shape/build_spec, the eventual
         # renderer) reads it off this provider object, so subbing it in here
         # — before --list-models, before build_spec — is enough for all of
-        # them to see the right value.
+        # them to see the right value. with_auth is the matching substitution
+        # for auth (--auth secret), same reasoning, same call order.
         provider = with_base_url(get_provider(provider_name), base_url)
+        provider = with_auth(provider, want_secret=auth == "secret")
 
         if getattr(args, "list_models", False):
             result = list_models(
@@ -772,6 +783,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="backend URL for a provider with no address in the registry "
         "(e.g. litellm: http://localhost:4000/v1); constructor form only",
+    )
+    p_add.add_argument(
+        "--auth",
+        default=None,
+        choices=["secret"],
+        help="override a provider's default auth mode to a secret token "
+        "(e.g. ollama behind a reverse proxy or Ollama Cloud); only for "
+        "providers that declare it overridable; constructor form only",
     )
     p_add.add_argument(
         "--profile",

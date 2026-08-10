@@ -56,6 +56,7 @@ __all__ = [
     "ConfigShape",
     "ModelListAPI",
     "BaseUrlPolicy",
+    "AuthPolicy",
     "Agent",
     "Provider",
     "AGENTS",
@@ -65,6 +66,7 @@ __all__ = [
     "resolve_shape",
     "compatible_providers",
     "with_base_url",
+    "with_auth",
 ]
 
 
@@ -171,6 +173,37 @@ class BaseUrlPolicy(StrEnum):
     OVERRIDABLE = "overridable"
 
 
+class AuthPolicy(StrEnum):
+    """Whether a :class:`Provider`'s ``auth`` mode is fixed or overridable.
+
+    ``auth`` used to be treated as an immutable fact about a provider —
+    ``ollama`` was always ``"literal"``, on the (wrong) assumption that a
+    local daemon never sits behind auth. In reality Ollama is routinely
+    fronted by a reverse proxy or run as Ollama Cloud, both of which want a
+    real secret. ``auth`` describes how a *particular installation* is
+    reached, not an immutable property of the provider — the same
+    distinction :class:`BaseUrlPolicy` already draws for ``base_url``, and
+    this is the matching axis for ``auth``.
+
+    ``zai``/``litellm`` have exactly one true auth mode (``secret``) and stay
+    FIXED. ``ollama`` defaults to a literal token but a caller MAY switch it
+    to ``secret`` at runtime via :func:`with_auth` — mirroring
+    ``OVERRIDABLE``'s ``base_url`` story: the registry default stands unless
+    the caller explicitly overrides it.
+    """
+
+    #: The registry ``auth``/``auth_value``/``token_env_var`` are the only
+    #: values — never overridable at runtime.
+    FIXED = "fixed"
+
+    #: The registry ``auth`` is a default the caller MAY override to
+    #: ``"secret"`` at runtime (``--auth secret`` / a TUI prompt) via
+    #: :func:`with_auth`. Requires a registry ``token_env_var`` even while the
+    #: default is ``"literal"``, so the override is expressible without
+    #: touching the registry entry (``_validate_provider`` enforces this).
+    OVERRIDABLE = "overridable"
+
+
 @dataclass(frozen=True)
 class Agent:
     """A coding agent (the thing that actually runs) — one axis."""
@@ -199,6 +232,9 @@ class Provider:
     #: daemon accepts ``"ollama"``); ``"secret"`` — resolved from env/prompt and
     #: the script is written 0o700; ``"none"`` — the launcher authenticates.
     auth: str = "none"
+    #: See :class:`AuthPolicy`. Constrains whether ``auth`` may be overridden
+    #: at runtime — enforced at import time by :func:`_validate_provider`.
+    auth_policy: AuthPolicy = AuthPolicy.FIXED
     auth_value: str = ""
     token_env_var: str = ""
     model_list_api: ModelListAPI = ModelListAPI.NONE
@@ -248,6 +284,14 @@ PROVIDERS: tuple[Provider, ...] = (
         base_url="http://127.0.0.1:11434",
         auth="literal",
         auth_value="ollama",
+        # OVERRIDABLE, not FIXED: the registry default fits an unauthenticated
+        # local daemon, but a real Ollama install is routinely fronted by a
+        # reverse proxy or run as Ollama Cloud — both want a real secret.
+        # token_env_var must be present even while the default is "literal"
+        # (see AuthPolicy and _validate_provider) so `--auth secret` has a
+        # variable name to export the moment a caller opts in.
+        auth_policy=AuthPolicy.OVERRIDABLE,
+        token_env_var="OLLAMA_API_KEY",
         model_list_api=ModelListAPI.OLLAMA_TAGS,
         # Consumed by the OPENAI_TOML renderer (`wire_api` in the profile).
         wire_api="responses",
@@ -350,6 +394,17 @@ def _validate_provider(provider: Provider) -> None:
             f"provider {provider.name!r} declares auth='secret' but has no "
             f"token_env_var — OPENAI_TOML would silently install with no "
             f"credential wired in (see openai_env_key)"
+        )
+    # See AuthPolicy: an OVERRIDABLE provider needs a token_env_var even while
+    # its registry default is not "secret" — with_auth's whole job is to flip
+    # auth to "secret" at runtime, and without a token_env_var already
+    # present that override would hit the exact silent-hole case the check
+    # above exists to catch, just one step later.
+    if provider.auth_policy is AuthPolicy.OVERRIDABLE and not provider.token_env_var:
+        raise CodeHelperError(
+            f"provider {provider.name!r} declares auth_policy=OVERRIDABLE but "
+            f"has no token_env_var — with_auth would have no variable to "
+            f"export once a caller opts into auth='secret'"
         )
     # See BaseUrlPolicy: exactly one of "registry supplies base_url" / "caller
     # must supply it at runtime" holds per policy — never both, never neither.
@@ -539,3 +594,52 @@ def with_base_url(provider: Provider, base_url: str | None) -> Provider:
 
     validate_base_url(base_url)
     return replace(provider, base_url=base_url)
+
+
+def with_auth(provider: Provider, want_secret: bool) -> Provider:
+    """The single substitution point for a runtime ``auth`` override.
+
+    Mirrors :func:`with_base_url`'s shape exactly: every one of ``auth``'s
+    readers (``render.py``, ``models_api.list_models``, ``parser.py``,
+    ``wrappers.py``, ``secrets.py`` — see the module-level list in
+    ``CLAUDE.md``) reads it off a :class:`Provider`/``WrapperSpec`` object it
+    was handed, never re-derives it — so substituting the provider once, here,
+    before ``build_spec`` runs, is enough for all of them to see the right
+    mode. Deliberately DATA-driven: the branch is on
+    ``provider.auth_policy``, never on ``provider.name`` — a future provider
+    that wants the same override needs only a registry entry, no new code
+    here.
+
+    Args:
+        provider: The provider as looked up from the registry.
+        want_secret: Whether the caller asked to override to ``auth="secret"``
+            (``--auth secret`` / a TUI prompt). ``False`` means "nothing
+            supplied" — the registry default stands, exactly like
+            ``with_base_url``'s ``base_url=None``.
+
+    Returns:
+        ``provider`` unchanged when ``want_secret`` is ``False``, or (for an
+        OVERRIDABLE provider) a copy with ``auth="secret"`` and
+        ``auth_value=""`` — the literal value would otherwise linger,
+        unused but misleading, on a provider now resolved as secret.
+
+    Raises:
+        CodeHelperError: ``want_secret`` was requested for a FIXED provider
+            whose registry ``auth`` is not already ``"secret"``.
+    """
+    if not want_secret:
+        return provider  # Registry default stands, for either policy.
+
+    if provider.auth == "secret":
+        return provider  # Already secret — no override needed either way.
+
+    if provider.auth_policy is not AuthPolicy.OVERRIDABLE:
+        raise CodeHelperError(
+            f"provider {provider.name!r} has a fixed auth mode "
+            f"({provider.auth!r}) — --auth secret only applies to: "
+            + ", ".join(
+                p.name for p in PROVIDERS if p.auth_policy is AuthPolicy.OVERRIDABLE
+            )
+        )
+
+    return replace(provider, auth="secret", auth_value="")
