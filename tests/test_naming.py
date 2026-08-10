@@ -169,10 +169,34 @@ def test_script_for_still_does_no_io(tmp_path):
         # Empty / whitespace-only: stripped to empty.
         ("", ""),
         ("   ", ""),
+        # Bare IPv6: colons are part of the address, not a port separator —
+        # left untouched so validate_base_url reports it as malformed rather
+        # than being misread as "no port" and silently mangled.
+        ("2001:db8::1", "2001:db8::1"),
+        ("::1", "::1"),
+        # A query string or fragment must reach validate_base_url intact so
+        # its dedicated rejection fires — normalization must not silently
+        # drop them by only reconstructing scheme/netloc/path.
+        ("host?query=1", "host?query=1"),
+        ("host/path#frag", "host/path#frag"),
+        ("host:1234?x=1", "host:1234?x=1"),
     ],
 )
 def test_normalize_base_url(raw, expected):
     assert normalize_base_url(raw) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "raw",
+    ["2001:db8::1", "::1", "host?query=1", "host/path#frag", "host:1234?x=1"],
+)
+def test_normalize_base_url_passthrough_still_fails_validation(raw):
+    """Inputs normalize_base_url declines to touch must still be rejected by
+    validate_base_url — proving they aren't silently smuggled through as a
+    valid-looking URL."""
+    with pytest.raises(CodeHelperError):
+        validate_base_url(normalize_base_url(raw))
 
 
 # --- validate_base_url ------------------------------------------------------

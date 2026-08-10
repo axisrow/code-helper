@@ -134,17 +134,35 @@ def normalize_base_url(url: str) -> str:
 
     This is a convenience layer in front of :func:`validate_base_url`, not a
     validator itself: it never raises, and anything it cannot make sense of is
-    passed through unchanged so the validator reports it properly.
+    passed through unchanged so the validator reports it properly. Two shapes
+    are deliberately left untouched rather than guessed at:
+
+    - A query string or fragment (``host?x=1``, ``host/path#frag``) —
+      :func:`validate_base_url` is documented to reject these; completing
+      them into a valid-looking URL would silently discard the part the
+      validator exists to catch.
+    - A bare IPv6 host (``2001:db8::1``, ``::1``) — its colons are part of
+      the address, not a port separator, so the "does netloc contain a
+      port?" heuristic below cannot tell the two apart. Left alone, it falls
+      through to :func:`validate_base_url`, which reports it as malformed
+      (no ``http://``/``https://`` scheme) rather than this function
+      guessing a default port into the middle of the address.
     """
     stripped = url.strip()
     if not stripped or "://" in stripped:
+        return stripped
+    if "?" in stripped or "#" in stripped:
+        return stripped
+    # More than one colon means this can only be a bare IPv6 address (a
+    # "host:port" shape has exactly one). Leave it untouched.
+    if stripped.count(":") > 1:
         return stripped
     candidate = f"https://{stripped}"
     try:
         parts = urlsplit(candidate)
     except ValueError:
-        # e.g. a bare IPv6 like "::1" — let validate_base_url report it as
-        # malformed rather than leaking a bare ValueError here.
+        # e.g. an unterminated IPv6 bracket — let validate_base_url report it
+        # as malformed rather than leaking a bare ValueError here.
         return candidate
     netloc = parts.netloc
     path = parts.path
