@@ -41,6 +41,7 @@ import threading
 import pytest
 
 from code_helper.backends._atomic import atomic_write
+from code_helper.services import secrets as secrets_module
 from code_helper.services.paths import Paths
 from code_helper.services.secrets import (
     DEFAULT_PROFILE,
@@ -48,6 +49,7 @@ from code_helper.services.secrets import (
     load_credentials,
     rename_profile,
     save_credential,
+    seed_default_profile,
 )
 
 
@@ -253,6 +255,109 @@ def test_locked_rename_and_invalidate_do_not_race(tmp_path):
     final = load_credentials(paths)
     assert final.get("litellm", {}).get("renamed") == "sk-old"
     assert "zai" not in final
+
+
+def _seed_default_profile_check_outside_lock(
+    paths: Paths, provider_name: str, token: str
+) -> bool:
+    """A copy of ``seed_default_profile``'s pre-fix body — the existence
+    check (``profile_names``) runs OUTSIDE ``_locked_update``, only the
+    write is locked. Used only to demonstrate the TOCTOU window on the exact
+    code shape it existed in, independent of the shipped fix.
+    """
+    if not token or secrets_module.profile_names(paths, provider_name):
+        return False
+    save_credential(paths, provider_name, token, DEFAULT_PROFILE)
+    return True
+
+
+@pytest.mark.unit
+def test_seed_default_profile_race_loses_an_update_on_the_unlocked_path(tmp_path):
+    """Force the TOCTOU window open with a barrier on the UNLOCKED
+    check-then-write path: two threads both see "no profile yet" before
+    either writes, both pass the guard, and the second ``save_credential``
+    call (itself correctly serialized by the lock) still unconditionally
+    overwrites — it never re-checks whether a profile appeared in the
+    meantime. This contradicts the docstring's "an existing provider profile
+    is never overwritten," demonstrated independent of the shipped fix (see
+    ``test_seed_default_profile_never_loses_a_concurrent_update`` for the
+    fixed counterpart).
+    """
+    paths = _paths(tmp_path)
+    barrier = threading.Barrier(2)
+    real_profile_names = secrets_module.profile_names
+
+    def _profile_names_then_wait(p: Paths, provider_name: str):
+        result = real_profile_names(p, provider_name)
+        barrier.wait(timeout=5)
+        return result
+
+    results: dict[str, bool] = {}
+    errors: list[BaseException] = []
+
+    def _seed(label: str, token: str) -> None:
+        try:
+            secrets_module.profile_names = _profile_names_then_wait
+            results[label] = _seed_default_profile_check_outside_lock(
+                paths, "ollama", token
+            )
+        except BaseException as exc:  # pragma: no cover - diagnostic only
+            errors.append(exc)
+        finally:
+            secrets_module.profile_names = real_profile_names
+
+    t1 = threading.Thread(target=_seed, args=("A", "token-A"))
+    t2 = threading.Thread(target=_seed, args=("B", "token-B"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert not errors, f"unexpected exception(s): {errors}"
+    assert results == {"A": True, "B": True}, (
+        "expected the forced interleaving on the UNLOCKED check-then-write "
+        f"path to make BOTH concurrent seed calls believe they were the "
+        f"legitimate seeder, got: {results}"
+    )
+
+    final = load_credentials(paths)
+    assert final.get("ollama", {}).get(DEFAULT_PROFILE) in ("token-A", "token-B"), (
+        "expected exactly one of the two tokens to survive (the other "
+        f"silently overwritten), got: {final}"
+    )
+
+
+@pytest.mark.unit
+def test_seed_default_profile_never_loses_a_concurrent_update(tmp_path):
+    """The fixed path: many threads racing ``seed_default_profile`` for the
+    SAME provider, through the real (locked) code — the existence check and
+    the write now share one ``_locked_update`` window, so only the first
+    caller to acquire the lock ever sees "no profile yet"; every later
+    caller re-checks under the same lock and backs off instead of
+    clobbering. Exactly one call must report success, and its token must be
+    the one that survives.
+    """
+    paths = _paths(tmp_path)
+    n = 8
+    tokens = [f"token-{i}" for i in range(n)]
+    results: dict[str, bool] = {}
+
+    def _seed(token: str) -> None:
+        results[token] = seed_default_profile(paths, "ollama", token)
+
+    threads = [threading.Thread(target=_seed, args=(t,)) for t in tokens]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    winners = [token for token, ok in results.items() if ok]
+    assert len(winners) == 1, (
+        f"expected exactly one concurrent seed call to win, got: {results}"
+    )
+
+    final = load_credentials(paths)
+    assert final.get("ollama", {}).get(DEFAULT_PROFILE) == winners[0]
 
 
 @pytest.mark.unit

@@ -148,38 +148,58 @@ def seed_default_profile(paths: Paths, provider_name: str, token: str) -> bool:
     Returns ``True`` only when the cache was written successfully. Filesystem
     failures are reported as warnings because the installed wrapper remains a
     valid source of the token and the caller can continue without a cache.
+
+    The existence check and the write happen inside ONE
+    :func:`_locked_update` window (issue #17 follow-up) rather than as two
+    separate operations — checking ``profile_names`` before acquiring the
+    lock let two concurrent migrations both observe "no profile yet," both
+    pass the guard, and then both write, with the second silently clobbering
+    the first despite this function's own "never overwritten" contract. This
+    can't reuse :func:`save_credential` (it acquires its own lock, and
+    ``flock`` on a second file descriptor for the same file blocks even
+    within one process) — the read-modify-write is inlined here instead.
     """
-    if not token or profile_names(paths, provider_name):
+    if not token:
         return False
 
     path = paths.credentials_file()
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError):
-            print(
-                f"warning: could not recover the {provider_name} token profile "
-                f"because {path} is not valid JSON",
-                file=sys.stderr,
-            )
-            return False
-        if not isinstance(data, dict):
-            print(
-                f"warning: could not recover the {provider_name} token profile "
-                f"because {path} does not contain a JSON object",
-                file=sys.stderr,
-            )
+    with _locked_update(paths):
+        if profile_names(paths, provider_name):
             return False
 
-    try:
-        save_credential(paths, provider_name, token, DEFAULT_PROFILE)
-    except OSError as e:
-        print(
-            f"warning: could not cache the existing {provider_name} token "
-            f"({e}) — the installed wrapper remains unchanged",
-            file=sys.stderr,
-        )
-        return False
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError):
+                print(
+                    f"warning: could not recover the {provider_name} token "
+                    f"profile because {path} is not valid JSON",
+                    file=sys.stderr,
+                )
+                return False
+            if not isinstance(data, dict):
+                print(
+                    f"warning: could not recover the {provider_name} token "
+                    f"profile because {path} does not contain a JSON object",
+                    file=sys.stderr,
+                )
+                return False
+
+        try:
+            data = load_credentials(paths)
+            data.setdefault(provider_name, {})[DEFAULT_PROFILE] = token
+            atomic_write(
+                paths.credentials_file(),
+                json.dumps(data, indent=2, sort_keys=True) + "\n",
+                mode=0o600,
+            )
+        except OSError as e:
+            print(
+                f"warning: could not cache the existing {provider_name} token "
+                f"({e}) — the installed wrapper remains unchanged",
+                file=sys.stderr,
+            )
+            return False
     return True
 
 
