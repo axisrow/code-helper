@@ -36,7 +36,10 @@ __all__ = [
     "MAX_ALIAS_LENGTH",
     "RESERVED_ALIASES",
     "validate_base_url",
+    "normalize_base_url",
     "MAX_BASE_URL_LENGTH",
+    "DEFAULT_BASE_URL_PORT",
+    "DEFAULT_BASE_URL_PATH",
 ]
 
 #: Cap on alias length. Not a filesystem limit (those are far higher) — a
@@ -113,6 +116,61 @@ def validate_alias(alias: str) -> str:
 #: Sanity bound, same class as MAX_ALIAS_LENGTH — not a real protocol limit,
 #: just a ceiling so a pasted blob can't become a generated script's URL.
 MAX_BASE_URL_LENGTH = 512
+
+#: Defaults filled in by :func:`normalize_base_url` when a bare host/IP is
+#: supplied without a port or path. These match a self-hosted LiteLLM proxy's
+#: conventional endpoint; a user who wants a different port/path just types it.
+DEFAULT_BASE_URL_PORT = "4000"
+DEFAULT_BASE_URL_PATH = "/v1"
+
+
+def normalize_base_url(url: str) -> str:
+    """Auto-complete a bare host/IP into a full ``base_url``.
+
+    A user typing ``78.47.183.125`` (no scheme, no port, no path) gets
+    ``https://78.47.183.125:4000/v1``. Input that already carries a scheme
+    (``http://``/``https://``) is returned untouched — an explicit ``http://``
+    is respected, never rewritten to https. Only scheme-less input is touched.
+
+    This is a convenience layer in front of :func:`validate_base_url`, not a
+    validator itself: it never raises, and anything it cannot make sense of is
+    passed through unchanged so the validator reports it properly. Two shapes
+    are deliberately left untouched rather than guessed at:
+
+    - A query string or fragment (``host?x=1``, ``host/path#frag``) —
+      :func:`validate_base_url` is documented to reject these; completing
+      them into a valid-looking URL would silently discard the part the
+      validator exists to catch.
+    - A bare IPv6 host (``2001:db8::1``, ``::1``) — its colons are part of
+      the address, not a port separator, so the "does netloc contain a
+      port?" heuristic below cannot tell the two apart. Left alone, it falls
+      through to :func:`validate_base_url`, which reports it as malformed
+      (no ``http://``/``https://`` scheme) rather than this function
+      guessing a default port into the middle of the address.
+    """
+    stripped = url.strip()
+    if not stripped or "://" in stripped:
+        return stripped
+    if "?" in stripped or "#" in stripped:
+        return stripped
+    # More than one colon means this can only be a bare IPv6 address (a
+    # "host:port" shape has exactly one). Leave it untouched.
+    if stripped.count(":") > 1:
+        return stripped
+    candidate = f"https://{stripped}"
+    try:
+        parts = urlsplit(candidate)
+    except ValueError:
+        # e.g. an unterminated IPv6 bracket — let validate_base_url report it
+        # as malformed rather than leaking a bare ValueError here.
+        return candidate
+    netloc = parts.netloc
+    path = parts.path
+    if ":" not in netloc:  # no explicit port
+        netloc = f"{netloc}:{DEFAULT_BASE_URL_PORT}"
+    if not path:
+        path = DEFAULT_BASE_URL_PATH
+    return f"https://{netloc}{path}"
 
 
 def validate_base_url(url: str) -> None:

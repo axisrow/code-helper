@@ -18,6 +18,7 @@ from code_helper.services.naming import (
     MAX_ALIAS_LENGTH,
     MAX_BASE_URL_LENGTH,
     RESERVED_ALIASES,
+    normalize_base_url,
     validate_alias,
     validate_base_url,
 )
@@ -145,6 +146,57 @@ def test_script_for_still_does_no_io(tmp_path):
     paths = Paths.from_home(tmp_path)
     paths.script_for("glm")
     assert not paths.bin_dir.exists()
+
+
+# --- normalize_base_url -----------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Bare host/IP: scheme + default port + default path are filled in.
+        ("78.47.183.125", "https://78.47.183.125:4000/v1"),
+        ("host.example.com", "https://host.example.com:4000/v1"),
+        # Port present but no path: port kept, path added — no double port.
+        ("localhost:4000", "https://localhost:4000/v1"),
+        ("192.168.1.10:4000", "https://192.168.1.10:4000/v1"),
+        # Port and path both present: unchanged.
+        ("192.168.1.10:4000/v1", "https://192.168.1.10:4000/v1"),
+        # Already has a scheme: returned untouched (explicit http:// respected).
+        ("http://127.0.0.1:11434", "http://127.0.0.1:11434"),
+        ("https://api.example.com/v1", "https://api.example.com/v1"),
+        # Empty / whitespace-only: stripped to empty.
+        ("", ""),
+        ("   ", ""),
+        # Bare IPv6: colons are part of the address, not a port separator —
+        # left untouched so validate_base_url reports it as malformed rather
+        # than being misread as "no port" and silently mangled.
+        ("2001:db8::1", "2001:db8::1"),
+        ("::1", "::1"),
+        # A query string or fragment must reach validate_base_url intact so
+        # its dedicated rejection fires — normalization must not silently
+        # drop them by only reconstructing scheme/netloc/path.
+        ("host?query=1", "host?query=1"),
+        ("host/path#frag", "host/path#frag"),
+        ("host:1234?x=1", "host:1234?x=1"),
+    ],
+)
+def test_normalize_base_url(raw, expected):
+    assert normalize_base_url(raw) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "raw",
+    ["2001:db8::1", "::1", "host?query=1", "host/path#frag", "host:1234?x=1"],
+)
+def test_normalize_base_url_passthrough_still_fails_validation(raw):
+    """Inputs normalize_base_url declines to touch must still be rejected by
+    validate_base_url — proving they aren't silently smuggled through as a
+    valid-looking URL."""
+    with pytest.raises(CodeHelperError):
+        validate_base_url(normalize_base_url(raw))
 
 
 # --- validate_base_url ------------------------------------------------------

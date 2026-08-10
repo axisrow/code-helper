@@ -569,7 +569,7 @@ def with_base_url(provider: Provider, base_url: str | None) -> Provider:
             supplied for a REQUIRED provider; or the supplied URL fails
             validation.
     """
-    from code_helper.services.naming import validate_base_url
+    from code_helper.services.naming import normalize_base_url, validate_base_url
 
     if provider.base_url_policy is BaseUrlPolicy.FIXED:
         if base_url:
@@ -588,10 +588,15 @@ def with_base_url(provider: Provider, base_url: str | None) -> Provider:
         if provider.base_url_policy is BaseUrlPolicy.REQUIRED:
             raise CodeHelperError(
                 f"provider {provider.name!r} needs a base URL — pass "
-                f"--base-url https://host:port/v1"
+                f"--base-url https://host:port/v1 (or a bare host like "
+                f"78.47.183.125, which is auto-completed)"
             )
         return provider  # OVERRIDABLE, nothing supplied: the default stands.
 
+    # A bare host/IP (no scheme) is auto-completed to a full URL before
+    # validation — the single substitution point, so every caller (CLI add,
+    # set-default, TUI) gets the same convenience.
+    base_url = normalize_base_url(base_url)
     validate_base_url(base_url)
     return replace(provider, base_url=base_url)
 

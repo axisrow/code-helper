@@ -787,7 +787,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--base-url",
         default=None,
         help="backend URL for a provider with no address in the registry "
-        "(e.g. litellm: http://localhost:4000/v1); constructor form only",
+        "(e.g. litellm: http://localhost:4000/v1); a bare host/IP like "
+        "78.47.183.125 is auto-completed to https://78.47.183.125:4000/v1; "
+        "constructor form only",
     )
     p_add.add_argument(
         "--auth",
