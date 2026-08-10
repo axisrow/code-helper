@@ -31,6 +31,7 @@ break out of the generated script — see the injection tests in
 
 from __future__ import annotations
 
+import contextlib
 import getpass
 import json
 import os
@@ -41,6 +42,11 @@ from dataclasses import dataclass
 from code_helper.backends._atomic import atomic_write
 from code_helper.errors import CodeHelperError
 from code_helper.services.paths import Paths
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - this project targets macOS/Linux only
+    fcntl = None  # type: ignore[assignment]
 
 __all__ = [
     "ResolvedToken",
@@ -142,38 +148,58 @@ def seed_default_profile(paths: Paths, provider_name: str, token: str) -> bool:
     Returns ``True`` only when the cache was written successfully. Filesystem
     failures are reported as warnings because the installed wrapper remains a
     valid source of the token and the caller can continue without a cache.
+
+    The existence check and the write happen inside ONE
+    :func:`_locked_update` window (issue #17 follow-up) rather than as two
+    separate operations — checking ``profile_names`` before acquiring the
+    lock let two concurrent migrations both observe "no profile yet," both
+    pass the guard, and then both write, with the second silently clobbering
+    the first despite this function's own "never overwritten" contract. This
+    can't reuse :func:`save_credential` (it acquires its own lock, and
+    ``flock`` on a second file descriptor for the same file blocks even
+    within one process) — the read-modify-write is inlined here instead.
     """
-    if not token or profile_names(paths, provider_name):
+    if not token:
         return False
 
     path = paths.credentials_file()
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError):
-            print(
-                f"warning: could not recover the {provider_name} token profile "
-                f"because {path} is not valid JSON",
-                file=sys.stderr,
-            )
-            return False
-        if not isinstance(data, dict):
-            print(
-                f"warning: could not recover the {provider_name} token profile "
-                f"because {path} does not contain a JSON object",
-                file=sys.stderr,
-            )
+    with _locked_update(paths):
+        if profile_names(paths, provider_name):
             return False
 
-    try:
-        save_credential(paths, provider_name, token, DEFAULT_PROFILE)
-    except OSError as e:
-        print(
-            f"warning: could not cache the existing {provider_name} token "
-            f"({e}) — the installed wrapper remains unchanged",
-            file=sys.stderr,
-        )
-        return False
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError):
+                print(
+                    f"warning: could not recover the {provider_name} token "
+                    f"profile because {path} is not valid JSON",
+                    file=sys.stderr,
+                )
+                return False
+            if not isinstance(data, dict):
+                print(
+                    f"warning: could not recover the {provider_name} token "
+                    f"profile because {path} does not contain a JSON object",
+                    file=sys.stderr,
+                )
+                return False
+
+        try:
+            data = load_credentials(paths)
+            data.setdefault(provider_name, {})[DEFAULT_PROFILE] = token
+            atomic_write(
+                paths.credentials_file(),
+                json.dumps(data, indent=2, sort_keys=True) + "\n",
+                mode=0o600,
+            )
+        except OSError as e:
+            print(
+                f"warning: could not cache the existing {provider_name} token "
+                f"({e}) — the installed wrapper remains unchanged",
+                file=sys.stderr,
+            )
+            return False
     return True
 
 
@@ -184,6 +210,72 @@ def credential_for(
     return load_credentials(paths).get(provider_name, {}).get(profile_name, "")
 
 
+#: Sibling lock file for ``credentials.json`` (issue #17). ``fcntl.flock`` is
+#: advisory and held only for the duration of a single read-modify-write
+#: cycle below — this is NOT a lock file in the "process is running" sense,
+#: just a mutex protecting the read-write window every writer in this module
+#: shares. A separate file (not the credentials file itself) is used so a
+#: crashed holder never leaves the credentials file itself locked or in a
+#: half-open state; the lock file's own content is never read.
+_LOCK_SUFFIX = ".lock"
+
+
+@contextlib.contextmanager
+def _locked_update(paths: Paths):
+    """Serialize one read-modify-write cycle against ``credentials.json``.
+
+    Every writer in this module (:func:`save_credential`,
+    :func:`rename_profile`, :func:`invalidate_cached_credential`) goes
+    through this ONE context manager rather than each independently pairing
+    :func:`load_credentials` with ``atomic_write`` — the same "one decision
+    point" pattern this project already uses for
+    :func:`cache_freshly_typed_token` and ``render.openai_base_url``, so the
+    three writers cannot drift on how they serialize.
+
+    Empirically (see ``tests/test_credentials_concurrency.py``), two
+    concurrent ``code-helper`` invocations racing this window reliably lose
+    one side's update — not a rare, hard-to-hit interleaving, but one that
+    reproduced on ordinary GIL-scheduled threads with no forced delay. An
+    ``fcntl.flock`` held for the read-modify-write window closes that window:
+    a second holder blocks until the first releases it (via the ``with``
+    block's exit, which always runs, success or exception), so the two
+    read-modify-write cycles serialize instead of interleaving.
+
+    The lock acquisition itself must NEVER raise or block forever, mirroring
+    every other function in this module's never-raises contract
+    (:func:`load_credentials`, :func:`invalidate_cached_credential`): a
+    missing ``fcntl`` module (not POSIX — this project targets macOS/Linux
+    only, so this is a defensive fallback, not a supported platform gap) or
+    an unwritable ``config_dir`` degrades to NO locking rather than an
+    uncaught exception, which is strictly no worse than this project's
+    pre-#17 behavior. The lock file is opened in ``a`` mode (create if
+    absent, never truncate — its content is irrelevant, only the fd's lock
+    matters) at ``0o600``, matching the credentials file's own permissions.
+    """
+    lock_module = fcntl
+    handle = None
+    if lock_module is not None:
+        lock_path = paths.credentials_file().with_suffix(
+            paths.credentials_file().suffix + _LOCK_SUFFIX
+        )
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(lock_path, "a")
+            os.chmod(lock_path, 0o600)
+            lock_module.flock(handle.fileno(), lock_module.LOCK_EX)
+        except OSError:
+            if handle is not None:
+                handle.close()
+            handle = None  # fall through to the unlocked path
+    try:
+        yield
+    finally:
+        if handle is not None and lock_module is not None:
+            with contextlib.suppress(OSError):
+                lock_module.flock(handle.fileno(), lock_module.LOCK_UN)
+            handle.close()
+
+
 def save_credential(
     paths: Paths,
     provider_name: str,
@@ -192,50 +284,58 @@ def save_credential(
 ) -> None:
     """Cache ``token`` for a provider profile in ``credentials.json`` (``0o600``).
 
-    Read-modify-write so one provider's credential never clobbers another's.
-    Written through ``atomic_write`` with ``mode=0o600`` — the same crash-safe
-    primitive that writes wrapper scripts, owner-only because the file holds
-    secrets in plain text. ``atomic_write`` creates ``config_dir`` if absent.
+    Read-modify-write so one provider's credential never clobbers another's —
+    serialized against other writers in this module via :func:`_locked_update`
+    (issue #17). Written through ``atomic_write`` with ``mode=0o600`` — the
+    same crash-safe primitive that writes wrapper scripts, owner-only because
+    the file holds secrets in plain text. ``atomic_write`` creates
+    ``config_dir`` if absent.
     """
     if not token:
         return  # never write an empty credential (would only delete later reads)
-    data = load_credentials(paths)
-    data.setdefault(provider_name, {})[profile_name] = token
-    atomic_write(
-        paths.credentials_file(),
-        json.dumps(data, indent=2, sort_keys=True) + "\n",
-        mode=0o600,
-    )
-
-
-def rename_profile(
-    paths: Paths, provider_name: str, old_name: str, new_name: str
-) -> None:
-    """Rename one provider profile without exposing or losing its token."""
-    if not new_name or old_name == new_name:
-        return
-    data = load_credentials(paths)
-    profiles = data.get(provider_name)
-    if not profiles or old_name not in profiles:
-        return
-    if new_name in profiles:
-        raise CodeHelperError(
-            f"profile {new_name!r} already exists for provider {provider_name}"
-        )
-    profiles[new_name] = profiles.pop(old_name)
-    try:
+    with _locked_update(paths):
+        data = load_credentials(paths)
+        data.setdefault(provider_name, {})[profile_name] = token
         atomic_write(
             paths.credentials_file(),
             json.dumps(data, indent=2, sort_keys=True) + "\n",
             mode=0o600,
         )
-    except OSError as e:
-        print(
-            f"warning: could not rename the token profile for {provider_name} "
-            f"({e}) — the wrapper is installed, but the old profile name "
-            "remains",
-            file=sys.stderr,
-        )
+
+
+def rename_profile(
+    paths: Paths, provider_name: str, old_name: str, new_name: str
+) -> None:
+    """Rename one provider profile without exposing or losing its token.
+
+    Serialized against other writers in this module via :func:`_locked_update`
+    (issue #17).
+    """
+    if not new_name or old_name == new_name:
+        return
+    with _locked_update(paths):
+        data = load_credentials(paths)
+        profiles = data.get(provider_name)
+        if not profiles or old_name not in profiles:
+            return
+        if new_name in profiles:
+            raise CodeHelperError(
+                f"profile {new_name!r} already exists for provider {provider_name}"
+            )
+        profiles[new_name] = profiles.pop(old_name)
+        try:
+            atomic_write(
+                paths.credentials_file(),
+                json.dumps(data, indent=2, sort_keys=True) + "\n",
+                mode=0o600,
+            )
+        except OSError as e:
+            print(
+                f"warning: could not rename the token profile for {provider_name} "
+                f"({e}) — the wrapper is installed, but the old profile name "
+                "remains",
+                file=sys.stderr,
+            )
 
 
 def invalidate_cached_credential(
@@ -262,8 +362,14 @@ def invalidate_cached_credential(
     unwritable ``config_dir``, permission error) must not surface as an
     uncaught exception — see that function's docstring for the full
     reasoning; both go through the identical best-effort try/except so the
-    two cannot drift on it.
+    two cannot drift on it. Serialized against other writers in this module
+    via :func:`_locked_update` (issue #17).
     """
+    with _locked_update(paths):
+        _invalidate_locked(paths, provider_name, profile_name)
+
+
+def _invalidate_locked(paths: Paths, provider_name: str, profile_name: str) -> None:
     data = load_credentials(paths)
     profiles = data.get(provider_name)
     if not profiles or profile_name not in profiles:
