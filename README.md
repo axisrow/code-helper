@@ -271,6 +271,15 @@ With `--profile` or an explicit TUI selection, that profile is used first and
 the environment variable is not substituted for it. A custom LiteLLM URL does
 not receive a profile implicitly; selecting a profile is an explicit choice.
 
+A named profile is **portable across a provider's addresses.** For a provider
+whose URL you supply yourself (`litellm`), the same `--profile work` reuses
+its cached key against whatever `--base-url` you give — the key is stored per
+provider and profile, never per URL, so there is no warning if you point it at
+a different host later. Without `--profile`, a cached key is *not* reused for
+such a provider: nothing selected it for that run, so `code-helper` prompts
+instead. Naming a profile is what tells `code-helper` you mean that key for
+this address; if a key is really scoped to one host, give it its own profile.
+
 This file is a **cache, not a session with the provider**: `code-helper`
 configures agents and aliases, it does not log in anywhere. There is no
 "logged in" state and no command that connects to a provider to validate a

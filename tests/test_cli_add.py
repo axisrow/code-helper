@@ -966,6 +966,79 @@ def test_add_ignores_a_cached_token_for_a_runtime_address_provider_on_install(
 
 
 @pytest.mark.integration
+def test_add_reuses_a_named_profile_across_two_different_base_urls(
+    tmp_path, monkeypatch
+):
+    """Same ``--profile``, two different ``--base-url`` values, one cached
+    token — deliberate, not an oversight (issue #19).
+
+    An explicit ``--profile`` is an informed choice, so a NAMED profile's
+    cache is trusted regardless of ``base_url_policy``; that is what makes
+    profiles usable for a REQUIRED-policy provider like ``litellm`` at all.
+    Contrast ``test_add_ignores_a_cached_token_for_a_runtime_address_provider_on_install``
+    directly above: the UNNAMED cache is not reused across a changed address,
+    because nothing selected it for that invocation. Adding the
+    ``base_url_policy`` guard to ``resolve_token``'s named branch too makes
+    named profiles unusable for ``litellm`` — a regression this project
+    shipped in review and reverted by explicit decision.
+    """
+    import code_helper.services.secrets as secrets
+
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "litellm", "sk-profile-work", "work")
+
+    def _explode(_prompt):  # pragma: no cover - must not run
+        raise AssertionError("must not prompt when the named profile's cache has it")
+
+    monkeypatch.setattr("code_helper.services.secrets.getpass.getpass", _explode)
+
+    code_a = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://host-a:4000/v1",
+            "--model",
+            "gpt-4o",
+            "--alias",
+            "lite-a",
+            "--profile",
+            "work",
+        ]
+    )
+    code_b = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://host-b:4000/v1",
+            "--model",
+            "gpt-4o",
+            "--alias",
+            "lite-b",
+            "--profile",
+            "work",
+        ]
+    )
+    assert code_a == 0
+    assert code_b == 0
+
+    body_a = _body(tmp_path, "lite-a")
+    body_b = _body(tmp_path, "lite-b")
+    assert "export ANTHROPIC_AUTH_TOKEN='sk-profile-work'" in body_a
+    assert "export ANTHROPIC_AUTH_TOKEN='sk-profile-work'" in body_b
+    assert "http://host-a:4000" in body_a
+    assert "http://host-b:4000" in body_b
+
+
+@pytest.mark.integration
 def test_list_models_ignores_a_cached_token_for_a_runtime_address_provider(
     tmp_path, monkeypatch
 ):
@@ -1002,6 +1075,47 @@ def test_list_models_ignores_a_cached_token_for_a_runtime_address_provider(
     )
     assert code == 0
     assert seen["token"] == ""
+
+
+@pytest.mark.integration
+def test_list_models_uses_a_named_profile_for_a_runtime_address_provider(
+    tmp_path, monkeypatch
+):
+    """The named-profile counterpart to the test above: ``--list-models``
+    discovery DOES hand a cached token to a REQUIRED-policy provider when the
+    caller named the profile explicitly — mirroring ``resolve_token``'s same
+    named/unnamed asymmetry on the discovery path (``token_for_discovery``,
+    secrets.py). Deliberate, per issue #19."""
+    import code_helper.services.models_api as models_api
+    import code_helper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "litellm", "sk-profile-work", "work")
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+
+    seen = {}
+
+    def _fake_list_models(provider, *, token=""):
+        seen["token"] = token
+        return models_api.ModelListResult(models=("m1",), source="fake")
+
+    monkeypatch.setattr(models_api, "list_models", _fake_list_models)
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://localhost:4000/v1",
+            "--profile",
+            "work",
+            "--list-models",
+        ]
+    )
+    assert code == 0
+    assert seen["token"] == "sk-profile-work"
 
 
 @pytest.mark.integration
