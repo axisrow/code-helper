@@ -450,6 +450,31 @@ def test_tui_tab_works_on_a_fresh_install_with_no_prior_profile_screen_visit(
 
 
 @pytest.mark.integration
+def test_tui_tab_on_fresh_install_selects_the_first_profile(monkeypatch):
+    """The stale/never-set case is "before the first profile": the first Tab
+    must land on profile_names[0], not skip it to names[1]. Guards the
+    off-by-one where the header shows names[0] but a real Tab selects
+    names[1] (issue #23's _on_tab)."""
+    import code_helper.services.secrets as secrets
+    from code_helper.services.state import active_selection
+
+    paths = Paths.default()
+    secrets.save_credential(paths, "zai", "sk-one", "axisrow")
+    secrets.save_credential(paths, "zai", "sk-two", "bemyownrobot")
+    # Deliberately no set_active_selection: fresh install, never-set state.
+    names = list(secrets.profile_names(paths, "zai"))
+
+    def _select(_items, *, on_tab=None, **_kwargs):
+        if on_tab is not None:
+            on_tab()
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+    assert active_selection(paths) == ("zai", names[0])
+
+
+@pytest.mark.integration
 def test_tui_tab_is_a_silent_noop_with_no_cached_profiles(monkeypatch):
     from code_helper.services.state import load_state
 

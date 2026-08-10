@@ -551,8 +551,11 @@ def run_tui(args: argparse.Namespace) -> int:
         names = list(profile_names(paths, provider))
         if not names:
             return
-        current = _tab_profile(provider)
-        idx = names.index(current) if current in names else -1
+        # A valid stored profile advances to the next; a stale or never-set
+        # one is "before the first profile", so Tab lands on names[0] (the
+        # same frame the header already claims) rather than skipping it.
+        stored = valid_active_profile(paths, provider)
+        idx = names.index(stored) if stored in names else -1
         set_active_selection(paths, provider, names[(idx + 1) % len(names)])
         # The selection just changed — invalidate so the header/row/hint
         # reflect it on the next read instead of the pre-Tab provider.
