@@ -18,6 +18,7 @@ from code_helper.services.naming import (
     MAX_ALIAS_LENGTH,
     MAX_BASE_URL_LENGTH,
     RESERVED_ALIASES,
+    normalize_base_url,
     validate_alias,
     validate_base_url,
 )
@@ -145,6 +146,33 @@ def test_script_for_still_does_no_io(tmp_path):
     paths = Paths.from_home(tmp_path)
     paths.script_for("glm")
     assert not paths.bin_dir.exists()
+
+
+# --- normalize_base_url -----------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Bare host/IP: scheme + default port + default path are filled in.
+        ("78.47.183.125", "https://78.47.183.125:4000/v1"),
+        ("host.example.com", "https://host.example.com:4000/v1"),
+        # Port present but no path: port kept, path added — no double port.
+        ("localhost:4000", "https://localhost:4000/v1"),
+        ("192.168.1.10:4000", "https://192.168.1.10:4000/v1"),
+        # Port and path both present: unchanged.
+        ("192.168.1.10:4000/v1", "https://192.168.1.10:4000/v1"),
+        # Already has a scheme: returned untouched (explicit http:// respected).
+        ("http://127.0.0.1:11434", "http://127.0.0.1:11434"),
+        ("https://api.example.com/v1", "https://api.example.com/v1"),
+        # Empty / whitespace-only: stripped to empty.
+        ("", ""),
+        ("   ", ""),
+    ],
+)
+def test_normalize_base_url(raw, expected):
+    assert normalize_base_url(raw) == expected
 
 
 # --- validate_base_url ------------------------------------------------------

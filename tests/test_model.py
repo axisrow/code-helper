@@ -329,6 +329,18 @@ def test_required_provider_accepts_a_valid_url():
 
 
 @pytest.mark.unit
+def test_required_provider_auto_completes_a_bare_host():
+    got = with_base_url(_RUNTIME_REQUIRED, "78.47.183.125")
+    assert got.base_url == "https://78.47.183.125:4000/v1"
+
+
+@pytest.mark.unit
+def test_required_provider_keeps_explicit_http_scheme():
+    got = with_base_url(_RUNTIME_REQUIRED, "http://127.0.0.1:11434")
+    assert got.base_url == "http://127.0.0.1:11434"
+
+
+@pytest.mark.unit
 def test_required_provider_propagates_url_validation():
     with pytest.raises(CodeHelperError, match="http:// or https://"):
         with_base_url(_RUNTIME_REQUIRED, "ftp://x")
