@@ -191,11 +191,12 @@ class Paths:
     def credentials_file(self) -> Path:
         """``~/.config/code-helper/credentials.json`` — the cached token store.
 
-        A FLAT ``{provider_name: token}`` JSON object (not nested): keys are
-        provider names, never wrapper names, because one provider may back many
-        wrappers and the credential belongs to the provider. Owned and written
-        only by ``services/secrets.py``. Pure arithmetic, no IO, no existence
-        check — same contract as every other accessor here.
+        A ``{provider_name: {profile_name: token}}`` JSON object: profiles are
+        scoped to providers, never wrappers, because one provider may back many
+        wrappers and the credential belongs to the provider. The first key is
+        stored under the internal ``default`` profile. Owned and written only
+        by ``services/secrets.py``. Pure arithmetic, no IO, no existence check —
+        same contract as every other accessor here.
 
         This file is a CACHE of values the user typed at an install prompt, not
         a session with any provider and not the source of truth: each

@@ -24,14 +24,18 @@ import pytest
 
 from code_helper.services.paths import Paths
 from code_helper.services.secrets import (
+    DEFAULT_PROFILE,
     SOURCE_CACHE,
     SOURCE_ENV,
     SOURCE_PROMPT,
     credential_for,
     invalidate_cached_credential,
     load_credentials,
+    profile_names,
+    rename_profile,
     resolve_token,
     save_credential,
+    seed_default_profile,
     token_for_discovery,
 )
 
@@ -78,14 +82,14 @@ def test_load_credentials_skips_non_string_values(tmp_path):
     _write_credentials_file(
         paths, json.dumps({"litellm": "sk-1", "zai": 12345, "": "empty-key"})
     )
-    assert load_credentials(paths) == {"litellm": "sk-1"}
+    assert load_credentials(paths) == {"litellm": {DEFAULT_PROFILE: "sk-1"}}
 
 
 @pytest.mark.unit
 def test_load_credentials_skips_empty_values(tmp_path):
     paths = _paths(tmp_path)
     _write_credentials_file(paths, json.dumps({"litellm": "", "zai": "sk-real"}))
-    assert load_credentials(paths) == {"zai": "sk-real"}
+    assert load_credentials(paths) == {"zai": {DEFAULT_PROFILE: "sk-real"}}
 
 
 @pytest.mark.unit
@@ -120,7 +124,10 @@ def test_save_credential_does_not_clobber_another_provider(tmp_path):
     save_credential(paths, "litellm", "sk-1")
     save_credential(paths, "zai", "sk-2")
     creds = load_credentials(paths)
-    assert creds == {"litellm": "sk-1", "zai": "sk-2"}
+    assert creds == {
+        "litellm": {DEFAULT_PROFILE: "sk-1"},
+        "zai": {DEFAULT_PROFILE: "sk-2"},
+    }
 
 
 @pytest.mark.unit
@@ -129,6 +136,58 @@ def test_save_credential_overwrites_same_provider(tmp_path):
     save_credential(paths, "litellm", "sk-old")
     save_credential(paths, "litellm", "sk-new")
     assert credential_for(paths, "litellm") == "sk-new"
+
+
+@pytest.mark.unit
+def test_save_credential_keeps_multiple_profiles_for_one_provider(tmp_path):
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-one", "work")
+    save_credential(paths, "zai", "sk-two", "personal")
+
+    assert profile_names(paths, "zai") == ("personal", "work")
+    assert credential_for(paths, "zai", "work") == "sk-one"
+    assert credential_for(paths, "zai", "personal") == "sk-two"
+
+
+@pytest.mark.unit
+def test_seed_default_profile_recovers_only_when_provider_has_no_profiles(tmp_path):
+    paths = _paths(tmp_path)
+
+    assert seed_default_profile(paths, "zai", "sk-existing") is True
+    assert credential_for(paths, "zai") == "sk-existing"
+
+    # A second recovery must not replace the existing default token.
+    assert seed_default_profile(paths, "zai", "sk-other") is False
+    assert credential_for(paths, "zai") == "sk-existing"
+
+
+@pytest.mark.unit
+def test_seed_default_profile_leaves_malformed_cache_untouched(tmp_path):
+    paths = _paths(tmp_path)
+    _write_credentials_file(paths, "not json")
+
+    assert seed_default_profile(paths, "zai", "sk-existing") is False
+    assert paths.credentials_file().read_text() == "not json"
+
+
+@pytest.mark.unit
+def test_flat_legacy_credential_is_read_as_default_profile(tmp_path):
+    paths = _paths(tmp_path)
+    _write_credentials_file(paths, json.dumps({"zai": "sk-legacy"}))
+
+    assert profile_names(paths, "zai") == (DEFAULT_PROFILE,)
+    assert credential_for(paths, "zai") == "sk-legacy"
+
+
+@pytest.mark.unit
+def test_rename_profile_preserves_the_token(tmp_path):
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-one")
+
+    rename_profile(paths, "zai", DEFAULT_PROFILE, "work")
+
+    assert credential_for(paths, "zai", DEFAULT_PROFILE) == ""
+    assert credential_for(paths, "zai", "work") == "sk-one"
 
 
 @pytest.mark.unit
@@ -145,7 +204,10 @@ def test_save_credential_preserves_foreign_file_content(tmp_path):
     _write_credentials_file(paths, json.dumps({"future-provider": "sk-x"}))
     save_credential(paths, "litellm", "sk-1")
     creds = load_credentials(paths)
-    assert creds == {"future-provider": "sk-x", "litellm": "sk-1"}
+    assert creds == {
+        "future-provider": {DEFAULT_PROFILE: "sk-x"},
+        "litellm": {DEFAULT_PROFILE: "sk-1"},
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -321,6 +383,80 @@ def test_resolve_token_ignores_cache_for_a_runtime_address_provider(tmp_path):
 
 
 @pytest.mark.unit
+def test_resolve_token_trusts_a_named_profiles_cache_for_a_runtime_address_provider(
+    tmp_path,
+):
+    """A NAMED profile's cache is trusted for ANY base_url_policy.
+
+    Unlike the unnamed/default cache (host-isolation guarded elsewhere in
+    this file), a profile the user explicitly named via ``--profile`` is a
+    deliberate per-invocation choice — the same reasoning that already lets
+    an explicit profile win over the environment. This is what makes named
+    profiles usable at all for a REQUIRED-policy provider like ``litellm``,
+    which the profile feature explicitly documents supporting.
+    """
+    paths = _paths(tmp_path)
+    save_credential(paths, "litellm", "sk-cached-for-work", "work")
+
+    resolved = resolve_token(
+        env_var="LITELLM_API_KEY",
+        prompt="token: ",
+        paths=paths,
+        provider_name="litellm",
+        profile_name="work",
+        base_url_policy="required",
+        environ={},
+        getpass_fn=_no_prompt,
+    )
+    assert resolved.value == "sk-cached-for-work"
+    assert resolved.source == SOURCE_CACHE
+
+
+@pytest.mark.unit
+def test_resolve_token_still_uses_a_profiled_cache_for_a_fixed_provider(tmp_path):
+    """A named profile's cache is still safe to reuse for a FIXED provider."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-cached", "work")
+    resolved = resolve_token(
+        env_var="ZAI_API_KEY",
+        prompt="token: ",
+        paths=paths,
+        provider_name="zai",
+        profile_name="work",
+        base_url_policy="fixed",
+        environ={},
+        getpass_fn=_no_prompt,
+    )
+    assert resolved.value == "sk-cached"
+    assert resolved.source == SOURCE_CACHE
+
+
+@pytest.mark.unit
+def test_resolve_token_falls_back_to_env_for_a_brand_new_uncached_profile(tmp_path):
+    """A NEW profile with nothing cached yet must still consult the env var.
+
+    Before this fix, naming an explicit profile skipped the environment
+    check outright, so a first-time ``--profile`` use in a headless/CI run
+    (no cached token for that profile yet) fell straight to an interactive
+    ``getpass`` prompt instead of honouring an already-set env var — a
+    scripted install with a brand-new profile name would hang.
+    """
+    paths = _paths(tmp_path)
+    resolved = resolve_token(
+        env_var="ZAI_API_KEY",
+        prompt="token: ",
+        paths=paths,
+        provider_name="zai",
+        profile_name="brand-new",
+        base_url_policy="fixed",
+        environ={"ZAI_API_KEY": "sk-env"},
+        getpass_fn=_no_prompt,
+    )
+    assert resolved.value == "sk-env"
+    assert resolved.source == SOURCE_ENV
+
+
+@pytest.mark.unit
 def test_resolve_token_still_uses_cache_for_a_fixed_provider(tmp_path):
     """The pre-existing behaviour is preserved for FIXED providers, where the
     address never varies and the cache is safe to reuse."""
@@ -467,6 +603,79 @@ def test_token_for_discovery_ignores_cache_for_a_runtime_address_provider(tmp_pa
         base_url_policy="required",
     )
     assert token_for_discovery(paths, provider, environ={}) == ""
+
+
+@pytest.mark.unit
+def test_token_for_discovery_trusts_a_named_profiles_cache_for_a_runtime_address_provider(
+    tmp_path,
+):
+    """A NAMED profile's cache is trusted for ANY base_url_policy.
+
+    Mirrors ``resolve_token``'s same distinction: an explicitly named
+    profile is a deliberate per-invocation choice, unlike the unnamed
+    cache (still host-isolation guarded below). Without this, model
+    discovery could never use an already-cached profile token for a
+    REQUIRED-policy provider like ``litellm``.
+    """
+    paths = _paths(tmp_path)
+    save_credential(paths, "litellm", "sk-cached", "work")
+    provider = _Provider(
+        auth="secret",
+        token_env_var="LITELLM_API_KEY",
+        name="litellm",
+        base_url_policy="required",
+    )
+    assert (
+        token_for_discovery(paths, provider, profile_name="work", environ={})
+        == "sk-cached"
+    )
+
+
+@pytest.mark.unit
+def test_token_for_discovery_still_uses_a_profiled_cache_for_a_fixed_provider(
+    tmp_path,
+):
+    """A named profile's cache is still safe to reuse for a FIXED provider."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-cached", "work")
+    provider = _Provider(
+        auth="secret",
+        token_env_var="ZAI_API_KEY",
+        name="zai",
+        base_url_policy="fixed",
+    )
+    assert (
+        token_for_discovery(paths, provider, profile_name="work", environ={})
+        == "sk-cached"
+    )
+
+
+@pytest.mark.unit
+def test_token_for_discovery_falls_back_to_env_for_a_brand_new_uncached_profile(
+    tmp_path,
+):
+    """A NEW profile with nothing cached yet must still consult the env var.
+
+    Before this fix, naming a profile with no cached entry returned ""
+    immediately without ever checking the environment, so ``--list-models
+    --profile NAME`` on a first-time profile sent an unauthenticated
+    request even when the provider's env var was set — inconsistent with
+    ``resolve_token``'s same env fallback for a brand-new profile.
+    """
+    paths = _paths(tmp_path)
+    provider = _Provider(
+        auth="secret",
+        token_env_var="ZAI_API_KEY",
+        name="zai",
+        base_url_policy="fixed",
+    )
+    result = token_for_discovery(
+        paths,
+        provider,
+        profile_name="brand-new",
+        environ={"ZAI_API_KEY": "sk-env"},
+    )
+    assert result == "sk-env"
 
 
 @pytest.mark.unit

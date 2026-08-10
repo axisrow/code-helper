@@ -1,6 +1,6 @@
 """Resolving a wrapper's secret token.
 
-The resolution order is **env var → cached credential → hidden prompt**, and a
+The resolution order is **env var → selected profile → hidden prompt**, and a
 token resolved from a prompt is cached back so the next ``add``/``--list-models``
 does not ask again. The cache is the ONLY persistent copy of a token this project
 keeps outside a generated wrapper script — and it is a CACHE, not a session:
@@ -13,9 +13,11 @@ keeps outside a generated wrapper script — and it is a CACHE, not a session:
   agents and aliases; it does not authenticate with anything.
 - The file is written ``0o600`` (owner-only) and read by no one but this module.
 
-The flat shape is ``{provider_name: token}`` — keys are provider names, never
-wrapper names, because one provider backs many wrappers and the credential
-belongs to the provider.
+The profile shape is ``{provider_name: {profile_name: token}}`` — profiles are
+scoped to providers, never wrappers, because one provider backs many wrappers.
+The first key uses the internal ``default`` profile. When a second key is
+added, the UI names both profiles. The old flat ``{provider_name: token}``
+shape is read as ``default`` for backward compatibility.
 
 Provider-specific key FORMAT validation (the archived project's strict
 ``<32-hex>.<16-alnum>`` Z.ai regex) is deliberately NOT reproduced here — this
@@ -42,8 +44,12 @@ from code_helper.services.paths import Paths
 
 __all__ = [
     "ResolvedToken",
+    "DEFAULT_PROFILE",
     "resolve_token",
     "load_credentials",
+    "profile_names",
+    "seed_default_profile",
+    "rename_profile",
     "credential_for",
     "save_credential",
     "invalidate_cached_credential",
@@ -58,6 +64,7 @@ __all__ = [
 SOURCE_ENV = "env"
 SOURCE_CACHE = "file"
 SOURCE_PROMPT = "prompt"
+DEFAULT_PROFILE = "default"
 
 
 @dataclass(frozen=True)
@@ -73,8 +80,8 @@ class ResolvedToken:
     source: str
 
 
-def load_credentials(paths: Paths) -> dict[str, str]:
-    """Read ``credentials.json`` as ``{provider_name: token}``.
+def load_credentials(paths: Paths) -> dict[str, dict[str, str]]:
+    """Read ``credentials.json`` as ``{provider_name: {profile: token}}``.
 
     **Never raises.** A missing, unreadable, malformed, or oddly-shaped file is
     equivalent to "no cached credentials" — the same never-fails-on-its-way-out
@@ -94,23 +101,96 @@ def load_credentials(paths: Paths) -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {
-        str(name): str(value)
-        for name, value in data.items()
-        if isinstance(name, str)
-        and name  # a provider name is never empty
-        and isinstance(value, str)
-        and value
-    }
+    credentials: dict[str, dict[str, str]] = {}
+    for provider_name, value in data.items():
+        if not isinstance(provider_name, str) or not provider_name:
+            continue
+        if isinstance(value, str):
+            # Pre-profile cache: preserve the token as the unnamed profile.
+            if value:
+                credentials[provider_name] = {DEFAULT_PROFILE: value}
+            continue
+        if not isinstance(value, dict):
+            continue
+        profiles = {
+            profile_name: token
+            for profile_name, token in value.items()
+            if isinstance(profile_name, str)
+            and profile_name
+            and isinstance(token, str)
+            and token
+        }
+        if profiles:
+            credentials[provider_name] = profiles
+    return credentials
 
 
-def credential_for(paths: Paths, provider_name: str) -> str:
-    """The cached token for ``provider_name``, or ``""`` if none — never raises."""
-    return load_credentials(paths).get(provider_name, "")
+def profile_names(paths: Paths, provider_name: str) -> tuple[str, ...]:
+    """Return the provider's profiles in stable display order."""
+    names = set(load_credentials(paths).get(provider_name, {}))
+    return tuple(sorted(names, key=lambda name: (name != DEFAULT_PROFILE, name)))
 
 
-def save_credential(paths: Paths, provider_name: str, token: str) -> None:
-    """Cache ``token`` for ``provider_name`` in ``credentials.json`` (``0o600``).
+def seed_default_profile(paths: Paths, provider_name: str, token: str) -> bool:
+    """Cache an existing token as ``default`` when no profile exists yet.
+
+    This is the migration bridge for wrappers installed before the profile
+    cache was introduced. It is deliberately conservative: an existing
+    provider profile is never overwritten, and a malformed credentials file is
+    left untouched rather than replaced with a partial reconstruction.
+
+    Returns ``True`` only when the cache was written successfully. Filesystem
+    failures are reported as warnings because the installed wrapper remains a
+    valid source of the token and the caller can continue without a cache.
+    """
+    if not token or profile_names(paths, provider_name):
+        return False
+
+    path = paths.credentials_file()
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            print(
+                f"warning: could not recover the {provider_name} token profile "
+                f"because {path} is not valid JSON",
+                file=sys.stderr,
+            )
+            return False
+        if not isinstance(data, dict):
+            print(
+                f"warning: could not recover the {provider_name} token profile "
+                f"because {path} does not contain a JSON object",
+                file=sys.stderr,
+            )
+            return False
+
+    try:
+        save_credential(paths, provider_name, token, DEFAULT_PROFILE)
+    except OSError as e:
+        print(
+            f"warning: could not cache the existing {provider_name} token "
+            f"({e}) — the installed wrapper remains unchanged",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def credential_for(
+    paths: Paths, provider_name: str, profile_name: str = DEFAULT_PROFILE
+) -> str:
+    """The cached token for a profile, or ``""`` if none — never raises."""
+    return load_credentials(paths).get(provider_name, {}).get(profile_name, "")
+
+
+def save_credential(
+    paths: Paths,
+    provider_name: str,
+    token: str,
+    profile_name: str = DEFAULT_PROFILE,
+) -> None:
+    """Cache ``token`` for a provider profile in ``credentials.json`` (``0o600``).
 
     Read-modify-write so one provider's credential never clobbers another's.
     Written through ``atomic_write`` with ``mode=0o600`` — the same crash-safe
@@ -120,7 +200,7 @@ def save_credential(paths: Paths, provider_name: str, token: str) -> None:
     if not token:
         return  # never write an empty credential (would only delete later reads)
     data = load_credentials(paths)
-    data[provider_name] = token
+    data.setdefault(provider_name, {})[profile_name] = token
     atomic_write(
         paths.credentials_file(),
         json.dumps(data, indent=2, sort_keys=True) + "\n",
@@ -128,8 +208,40 @@ def save_credential(paths: Paths, provider_name: str, token: str) -> None:
     )
 
 
-def invalidate_cached_credential(paths: Paths, provider_name: str) -> None:
-    """Drop ``provider_name``'s cached credential, if any — never raises.
+def rename_profile(
+    paths: Paths, provider_name: str, old_name: str, new_name: str
+) -> None:
+    """Rename one provider profile without exposing or losing its token."""
+    if not new_name or old_name == new_name:
+        return
+    data = load_credentials(paths)
+    profiles = data.get(provider_name)
+    if not profiles or old_name not in profiles:
+        return
+    if new_name in profiles:
+        raise CodeHelperError(
+            f"profile {new_name!r} already exists for provider {provider_name}"
+        )
+    profiles[new_name] = profiles.pop(old_name)
+    try:
+        atomic_write(
+            paths.credentials_file(),
+            json.dumps(data, indent=2, sort_keys=True) + "\n",
+            mode=0o600,
+        )
+    except OSError as e:
+        print(
+            f"warning: could not rename the token profile for {provider_name} "
+            f"({e}) — the wrapper is installed, but the old profile name "
+            "remains",
+            file=sys.stderr,
+        )
+
+
+def invalidate_cached_credential(
+    paths: Paths, provider_name: str, profile_name: str = DEFAULT_PROFILE
+) -> None:
+    """Drop a provider profile's cached credential, if any — never raises.
 
     A ``FIXED``-policy provider's cache can go stale relative to what is
     actually installed: an env-sourced token (never itself cached — see
@@ -153,9 +265,12 @@ def invalidate_cached_credential(paths: Paths, provider_name: str) -> None:
     two cannot drift on it.
     """
     data = load_credentials(paths)
-    if provider_name not in data:
+    profiles = data.get(provider_name)
+    if not profiles or profile_name not in profiles:
         return
-    del data[provider_name]
+    del profiles[profile_name]
+    if not profiles:
+        del data[provider_name]
     try:
         atomic_write(
             paths.credentials_file(),
@@ -172,7 +287,13 @@ def invalidate_cached_credential(paths: Paths, provider_name: str) -> None:
 
 
 def cache_freshly_typed_token(
-    paths: Paths, provider_name: str, token: str, *, source: str, dry_run: bool
+    paths: Paths,
+    provider_name: str,
+    token: str,
+    *,
+    profile_name: str = DEFAULT_PROFILE,
+    source: str,
+    dry_run: bool,
 ) -> None:
     """Cache ``token`` iff it was just typed at a prompt and this is a real run.
 
@@ -203,7 +324,7 @@ def cache_freshly_typed_token(
     """
     if source == SOURCE_PROMPT and not dry_run:
         try:
-            save_credential(paths, provider_name, token)
+            save_credential(paths, provider_name, token, profile_name)
         except OSError as e:
             print(
                 f"warning: could not cache the token for {provider_name} "
@@ -219,12 +340,13 @@ def resolve_token(
     prompt: str,
     paths: Paths,
     provider_name: str,
+    profile_name: str | None = None,
     base_url_policy: str = "fixed",
     environ: Mapping[str, str] = os.environ,
     getpass_fn: Callable[[str], str] = getpass.getpass,
     retries: int = 3,
 ) -> ResolvedToken:
-    """Return a non-empty token: env var → cached credential → hidden prompt.
+    """Return a non-empty token from a selected or default profile.
 
     Args:
         env_var: Environment variable name checked first (headless/scripting
@@ -253,18 +375,41 @@ def resolve_token(
     Raises:
         CodeHelperError: if none of env/cache/prompt yields a non-empty token.
 
-    The env var wins first on purpose: a headless/CI run must be able to
-    override a stale cached value. A prompt-resolved value is the only one a
-    caller should cache — see :func:`save_credential`.
-    """
-    env_value = environ.get(env_var)
-    if env_value:
-        return ResolvedToken(env_value, SOURCE_ENV)
+    An explicitly selected profile's own cached value wins over the
+    environment, so a user can deliberately choose a named profile even when
+    ``ZAI_API_KEY`` is set. But a brand-new profile with nothing cached yet
+    still falls back to the environment before prompting — otherwise a
+    first-time ``--profile`` use in a headless/CI run would hang on a
+    prompt nobody is there to answer, purely because the profile happened
+    to be new. Without an explicit profile, the environment wins outright,
+    followed by the default profile. A prompt-resolved value is the only
+    one a caller should cache — see :func:`save_credential`.
 
-    if base_url_policy == "fixed":
-        cached = credential_for(paths, provider_name)
+    ``base_url_policy`` gates only the UNNAMED/default cache: reusing it
+    across a changed ``--base-url`` would be a silent, accidental leak,
+    since nothing chose it for the current invocation. A NAMED profile is
+    the opposite — the user typed ``--profile <name>`` on purpose, the same
+    deliberate choice that already lets a profile win over the environment,
+    so its cache is trusted for any ``base_url_policy`` (this is what makes
+    profiles usable at all for a REQUIRED-policy provider like ``litellm``,
+    which the profile feature explicitly supports — see the README).
+    """
+    if profile_name:
+        cached = credential_for(paths, provider_name, profile_name)
         if cached:
             return ResolvedToken(cached, SOURCE_CACHE)
+        env_value = environ.get(env_var)
+        if env_value:
+            return ResolvedToken(env_value, SOURCE_ENV)
+    else:
+        env_value = environ.get(env_var)
+        if env_value:
+            return ResolvedToken(env_value, SOURCE_ENV)
+
+        if base_url_policy == "fixed":
+            cached = credential_for(paths, provider_name)
+            if cached:
+                return ResolvedToken(cached, SOURCE_CACHE)
 
     for _ in range(retries):
         value = getpass_fn(prompt)
@@ -277,9 +422,13 @@ def resolve_token(
 
 
 def token_for_discovery(
-    paths: Paths, provider, *, environ: Mapping[str, str] = os.environ
+    paths: Paths,
+    provider,
+    *,
+    profile_name: str | None = None,
+    environ: Mapping[str, str] = os.environ,
 ) -> str:  # type: ignore[no-untyped-def]
-    """A token for an OPTIONAL listing request: env var → cache → ``""``.
+    """A token for an OPTIONAL listing request: explicit profile → env → default.
 
     Mirrors :func:`code_helper.services.models_api.list_models`'s contract: it
     never prompts and never raises. An empty return is legitimate — the listing
@@ -296,18 +445,30 @@ def token_for_discovery(
     fine edge, but this helper reads only three attributes and staying free of
     the import keeps the dependency arrow one-directional at call sites).
 
-    The cache is consulted **only for a** ``BaseUrlPolicy.FIXED`` **provider.**
-    The cache key is the provider *name*, not an address — safe as long as a
-    provider has exactly one true address (``FIXED``), but a ``REQUIRED``/
-    ``OVERRIDABLE`` provider's ``base_url`` can be a different, caller-supplied
-    host on every invocation (that is the whole point of ``--base-url``). Handing
-    a cached secret to whatever host the caller names next would silently send
-    it to an address it was never cached for. An explicit env var is still
-    honoured either way: the caller set it for *this* invocation, so it carries
-    no such cross-invocation ambiguity.
+    The UNNAMED/default cache is consulted **only for a**
+    ``BaseUrlPolicy.FIXED`` **provider.** Its cache key is the provider
+    *name*, not an address — safe as long as a provider has exactly one
+    true address (``FIXED``), but a ``REQUIRED``/``OVERRIDABLE`` provider's
+    ``base_url`` can be a different, caller-supplied host on every
+    invocation (that is the whole point of ``--base-url``). Handing a
+    cached secret to whatever host the caller names next would silently
+    send it to an address it was never cached for.
+
+    A NAMED profile is different: the caller chose it deliberately for
+    *this* invocation (mirroring :func:`resolve_token`'s same distinction),
+    so its cache is trusted regardless of ``base_url_policy`` — otherwise
+    profiles would be unusable for a REQUIRED-policy provider like
+    ``litellm``, which the profile feature explicitly supports. An explicit
+    env var is honoured either way: the caller set it for *this*
+    invocation, so it carries no cross-invocation ambiguity.
     """
     if provider.auth != "secret":
         return ""
+    if profile_name:
+        cached = credential_for(paths, provider.name, profile_name)
+        if cached:
+            return cached
+        return environ.get(provider.token_env_var, "")
     env_value = environ.get(provider.token_env_var, "")
     if env_value:
         return env_value

@@ -1,49 +1,12 @@
-"""Arrow-key TUI menu — a thin, looping front end over the CLI handlers.
+"""Interactive menu for creating and maintaining code-helper wrappers.
 
-Contract (see issue #3): CLI is primary, TUI is secondary. The TUI never
-reimplements service logic — it only collects arguments (via the same
-``select_from_menu`` used by ``edit-token``, plus a plain ``input()`` for a
-custom ``--model``) and mutates the shared ``argparse.Namespace`` before
-calling the exact same ``_handle_list`` / ``_handle_add`` / ``_handle_edit_token``
-from :mod:`code_helper.cli.parser`. It knows nothing about ``render_script`` /
-``install_wrapper`` internals — only about command names and their CLI
-arguments. The one read-only exception is
-:func:`code_helper.services.wrappers.describe_all` (built on ``is_installed``),
-used purely to label menu entries (``_handle_edit_token`` in ``parser.py``
-builds the same labels the same way) — no state-changing call is ever made
-outside a ``_handle_*``.
+The TUI is deliberately a thin English-only front end over the CLI handlers.
+It owns navigation and collects interactive values; ``parser.py`` remains the
+single place that installs wrappers and updates the credential cache.
 
-The menu loops: ``list`` / ``add`` / ``edit-token`` run, then the menu
-reappears so the next command can be picked. Navigation is uniform across
-every screen:
-
-- **Esc** or ``q`` — go back one level (a sub-menu returns to the main menu;
-  the main menu exits).
-- **Ctrl-C** — exit the TUI immediately from anywhere, not just "back".
-- Every sub-menu also has a visible ``← назад`` entry, since the keyboard
-  shortcuts above are not discoverable from the screen alone.
-
-This relies on :class:`code_helper.cli.menu.MenuCancelled`'s ``hard`` flag:
-``hard=False`` (Esc/``q``) means "go back one level", ``hard=True`` (Ctrl-C)
-means "quit outright" regardless of menu depth. ``run_tui``'s local ``_pick``
-folds a soft cancel into the same ``_BACK`` sentinel value returned by
-picking the visible ``← назад`` item, so every call site checks the result
-ONE way; a hard cancel is left to propagate as ``MenuCancelled`` and is caught
-once, at the very top of :func:`run_tui`, which is what makes Ctrl-C unwind
-cleanly from any depth instead of being handled ad hoc at each call site.
-
-A ``CodeHelperError`` from ``add`` / ``edit-token`` is printed to stderr and
-the menu reappears (under ``--debug`` it is re-raised, mirroring
-``__main__.main``). A ``KeyboardInterrupt`` raised while collecting plain
-``input()`` (not through ``select_from_menu``) is also caught and treated as
-"back to the menu" — Ctrl-C must never crash the TUI, no matter which prompt
-it lands in.
-
-There is no ``dry-run`` menu item — ``--dry-run`` is a scripting/debugging
-flag, not something a human toggles interactively; ``code-helper --dry-run``
-(or ``tui``) still works, the flag is simply read from ``args``, never
-mutated here. ``debug`` lives in a ``settings`` sub-menu instead, since it is
-one lone toggle that does not deserve main-menu real estate.
+There are no pause screens.  Every selection enters another menu and every
+submenu has an explicit ``Back`` entry (Esc/q has the same meaning).  Ctrl-C
+leaves the TUI from any depth.
 """
 
 from __future__ import annotations
@@ -55,376 +18,393 @@ __all__ = ["run_tui"]
 
 _LIST = "list"
 _ADD = "add"
-_EDIT_TOKEN = "edit-token"
-_NEW = "new"
 _SETTINGS = "settings"
 _QUIT = "quit"
 _BACK = "__back__"
+_NEW_PROFILE = "__new_profile__"
+_USE_PROFILE = "__use_profile__"
+_REPLACE_TOKEN = "__replace_token__"
+
+# profile name, token typed in this flow, old profile name, new old-profile name
+ProfileChoice = tuple[str, str | None, str | None, str | None]
 
 
 def _hint(numbered_count: int, *, exit_word: str) -> str:
-    """Build a key hint whose digit range matches what's actually numbered.
-
-    A hint that always said "1-9" regardless of how many items were on
-    screen (or whether any of them even had a digit) was misleading — see
-    CLAUDE.md. ``numbered_count`` must match the number of non-``_BACK``/
-    ``_QUIT`` items passed to the same ``select_from_menu`` call, or the
-    printed range and the working digits drift apart again.
-
-    Capped at :data:`MAX_DIGIT_ITEMS`, because the menu itself only assigns
-    that many digits. Without the cap a long list (the model picker can show
-    20+) advertised "1-21" while keys 10 and up did nothing — the exact drift
-    this function exists to prevent, caught only on a real terminal.
-    """
+    """Return the uniform navigation hint for a menu."""
     from code_helper.cli.menu import MAX_DIGIT_ITEMS
 
     usable = min(numbered_count, MAX_DIGIT_ITEMS)
     digits = "1" if usable == 1 else f"1-{usable}"
-    return f"↑/↓ · {digits} · Enter выбрать · Esc/q {exit_word}"
+    return f"Up/Down · {digits} · Enter select · Esc {exit_word} · Ctrl-C quit"
 
 
 def run_tui(args: argparse.Namespace) -> int:
-    """Run the looping arrow-key menu, dispatching into the CLI handlers.
-
-    ``args`` is the parsed root namespace (it already carries ``dry_run``/
-    ``debug`` if given on the command line before ``tui``). It is mutated in
-    place with whatever the chosen command needs, then handed to the same
-    ``_handle_*`` the CLI subcommand would receive.
-
-    Always returns 0: every exit path (``quit``, Esc/``q`` on the main menu,
-    Ctrl-C from anywhere) is handled inside this function rather than
-    propagated as an exception or a non-zero code.
-
-    ``select_from_menu`` and ``input`` are looked up at call time (the
-    ``from ... import`` and the builtin reference resolve on each call, not at
-    module-def time) so tests can ``monkeypatch.setattr`` them — a
-    ``select = select_from_menu`` default parameter would bind the name at
-    def-time and silently ignore the patch.
-    """
-    from code_helper.cli.menu import MenuCancelled, press_any_key, select_from_menu
-    from code_helper.cli.parser import _handle_add, _handle_edit_token, _handle_list
+    """Run the hierarchical interactive UI and always return a shell status."""
+    from code_helper.cli.menu import MenuCancelled, read_line, select_from_menu
+    from code_helper.cli.parser import _handle_add, _handle_edit_token
     from code_helper.errors import CodeHelperError, emit_error
-    from code_helper.services.model import AGENTS
+    from code_helper.services.model import (
+        AGENTS,
+        PROVIDERS,
+        BaseUrlPolicy,
+        resolve_shape,
+        with_base_url,
+    )
+    from code_helper.services.models_api import list_models
     from code_helper.services.paths import Paths
-    from code_helper.services.wrappers import WRAPPERS, describe_all, get_spec
+    from code_helper.services.secrets import (
+        DEFAULT_PROFILE,
+        profile_names,
+        seed_default_profile,
+        token_for_discovery,
+    )
+    from code_helper.services.spec import suggest_alias
+    from code_helper.services.wrappers import (
+        WRAPPERS,
+        describe_all,
+        discover_managed,
+        get_spec,
+        spec_from_installed,
+        token_from_installed,
+    )
 
     def _pick(
-        items: Sequence[tuple[str, str]],
-        prompt: str,
-        *,
-        exit_word: str = "назад",
+        items: Sequence[tuple[str, str]], prompt: str, *, exit_word: str = "back"
     ) -> str:
-        """``select_from_menu`` with a soft cancel folded into the ``_BACK`` value.
-
-        A soft cancel (Esc/``q``) and picking the visible ``← назад`` item
-        already mean the same thing, so this returns ``_BACK`` for either —
-        every call site checks the return value ONE way instead of pairing a
-        ``try/except`` with a separate ``if choice == _BACK`` underneath it.
-
-        A hard cancel (Ctrl-C, ``MenuCancelled.hard``) is left to propagate as
-        ``MenuCancelled`` — caught once, at the very top of :func:`run_tui`,
-        so Ctrl-C unwinds cleanly from any menu depth to "exit the TUI".
-
-        ``_BACK``/``_QUIT`` are never given a digit shortcut (``unnumbered``)
-        — they're the one item every screen has that isn't a distinct
-        "thing to configure", and always sit last. The hint's digit range is
-        derived from how many *other* items there are, so it can't drift
-        from what actually works — see :func:`_hint`. ``exit_word`` is what
-        the hint calls leaving this screen ("назад" everywhere except the
-        main menu, where Esc/``q`` means "выход" instead).
-        """
-        numbered_count = sum(1 for value, _ in items if value not in (_BACK, _QUIT))
-        hint = _hint(numbered_count, exit_word=exit_word)
+        numbered = sum(1 for value, _ in items if value not in (_BACK, _QUIT))
         try:
             return select_from_menu(
                 items,
                 prompt=prompt,
-                hint=hint,
+                hint=_hint(numbered, exit_word=exit_word),
                 unnumbered=frozenset({_BACK, _QUIT}),
                 clear=True,
             )
-        except MenuCancelled as e:
-            if e.hard:
+        except MenuCancelled as exc:
+            if exc.hard:
                 raise
             return _BACK
 
-    def _run(handler, debug: bool) -> None:
-        """Call a handler, surfacing ``CodeHelperError`` to the menu loop.
-
-        A hard ``MenuCancelled`` (Ctrl-C) can also propagate out of
-        ``handler`` — e.g. ``_handle_edit_token``'s own wrapper picker
-        re-raises on ``hard=True`` rather than swallowing it (see
-        ``parser.py``). Left uncaught here on purpose: it unwinds straight to
-        the top-level ``try/except MenuCancelled`` in :func:`run_tui`, so
-        Ctrl-C mid-command still means "leave the TUI now" — no pause, no
-        "press any key" prompt for an exit the user already asked for.
-        """
+    def _run(handler) -> None:
         try:
             handler(args)
-        except CodeHelperError as e:
-            emit_error(e, debug)
+        except CodeHelperError as exc:
+            emit_error(exc, getattr(args, "debug", False))
 
-    def _pause() -> None:
-        """Let the user read a command's output before the menu clears it."""
-        press_any_key("\n[нажмите любую клавишу, чтобы вернуться в меню]")
+    def _read_text(prompt: str) -> str | None:
+        try:
+            return read_line(prompt)
+        except MenuCancelled as exc:
+            if exc.hard:
+                raise
+            return None
 
-    def _wrapper_items() -> list[tuple[str, str]]:
-        """``(name, label)`` pairs for every registered wrapper, with install state.
+    def _read_token(prompt: str) -> str | None:
+        while True:
+            try:
+                token = read_line(prompt, secret=True)
+            except MenuCancelled as exc:
+                if exc.hard:
+                    raise
+                return None
+            except ValueError as exc:
+                print(f"Invalid token: {exc}")
+                continue
+            if not token:
+                print("No token entered.")
+                return None
+            return token
 
-        Built through :func:`describe_all` — the same wrapper-listing helper
-        ``edit-token``'s picker uses (see ``parser.py``) — so the two menus
-        can't silently drift apart on either the row layout or the
-        ``Paths``/``is_installed`` wiring behind it.
+    def _recover_default(provider_name: str) -> None:
+        """Best-effort profile-cache recovery from an installed wrapper."""
+        paths = Paths.default()
+        if profile_names(paths, provider_name):
+            return
+        for name in discover_managed(paths):
+            token = token_from_installed(paths, name, provider_name)
+            if token:
+                seed_default_profile(paths, provider_name, token)
+                return
+
+    def _new_profile(
+        names: list[str], provider_name: str
+    ) -> ProfileChoice | str | None:
+        """Collect a new profile and token before model discovery."""
+        if not names:
+            token = _read_token(f"Token for {provider_name}: ")
+            return (DEFAULT_PROFILE, token, None, None) if token else None
+
+        if len(names) == 1:
+            old_name = names[0]
+            renamed_old = _read_text(f"Name for current profile ({old_name}): ")
+            if renamed_old is None:
+                return _BACK
+            new_name = _read_text("Name for new profile: ")
+            if new_name is None:
+                return _BACK
+            if not renamed_old or not new_name:
+                print("Profile names cannot be empty.")
+                return None
+            if renamed_old == new_name:
+                print("Profile names must be different.")
+                return None
+            if renamed_old in names and renamed_old != old_name:
+                print(f"Profile {renamed_old!r} already exists.")
+                return None
+            if new_name in names:
+                print(f"Profile {new_name!r} already exists.")
+                return None
+            token = _read_token(f"Token for {provider_name} ({new_name}): ")
+            return (new_name, token, old_name, renamed_old) if token else _BACK
+
+        new_name = _read_text("Name for new profile: ")
+        if new_name is None:
+            return _BACK
+        if not new_name:
+            print("Profile name cannot be empty.")
+            return None
+        if new_name in names:
+            print(f"Profile {new_name!r} already exists.")
+            return None
+        token = _read_token(f"Token for {provider_name} ({new_name}): ")
+        return (new_name, token, None, None) if token else _BACK
+
+    def _select_profile(provider_name: str, *, editing: bool) -> ProfileChoice | None:
+        """Choose a profile, optionally replacing its token, or create one.
+
+        A new/replaced token is intentionally kept only on the Namespace until
+        the shared handler has installed the wrapper successfully.
         """
-        return describe_all(
-            Paths.default(),
-            WRAPPERS,
-            installed_word="установлена",
-            not_installed_word="не установлена",
-        )
+        while True:
+            _recover_default(provider_name)
+            names = list(profile_names(Paths.default(), provider_name))
+            if not names:
+                return _new_profile(names, provider_name)
+
+            items = [
+                (name, "default" if name == DEFAULT_PROFILE else name) for name in names
+            ]
+            items.extend(((_NEW_PROFILE, "Add profile"), (_BACK, "Back")))
+            selected = _pick(items, f"Token profile for {provider_name}:")
+            if selected == _BACK:
+                return None
+            if selected == _NEW_PROFILE:
+                created = _new_profile(names, provider_name)
+                if created == _BACK:
+                    continue
+                return created
+
+            if editing:
+                token = _read_token(f"New token for {provider_name} ({selected}): ")
+                return (selected, token, None, None) if token else None
+
+            action = _pick(
+                [
+                    (_USE_PROFILE, "Use profile"),
+                    (_REPLACE_TOKEN, "Replace token"),
+                    (_BACK, "Back"),
+                ],
+                f"Profile: {selected}",
+            )
+            if action == _BACK:
+                continue
+            if action == _USE_PROFILE:
+                return selected, None, None, None
+            token = _read_token(f"New token for {provider_name} ({selected}): ")
+            if token:
+                return selected, token, None, None
+
+    def _all_wrapper_specs():
+        """Presets plus managed constructor wrappers, without duplicate names."""
+        paths = Paths.default()
+        specs = list(WRAPPERS)
+        known = {spec.name for spec in specs}
+        for name in discover_managed(paths):
+            if name not in known and (spec := spec_from_installed(paths, name)):
+                specs.append(spec)
+                known.add(name)
+        return specs
+
+    def _run_list() -> None:
+        """Browse wrappers; selecting a secret wrapper rotates its profile token."""
+        while True:
+            specs = _all_wrapper_specs()
+            rows = describe_all(
+                Paths.default(),
+                specs,
+                installed_word="installed",
+                not_installed_word="not installed",
+            )
+            choice = _pick([*rows, (_BACK, "Back")], "Wrappers:")
+            if choice == _BACK:
+                return
+            try:
+                spec = spec_from_installed(Paths.default(), choice) or get_spec(choice)
+            except CodeHelperError as exc:
+                emit_error(exc, getattr(args, "debug", False))
+                continue
+            if spec.auth != "secret":
+                _pick([(_BACK, "Back")], f"{choice} has no editable token.")
+                continue
+            profile = _select_profile(spec.provider.name, editing=True)
+            if profile is None:
+                continue
+            args.name = choice
+            (
+                args.profile,
+                args.profile_token,
+                args.profile_rename_from,
+                args.profile_rename_to,
+            ) = profile
+            _run(_handle_edit_token)
 
     def _run_add() -> None:
-        """``add`` flow: pick a wrapper, then a model, then dispatch — with a
-        visible "← назад" at every step, not just a keyboard shortcut.
-        """
-        wrapper_items = [*_wrapper_items(), (_BACK, "← назад")]
-        name = _pick(wrapper_items, "выберите обёртку для установки:")
-        if name == _BACK:
-            return
-
-        # `spec.model` is the resolved model whatever the config shape — the
-        # old launch_command/sonnet_model branch is gone with the flat spec.
-        default_model = get_spec(name).model
-        model_items = [
-            ("__default__", f"оставить по умолчанию ({default_model})"),
-            ("__custom__", "указать свою модель"),
-            (_BACK, "← назад"),
-        ]
-        choice = _pick(model_items, f"модель для {name}:")
-        if choice == _BACK:
-            return
-
-        if choice == "__custom__":
-            try:
-                model = input("введите модель: ").strip()
-            except KeyboardInterrupt:
-                print()
-                return
-            args.model = model or None
-        else:
-            args.model = None
-
-        args.name = name
-        # Clear the constructor fields: the menu loops, so a previous `new`
-        # run would otherwise leave args.agent set and flip _handle_add into
-        # constructor mode for what the user picked as a preset. base_url is
-        # the same class of leak: a previous `new` run against litellm would
-        # otherwise leave it set, and `add`'s own handler refuses `--base-url`
-        # together with a preset name.
-        args.agent = None
-        args.provider = None
-        args.alias = None
-        args.shape = None
-        args.base_url = None
-        _run(_handle_add, getattr(args, "debug", False))
-        _pause()
-
-    def _run_new() -> None:
-        """Constructor flow: agent → provider → model → alias, then dispatch.
-
-        Mirrors ``code-helper add --agent … --provider … --model …`` exactly —
-        it fills the same ``Namespace`` fields and calls the same
-        ``_handle_add``. Nothing here validates or writes; the two read-only
-        lookups (:func:`compatible_providers`, :func:`list_models`) only decide
-        what to put on screen.
-        """
-        from code_helper.cli.menu import MAX_DIGIT_ITEMS
-        from code_helper.services.model import (
-            BaseUrlPolicy,
-            compatible_providers,
-            get_agent,
-            with_base_url,
-        )
-        from code_helper.services.models_api import list_models
-        from code_helper.services.paths import Paths
-        from code_helper.services.secrets import token_for_discovery
-        from code_helper.services.spec import suggest_alias
-
-        agent_items = [
-            *[(a.name, f"{a.name:10} {a.description}") for a in AGENTS],
-            (_BACK, "← назад"),
-        ]
-        agent_name = _pick(agent_items, "выберите агента:")
-        if agent_name == _BACK:
-            return
-        agent = get_agent(agent_name)
-
-        # Only compatible providers are offered: an impossible pairing should
-        # be unreachable, not merely rejected after the fact.
-        usable = compatible_providers(agent)
+        """Create a wrapper through provider → profile → model → agent → name."""
         provider_items = [
-            *[(p.name, f"{p.name:10} {p.description}") for p in usable],
-            (_BACK, "← назад"),
+            (provider.name, f"{provider.name} — {provider.description}")
+            for provider in PROVIDERS
         ]
-        provider_name = _pick(provider_items, f"провайдер для {agent.name}:")
-        if provider_name == _BACK:
-            return
-        provider = next(p for p in usable if p.name == provider_name)
-
-        # Runtime base_url, BEFORE list_models — a provider like litellm has
-        # no address to list models from until one is supplied. Branches on
-        # the policy, never on provider.name (the same data-driven rule
-        # with_base_url itself follows).
-        typed_url = None
-        if provider.base_url_policy is not BaseUrlPolicy.FIXED:
-            required = provider.base_url_policy is BaseUrlPolicy.REQUIRED
-            prompt = (
-                f"base URL для {provider.name} (например http://localhost:4000/v1): "
-                if required
-                else f"base URL для {provider.name} [{provider.base_url}]: "
+        while True:  # provider level
+            provider_name = _pick(
+                [*provider_items, (_BACK, "Back")], "Select a provider:"
             )
-            try:
-                typed_url = input(prompt).strip()
-            except KeyboardInterrupt:
-                print()
+            if provider_name == _BACK:
                 return
-            if required and not typed_url:
-                # Empty input cancels — mirrors the custom-model prompt below,
-                # which also treats an empty answer as "changed my mind"
-                # rather than re-prompting.
-                return
-            if typed_url:
+            provider = next(item for item in PROVIDERS if item.name == provider_name)
+
+            typed_url: str | None = None
+            if provider.base_url_policy is not BaseUrlPolicy.FIXED:
+                default = f" [{provider.base_url}]" if provider.base_url else ""
+                typed_url = _read_text(f"Base URL for {provider.name}{default}: ")
+                if typed_url is None:
+                    continue
+                if provider.base_url_policy is BaseUrlPolicy.REQUIRED and not typed_url:
+                    continue
                 try:
-                    provider = with_base_url(provider, typed_url)
-                except CodeHelperError as e:
-                    emit_error(e, getattr(args, "debug", False))
-                    _pause()
-                    return
-            # else: OVERRIDABLE with nothing typed — the default stands, and
-            # typed_url ("" from .strip()) is falsy just like None would be,
-            # so args.base_url below reads correctly without reassigning it.
+                    provider = with_base_url(provider, typed_url or None)
+                except CodeHelperError as exc:
+                    emit_error(exc, getattr(args, "debug", False))
+                    continue
 
-        result = list_models(
-            provider, token=token_for_discovery(Paths.default(), provider)
-        )
-        if not result.ok:
-            print(result.error)
-            # The next menu frame clears the screen on a TTY, so without a
-            # pause this explanation is erased in the same breath it is
-            # printed and the user sees only an empty picker. Every other
-            # error surface in this file pairs its output with _pause().
-            _pause()
-        # Only the first MAX_DIGIT_ITEMS get a digit shortcut, and a long list
-        # scrolls a normal terminal past the top of the frame. Show that many
-        # and say so, rather than printing 20+ rows where half are unreachable
-        # by number — manual entry covers anything not listed.
-        shown = result.models[:MAX_DIGIT_ITEMS]
-        hidden = len(result.models) - len(shown)
-        custom_label = "указать модель вручную"
-        if hidden:
-            custom_label += f" (ещё {hidden} — введите имя)"
-        model_items = [
-            *[(m, m) for m in shown],
-            ("__custom__", custom_label),
-            (_BACK, "← назад"),
-        ]
-        model = _pick(model_items, f"модель ({provider.name}):")
-        if model == _BACK:
-            return
-        if model == "__custom__":
-            try:
-                model = input("введите модель: ").strip()
-            except KeyboardInterrupt:
-                print()
-                return
-            if not model:
-                return
+            # Profile is the previous level for model selection. If it is
+            # cancelled, restart at provider rather than jumping to main.
+            while True:
+                profile: ProfileChoice | None
+                if provider.auth == "secret":
+                    profile = _select_profile(provider.name, editing=False)
+                    if profile is None:
+                        break
+                else:
+                    profile = ("", None, None, None)
 
-        try:
-            default_alias = suggest_alias(model, agent.name)
-        except CodeHelperError as e:
-            emit_error(e, getattr(args, "debug", False))
-            _pause()
-            return
-        try:
-            typed = input(f"имя команды [{default_alias}]: ").strip()
-        except KeyboardInterrupt:
-            print()
-            return
+                profile_name, profile_token, rename_from, rename_to = profile
+                discovery_token = profile_token or token_for_discovery(
+                    Paths.default(), provider, profile_name=profile_name or None
+                )
+                result = list_models(provider, token=discovery_token)
+                model_items = [(model, model) for model in result.models]
+                model_items.append(("__custom__", "Enter model manually"))
+                model_items.append((_BACK, "Back"))
+                prompt = f"Select a model for {provider.name}:"
+                if not result.ok:
+                    prompt = (
+                        f"Model discovery unavailable for {provider.name}; "
+                        "enter a model:"
+                    )
 
-        args.name = None
-        args.agent = agent.name
-        args.provider = provider.name
-        args.model = model
-        args.alias = typed or default_alias
-        args.shape = None
-        args.base_url = typed_url
-        _run(_handle_add, getattr(args, "debug", False))
-        _pause()
+                # Model is the previous level for agent selection.
+                while True:
+                    model = _pick(model_items, prompt)
+                    if model == _BACK:
+                        break
+                    if model == "__custom__":
+                        typed_model = _read_text("Model: ")
+                        if typed_model is None:
+                            continue
+                        if not typed_model:
+                            continue
+                        model = typed_model
+
+                    agent_items: list[tuple[str, str]] = []
+                    for agent in AGENTS:
+                        try:
+                            resolve_shape(agent, provider)
+                        except CodeHelperError:
+                            continue
+                        agent_items.append(
+                            (agent.name, f"{agent.name} — {agent.description}")
+                        )
+
+                    # Agent is the previous level for alias input.
+                    while True:
+                        agent_name = _pick(
+                            [*agent_items, (_BACK, "Back")], "Select an agent:"
+                        )
+                        if agent_name == _BACK:
+                            break
+                        try:
+                            default_alias = suggest_alias(
+                                model, agent_name, profile_name or None
+                            )
+                        except CodeHelperError as exc:
+                            emit_error(exc, getattr(args, "debug", False))
+                            break
+                        alias = _read_text(f"Command name [{default_alias}]: ")
+                        if alias is None:
+                            continue
+
+                        args.name = None
+                        args.agent = agent_name
+                        args.provider = provider.name
+                        args.model = model
+                        args.alias = alias or default_alias
+                        args.shape = None
+                        args.base_url = typed_url
+                        args.profile = profile_name or None
+                        args.profile_token = profile_token
+                        args.profile_rename_from = rename_from
+                        args.profile_rename_to = rename_to
+                        _run(_handle_add)
+                        return
+                    # Back from alias/agent level returns to model selection.
+                # Back from model returns to profile selection.
+            # Back from profile returns to provider selection.
 
     def _run_settings() -> None:
         while True:
             debug = getattr(args, "debug", False)
-            items = [
-                ("debug", f"debug: {'вкл' if debug else 'выкл'}"),
-                (_BACK, "← назад"),
-            ]
-            choice = _pick(items, "настройки")
+            choice = _pick(
+                [
+                    ("debug", f"Debug: {'on' if debug else 'off'}"),
+                    (_BACK, "Back"),
+                ],
+                "Settings:",
+            )
             if choice == _BACK:
                 return
-            if choice == "debug":
-                args.debug = not debug
-                continue
-
-    def _main_loop() -> int:
-        while True:
-            items = [
-                (_LIST, "list         показать обёртки и их состояние"),
-                (_ADD, "add          установить готовую обёртку (пресет)"),
-                (_NEW, "new          собрать: агент + провайдер + модель"),
-                (_EDIT_TOKEN, "edit-token   заменить токен обёртки"),
-                (_SETTINGS, "settings     отладочные настройки"),
-                (_QUIT, "quit         выход"),
-            ]
-
-            # The main menu is the one call site that isn't "go back one
-            # level" on cancel — Esc/q here means "leave the TUI" — so it
-            # checks _BACK itself rather than sharing _run_add/_run_settings'
-            # "return to caller" meaning.
-            choice = _pick(
-                items,
-                "code-helper — управление обёртками Claude Code",
-                exit_word="выход",
-            )
-            if choice in (_QUIT, _BACK):
-                return 0
-
-            if choice == _LIST:
-                _run(_handle_list, getattr(args, "debug", False))
-                _pause()
-                continue
-
-            if choice == _ADD:
-                _run_add()
-                continue
-
-            if choice == _NEW:
-                _run_new()
-                continue
-
-            if choice == _EDIT_TOKEN:
-                args.name = None
-                _run(_handle_edit_token, getattr(args, "debug", False))
-                _pause()
-                continue
-
-            if choice == _SETTINGS:
-                _run_settings()
-                continue
+            args.debug = not debug
 
     try:
-        return _main_loop()
-    except MenuCancelled:
-        # Ctrl-C from any depth: exit the TUI cleanly, exit code 0 — matches
-        # the historical top-level-cancel behavior.
+        while True:
+            choice = _pick(
+                [
+                    (_LIST, "List"),
+                    (_ADD, "Add"),
+                    (_SETTINGS, "Settings"),
+                    (_QUIT, "Quit"),
+                ],
+                "code-helper",
+                exit_word="quit",
+            )
+            if choice in (_BACK, _QUIT):
+                return 0
+            if choice == _LIST:
+                _run_list()
+            elif choice == _ADD:
+                _run_add()
+            else:
+                _run_settings()
+    except MenuCancelled as exc:
+        if exc.hard:
+            raise
         return 0

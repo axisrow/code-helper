@@ -22,6 +22,7 @@ parser so they parse BOTH before and after the subcommand.
 
 import argparse
 import sys
+from dataclasses import replace
 
 
 def _handle_list_axes(what: str) -> int:
@@ -165,10 +166,14 @@ def _handle_add(args: argparse.Namespace) -> int:
     from code_helper.services.models_api import list_models
     from code_helper.services.paths import Paths
     from code_helper.services.secrets import (
+        DEFAULT_PROFILE,
         SOURCE_ENV,
+        SOURCE_PROMPT,
+        ResolvedToken,
         cache_freshly_typed_token,
         credential_for,
         invalidate_cached_credential,
+        rename_profile,
         resolve_token,
         token_for_discovery,
     )
@@ -191,6 +196,10 @@ def _handle_add(args: argparse.Namespace) -> int:
     model = getattr(args, "model", None)
     alias = getattr(args, "alias", None)
     base_url = getattr(args, "base_url", None)
+    profile_name = getattr(args, "profile", None)
+    profile_token = getattr(args, "profile_token", None)
+    profile_rename_from = getattr(args, "profile_rename_from", None)
+    profile_rename_to = getattr(args, "profile_rename_to", None)
     using_axes = agent_name is not None or provider_name is not None
 
     if using_axes and name:
@@ -218,7 +227,10 @@ def _handle_add(args: argparse.Namespace) -> int:
         provider = with_base_url(get_provider(provider_name), base_url)
 
         if getattr(args, "list_models", False):
-            result = list_models(provider, token=token_for_discovery(paths, provider))
+            result = list_models(
+                provider,
+                token=token_for_discovery(paths, provider, profile_name=profile_name),
+            )
             if not result.ok:
                 raise CodeHelperError(result.error)
             for available in result.models:
@@ -239,8 +251,9 @@ def _handle_add(args: argparse.Namespace) -> int:
             agent=agent,
             provider=provider,
             model=model,
-            alias=alias or suggest_alias(model, agent.name),
+            alias=alias or suggest_alias(model, agent.name, profile_name),
             shape=shape,
+            profile_name=profile_name,
         )
     else:
         if not name:
@@ -261,16 +274,27 @@ def _handle_add(args: argparse.Namespace) -> int:
                 f"try: code-helper add --agent {name} --provider ollama "
                 f"--model <model>"
             ) from None
-        spec = spec_from_preset(preset, model_override=model, alias_override=alias)
+        spec = spec_from_preset(
+            preset,
+            model_override=model,
+            alias_override=alias,
+            profile_name=profile_name,
+        )
 
     if spec.auth == "secret":
-        resolved = resolve_token(
-            env_var=spec.token_env_var,
-            prompt=f"{spec.name} token ({spec.token_env_var}): ",
-            paths=paths,
-            provider_name=spec.provider.name,
-            base_url_policy=spec.provider.base_url_policy,
-        )
+        if profile_token is not None:
+            if not profile_token:
+                raise CodeHelperError("no token entered — aborting")
+            resolved = ResolvedToken(profile_token, SOURCE_PROMPT)
+        else:
+            resolved = resolve_token(
+                env_var=spec.token_env_var,
+                prompt=f"{spec.name} token ({spec.token_env_var}): ",
+                paths=paths,
+                provider_name=spec.provider.name,
+                profile_name=profile_name,
+                base_url_policy=spec.provider.base_url_policy,
+            )
         token = resolved.value
     else:
         resolved = None
@@ -293,10 +317,12 @@ def _handle_add(args: argparse.Namespace) -> int:
     # that produced that byte-identical content is exactly the one worth
     # having cached.
     if resolved is not None:
+        cache_profile = profile_name or DEFAULT_PROFILE
         cache_freshly_typed_token(
             paths,
             spec.provider.name,
             token,
+            profile_name=cache_profile,
             source=resolved.source,
             dry_run=dry_run,
         )
@@ -322,9 +348,21 @@ def _handle_add(args: argparse.Namespace) -> int:
         # ``dry_run`` is excluded — a dry run changes nothing on disk, so
         # there is nothing yet to reconcile the cache against.
         if resolved.source == SOURCE_ENV and not dry_run:
-            cached = credential_for(paths, spec.provider.name)
+            cached = credential_for(paths, spec.provider.name, cache_profile)
             if cached and cached != token:
-                invalidate_cached_credential(paths, spec.provider.name)
+                invalidate_cached_credential(paths, spec.provider.name, cache_profile)
+    if (
+        resolved is not None
+        and profile_rename_from
+        and profile_rename_to
+        and not dry_run
+    ):
+        rename_profile(
+            paths,
+            spec.provider.name,
+            profile_rename_from,
+            profile_rename_to,
+        )
     if not wrote:
         print("no changes")
     return 0
@@ -345,7 +383,13 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     from code_helper.cli.menu import MenuCancelled, select_from_menu
     from code_helper.errors import CodeHelperError
     from code_helper.services.paths import Paths
-    from code_helper.services.secrets import SOURCE_PROMPT, cache_freshly_typed_token
+    from code_helper.services.secrets import (
+        DEFAULT_PROFILE,
+        SOURCE_PROMPT,
+        cache_freshly_typed_token,
+        profile_names,
+        rename_profile,
+    )
     from code_helper.services.wrappers import (
         WRAPPERS,
         describe_all,
@@ -408,12 +452,81 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     if spec.auth != "secret":
         raise CodeHelperError(f"{spec.name} has no editable token (auth={spec.auth})")
 
+    profile_name = getattr(args, "profile", None)
+    profile_token = getattr(args, "profile_token", None)
+    profile_rename_from = getattr(args, "profile_rename_from", None)
+    profile_rename_to = getattr(args, "profile_rename_to", None)
+    if profile_name is None:
+        names = list(profile_names(paths, spec.provider.name))
+        if names:
+            profile_items = [
+                (name, "default" if name == DEFAULT_PROFILE else name) for name in names
+            ]
+            profile_items.append(("__new_profile__", "create new profile"))
+            try:
+                selected = select_from_menu(
+                    profile_items,
+                    prompt="select token profile to rotate:",
+                )
+            except MenuCancelled as e:
+                if e.hard:
+                    raise
+                print("cancelled")
+                return 0
+
+            def _read_profile_name(prompt: str) -> str | None:
+                try:
+                    return input(prompt).strip()
+                except KeyboardInterrupt:
+                    print()
+                    return None
+
+            if selected == "__new_profile__":
+                if len(names) == 1:
+                    current_name = _read_profile_name(
+                        f"name for current profile ({names[0]}): "
+                    )
+                    if current_name is None:
+                        print("cancelled")
+                        return 0
+                    new_name = _read_profile_name("name for new profile: ")
+                    if new_name is None:
+                        print("cancelled")
+                        return 0
+                    if not current_name or not new_name:
+                        raise CodeHelperError("profile names cannot be empty")
+                    if current_name == new_name or new_name in names:
+                        raise CodeHelperError("profile names must be unique")
+                    profile_rename_from = names[0]
+                    profile_rename_to = current_name
+                    profile_name = new_name
+                else:
+                    profile_name = _read_profile_name("name for new profile: ")
+                    if profile_name is None:
+                        print("cancelled")
+                        return 0
+                    if not profile_name or profile_name in names:
+                        raise CodeHelperError(
+                            "new profile name must be non-empty and unique"
+                        )
+            else:
+                profile_name = selected
+    if profile_name is None:
+        profile_name = DEFAULT_PROFILE
+    spec = replace(spec, profile_name=profile_name)
+
     state = "installed" if is_installed(paths, spec.name) else "not installed"
     print(f"{spec.name}: currently {state}")
 
-    token = getpass.getpass(f"new {spec.name} token ({spec.token_env_var}): ")
+    token = profile_token
+    if token is None:
+        token = getpass.getpass(
+            f"new {spec.name} token ({spec.token_env_var}) for {profile_name}: "
+        )
     if not token:
         raise CodeHelperError("no token entered — aborting")
+    if not token.isascii():
+        raise CodeHelperError("token must contain ASCII characters")
 
     # Pass the resolved spec, never the preset NAME: a name re-expands the
     # preset from scratch and discards whatever model this wrapper was
@@ -428,8 +541,20 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     # typed token already matches what's installed byte-for-byte, which is
     # exactly the token worth having cached, not a reason to skip caching.
     cache_freshly_typed_token(
-        paths, spec.provider.name, token, source=SOURCE_PROMPT, dry_run=dry_run
+        paths,
+        spec.provider.name,
+        token,
+        profile_name=profile_name,
+        source=SOURCE_PROMPT,
+        dry_run=dry_run,
     )
+    if profile_rename_from and profile_rename_to and not dry_run:
+        rename_profile(
+            paths,
+            spec.provider.name,
+            profile_rename_from,
+            profile_rename_to,
+        )
     if not wrote:
         print("no changes")
     return 0
@@ -620,6 +745,11 @@ def build_parser() -> argparse.ArgumentParser:
         "(e.g. litellm: http://localhost:4000/v1); constructor form only",
     )
     p_add.add_argument(
+        "--profile",
+        default=None,
+        help="token profile to use (e.g. work or personal)",
+    )
+    p_add.add_argument(
         "--force",
         action="store_true",
         default=False,
@@ -643,6 +773,11 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=None,
         help="wrapper name (omit to pick interactively with an arrow-key menu)",
+    )
+    p_edit_token.add_argument(
+        "--profile",
+        default=None,
+        help="token profile to update (default: default)",
     )
     p_edit_token.set_defaults(func=_handle_edit_token)
 
