@@ -181,7 +181,9 @@ def test_second_profile_names_both_keys_and_preserves_them(monkeypatch):
     )
     tokens = iter(["sk-work", "sk-personal"])
     monkeypatch.setattr("getpass.getpass", lambda _prompt: next(tokens))
-    typed = iter(["glm-5", "work-wrapper", "work", "personal", "glm-5", "personal-wrapper"])
+    typed = iter(
+        ["glm-5", "work-wrapper", "work", "personal", "glm-5", "personal-wrapper"]
+    )
     monkeypatch.setattr("builtins.input", lambda _prompt: next(typed))
 
     assert main(["tui"]) == 0

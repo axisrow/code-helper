@@ -182,8 +182,7 @@ def run_tui(args: argparse.Namespace) -> int:
                 return _new_profile(names, provider_name)
 
             items = [
-                (name, "default" if name == DEFAULT_PROFILE else name)
-                for name in names
+                (name, "default" if name == DEFAULT_PROFILE else name) for name in names
             ]
             items.extend(((_NEW_PROFILE, "Add profile"), (_BACK, "Back")))
             selected = _pick(items, f"Token profile for {provider_name}:")
@@ -240,9 +239,7 @@ def run_tui(args: argparse.Namespace) -> int:
             if choice == _BACK:
                 return
             try:
-                spec = spec_from_installed(Paths.default(), choice) or get_spec(
-                    choice
-                )
+                spec = spec_from_installed(Paths.default(), choice) or get_spec(choice)
             except CodeHelperError as exc:
                 emit_error(exc, getattr(args, "debug", False))
                 continue
@@ -253,9 +250,12 @@ def run_tui(args: argparse.Namespace) -> int:
             if profile is None:
                 continue
             args.name = choice
-            args.profile, args.profile_token, args.profile_rename_from, args.profile_rename_to = (
-                profile
-            )
+            (
+                args.profile,
+                args.profile_token,
+                args.profile_rename_from,
+                args.profile_rename_to,
+            ) = profile
             _run(_handle_edit_token)
 
     def _run_add() -> None:

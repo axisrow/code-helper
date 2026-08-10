@@ -65,9 +65,7 @@ def _shell_single_quote(value: str) -> str:
 
 def _marker(spec: WrapperSpec) -> str:
     profile = (
-        f", profile={quote(spec.profile_name, safe='._-')}"
-        if spec.profile_name
-        else ""
+        f", profile={quote(spec.profile_name, safe='._-')}" if spec.profile_name else ""
     )
     return (
         f"{MARKER_PREFIX} (agent={spec.agent.name}, "

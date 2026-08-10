@@ -118,9 +118,7 @@ class WrapperSpec:
         return self.provider.token_env_var
 
 
-def suggest_alias(
-    model: str, agent_name: str, profile_name: str | None = None
-) -> str:
+def suggest_alias(model: str, agent_name: str, profile_name: str | None = None) -> str:
     """Derive a default alias, e.g. ``glm-5:cloud`` + ``codex`` -> ``glm-5-codex``.
 
     Strips the registry prefix (``nvidia/…``) and the tag (``:cloud``), then
