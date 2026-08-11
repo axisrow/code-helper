@@ -207,6 +207,60 @@ def _installed_marker_provider_is_secret(paths: Paths, name: str) -> bool:
         return False
 
 
+def _recover_base_url(
+    provider_obj: Provider,
+    shape_field: str | None,
+    toml_profile: dict | None,
+    body: str,
+    provider_name: str,
+) -> Provider | None:
+    """Recover the installed wrapper's ``base_url`` onto ``provider_obj``.
+
+    Round-trip rule: the FILE wins for anything but a FIXED base_url. This is
+    a direct consequence of edit-token's "rotate a credential WITHOUT
+    re-expanding a preset from scratch" contract applied to ``base_url``: an
+    installed wrapper is a complete record of itself, and a credential
+    rotation is not licence to change an unrelated setting. For FIXED the
+    registry wins instead — there is no user-supplied value on that axis, so
+    the file could not have recorded a legitimate override, only a hand-edit;
+    siding with the registry is what lets a genuine address change (e.g. z.ai
+    moving domains) reach already-installed wrappers on the next edit-token.
+
+    Returns the (possibly substituted) provider, or ``None`` when recovery is
+    impossible — a malformed recovered URL or a REQUIRED provider with
+    nothing to recover. ``None`` is the same "unrecoverable → spec_from_installed
+    returns None" outcome as a missing model, keeping that function's
+    never-raises contract intact.
+    """
+    if provider_obj.base_url_policy is BaseUrlPolicy.FIXED:
+        return provider_obj
+
+    if shape_field == ConfigShape.OPENAI_TOML.value:
+        recovered_url = _base_url_from_toml_data(toml_profile, provider_name)
+    else:
+        recovered_url = _env_value(body, "ANTHROPIC_BASE_URL")
+
+    if recovered_url:
+        try:
+            return with_base_url(provider_obj, recovered_url)
+        except CodeHelperError:
+            # The recovered value came from a hand-edited or truncated file,
+            # not our own renderer — validate_base_url can reject it (bad
+            # scheme, control chars). Same "unrecoverable" outcome as a
+            # missing value, not an exception for the caller to catch.
+            return None
+
+    if provider_obj.base_url_policy is BaseUrlPolicy.REQUIRED:
+        # No registry fallback exists for REQUIRED, and the file didn't carry
+        # one either — returning a spec with an empty base_url would let
+        # edit-token silently reinstall pointed at nothing.
+        return None
+
+    # OVERRIDABLE with nothing recovered — the registry default on
+    # provider_obj (untouched by with_base_url) stands.
+    return provider_obj
+
+
 def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     """Reconstruct the spec of an installed wrapper from its own marker line.
 
@@ -270,45 +324,14 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     except CodeHelperError:
         return None
 
-    # Round-trip rule: the FILE wins for anything but a FIXED base_url. This
-    # is a direct consequence of edit-token's own contract just above ("rotate
-    # a credential WITHOUT re-expanding a preset from scratch" — the same bug
-    # class as silently reverting --model) applied to base_url: an installed
-    # wrapper is a complete record of itself, and a credential rotation is not
-    # licence to change an unrelated setting. For FIXED the registry wins
-    # instead — there IS no user-supplied value on that axis, so the file
-    # could not have recorded a legitimate override, only a hand-edit; siding
-    # with the registry there is what lets a genuine address change (e.g.
-    # z.ai moving domains) reach already-installed wrappers on the next
-    # edit-token, exactly as the docstring above intends for the model.
-    if provider_obj.base_url_policy is not BaseUrlPolicy.FIXED:
-        if shape_field == ConfigShape.OPENAI_TOML.value:
-            recovered_url = _base_url_from_toml_data(toml_profile, fields["provider"])
-        else:
-            recovered_url = _env_value(body, "ANTHROPIC_BASE_URL")
-        if recovered_url:
-            try:
-                provider_obj = with_base_url(provider_obj, recovered_url)
-            except CodeHelperError:
-                # The recovered value came from a hand-edited or truncated
-                # file (ANTHROPIC_BASE_URL line / TOML base_url), not from
-                # our own renderer — validate_base_url can reject it (bad
-                # scheme, control chars, ...). This function's whole contract
-                # is that it never raises; a malformed recovered address is
-                # the same "unrecoverable" outcome as a missing one, not an
-                # exception for the caller (edit-token/add --alias) to catch.
-                return None
-        elif provider_obj.base_url_policy is BaseUrlPolicy.REQUIRED:
-            # No registry fallback exists for REQUIRED, and the file didn't
-            # carry one either (a truncated profile, a hand-edited wrapper) —
-            # returning a spec with an empty base_url here would let
-            # edit-token silently reinstall the wrapper pointed at nothing.
-            # Refusing to reconstruct is the same fail-safe as the "not
-            # all(...)" check above for a missing model.
-            return None
-        # else: OVERRIDABLE with nothing recovered — the registry default on
-        # provider_obj (untouched by with_base_url) stands, which is correct:
-        # there is a real default, so refusing here would be needless.
+    # Round-trip rule: the FILE wins for anything but a FIXED base_url —
+    # see :func:`_recover_base_url` for the full rationale (edit-token's
+    # "rotate WITHOUT re-expanding a preset" contract applied to base_url).
+    provider_obj = _recover_base_url(
+        provider_obj, shape_field, toml_profile, body, fields["provider"]
+    )
+    if provider_obj is None:
+        return None
 
     try:
         return build_spec(
