@@ -139,7 +139,7 @@ def _marker_at(path: Path) -> bool:
     permission error, a dangling symlink) counts as *not* ours — the safe
     answer, since it makes the guard refuse rather than clobber. The single
     marker-sniff behind :func:`is_managed` (which resolves the path from a
-    wrapper name) and :func:`_is_ours_marker_only` (which takes a raw path for
+    wrapper name) and :func:`_ownership_marker_only` (which takes a raw path for
     the OPENAI_TOML siblings), so the read order and the "unreadable = not
     ours" exception tuple live in one place.
     """
@@ -633,7 +633,7 @@ def _base_url_from_toml_data(data: dict | None, provider_name: str) -> str | Non
     return base_url if isinstance(base_url, str) and base_url else None
 
 
-def _is_ours(paths: Paths, spec: WrapperSpec, token: str) -> bool:
+def _ownership_full_match(paths: Paths, spec: WrapperSpec, token: str) -> bool:
     """True iff the file at ``spec.alias`` is one we may replace unasked.
 
     Two ways to qualify:
@@ -756,13 +756,13 @@ def _strip_token(body: str) -> str:
     )
 
 
-def _is_ours_marker_only(path: Path) -> bool:
+def _ownership_marker_only(path: Path) -> bool:
     """True iff ``path`` carries our marker on its first or second line.
 
     The OPENAI_TOML TOML profile carries the same marker comment the bash
     wrapper does, which is what lets the ownership guard recognise it as ours.
     That file has NO pre-marker legacy form (the shape is new), so unlike
-    :func:`_is_ours` there is no byte-identical-to-legacy migration clause —
+    :func:`_ownership_full_match` there is no byte-identical-to-legacy migration clause —
     the marker alone is the proof of authorship. Unreadable (binary, perms, a
     dangling symlink) counts as not ours, so the guard refuses rather than
     clobbers — the same safe answer :func:`is_managed` gives.
@@ -805,7 +805,7 @@ def _is_our_catalog(paths: Paths, alias: str) -> bool:
     (:func:`_catalog_self_marked`) — no sibling-profile fallback. An earlier
     version also accepted "the sibling ``<alias>.config.toml`` profile carries
     our marker" as a second, migration-path proof (mirroring how
-    :func:`_is_ours` accepts a byte-identical legacy render for the wrapper).
+    :func:`_ownership_full_match` accepts a byte-identical legacy render for the wrapper).
     That fallback could not distinguish a legacy catalog WE wrote (before the
     ``managed_by`` field existed) from a FOREIGN hand-curated catalog a user
     simply placed next to our already-installed, marker-carrying profile —
@@ -983,7 +983,7 @@ def _wrapper_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_FilePlan
             paths.script_for(spec.alias),
             render_script(spec, token),
             _mode_for(spec),
-            lambda _p: _is_ours(paths, spec, token),
+            lambda _p: _ownership_full_match(paths, spec, token),
             True,
         )
     ]
@@ -999,10 +999,10 @@ def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_File
     replaced could leave a broken executable on ``PATH`` during the failure
     window.
 
-    Each slot carries its own ownership check — :func:`_is_ours_marker_only`
+    Each slot carries its own ownership check — :func:`_ownership_marker_only`
     for the wrapper AND the TOML profile (both carry the marker comment;
     OPENAI_TOML is a new shape with no pre-marker legacy form, so the
-    legacy byte-match clause :func:`_is_ours` uses for the other shapes would
+    legacy byte-match clause :func:`_ownership_full_match` uses for the other shapes would
     only ever match a third-party hand-written ``exec codex --profile`` script
     and adopt it as ours), and :func:`_is_our_catalog` for the catalog (JSON
     cannot carry a comment marker, so authorship is proven by the sibling
@@ -1026,14 +1026,14 @@ def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_File
             config_path,
             openai_toml_body(spec, str(catalog_path)),
             0o600,
-            _is_ours_marker_only,
+            _ownership_marker_only,
             False,
         ),
         _FilePlan(
             paths.script_for(spec.alias),
             render_script(spec, token),
             _mode_for(spec),
-            _is_ours_marker_only,
+            _ownership_marker_only,
             True,
         ),
     ]
@@ -1049,7 +1049,7 @@ def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) ->
     ever reused for OPENAI_TOML again).
 
     Each sibling is gated by ITS OWN ownership proof, independently —
-    :func:`_is_ours_marker_only` for the profile, :func:`_catalog_self_marked`
+    :func:`_ownership_marker_only` for the profile, :func:`_catalog_self_marked`
     for the catalog. This is deliberately NOT "the profile's marker decides
     both": an earlier version inferred the catalog's fate from the profile
     alone, which meant a hand-curated catalog sitting next to OUR profile was
@@ -1091,7 +1091,7 @@ def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) ->
         path
         for path, is_ours in (
             (catalog_path, _catalog_self_marked(catalog_path)),
-            (config_path, _is_ours_marker_only(config_path)),
+            (config_path, _ownership_marker_only(config_path)),
         )
         if path.exists() and is_ours
     ]
