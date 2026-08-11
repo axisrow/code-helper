@@ -24,6 +24,8 @@ import argparse
 import sys
 from dataclasses import replace
 
+from code_helper.errors import CodeHelperError
+
 
 def _handle_list_axes(what: str) -> int:
     """Print the agent/provider registries, or the compatibility matrix.
@@ -32,7 +34,6 @@ def _handle_list_axes(what: str) -> int:
     ``resolve_shape`` itself, so what it shows and what ``add`` accepts cannot
     disagree. It is where a user sees that some pairings are simply blank.
     """
-    from code_helper.errors import CodeHelperError
     from code_helper.services.model import AGENTS, PROVIDERS, resolve_shape
 
     if what == "agents":
@@ -139,6 +140,23 @@ def _confirm_set_default(path, preview: str) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
+def _read_profile_name(prompt: str) -> str | None:
+    """Read one profile name, returning ``None`` on cancel (Esc or Ctrl-C).
+
+    Used by ``_handle_edit_token``'s interactive create/rename branches.
+    ``edit-token``'s picker already distinguishes hard cancel (Ctrl-C at the
+    menu, propagated) from soft (Esc, exit 0); a cancel at this follow-up
+    text prompt always matches the soft path instead, so ``MenuCancelled``
+    is caught regardless of its ``hard`` flag.
+    """
+    from code_helper.cli.menu import MenuCancelled, read_line
+
+    try:
+        return read_line(prompt)
+    except MenuCancelled:
+        return None
+
+
 def _parse_shape(raw: str | None):
     """``--shape`` string -> ``ConfigShape``, or None when not given.
 
@@ -148,7 +166,6 @@ def _parse_shape(raw: str | None):
     escaped as a raw ``ValueError`` traceback — and, because ``main`` only
     catches ``CodeHelperError``, still exited 0.
     """
-    from code_helper.errors import CodeHelperError
     from code_helper.services.model import ConfigShape
 
     if not raw:
@@ -158,6 +175,224 @@ def _parse_shape(raw: str | None):
     except ValueError:
         valid = ", ".join(s.value for s in ConfigShape)
         raise CodeHelperError(f"unknown shape: {raw} (valid: {valid})") from None
+
+
+def _add_resolve_provider(req, paths):
+    """Resolve the constructor-form provider (axes branch only).
+
+    The ONE substitution point: every downstream reader of ``base_url``
+    (``list_models``, ``resolve_shape``/``build_spec``, the eventual renderer)
+    reads it off the returned provider object, so subbing it in here — before
+    ``--list-models``, before ``build_spec`` — is enough for all of them to
+    see the right value. ``with_auth`` is the matching substitution for auth
+    (``--auth secret``), same reasoning, same call order.
+
+    Raises:
+        CodeHelperError: ``--agent``/``--provider`` not given together.
+    """
+    from code_helper.services.model import (
+        get_agent,
+        get_provider,
+        with_auth,
+        with_base_url,
+    )
+
+    if not req.agent or not req.provider:
+        raise CodeHelperError("--agent and --provider must be given together")
+    agent = get_agent(req.agent)
+    provider = with_base_url(get_provider(req.provider), req.base_url)
+    provider = with_auth(provider, want_secret=req.auth == "secret")
+    return agent, provider
+
+
+def _add_list_models_or_none(req, paths, agent, provider, profile_name):
+    """Run ``--list-models`` if requested, printing models and returning 0.
+
+    Returns ``None`` when ``--list-models`` was not requested, so the caller
+    falls through to spec construction. The token for discovery follows the
+    env → cache (FIXED provider only) → unauthenticated fallback — never a
+    prompt, so an optional listing never blocks a script on stdin.
+    """
+    from code_helper.services.models_api import list_models
+    from code_helper.services.secrets import token_for_discovery
+
+    if not req.list_models:
+        return None
+    result = list_models(
+        provider,
+        token=token_for_discovery(paths, provider, profile_name=profile_name),
+    )
+    if not result.ok:
+        raise CodeHelperError(result.error)
+    for available in result.models:
+        print(available)
+    return 0
+
+
+def _add_resolve_spec(req, paths, agent, provider, profile_name):
+    """Build the ``WrapperSpec`` — constructor path.
+
+    Resolves compatibility BEFORE anything interactive: a bad pairing must
+    never reach a secret prompt for a wrapper that will not be written.
+    """
+    from code_helper.services.model import resolve_shape
+    from code_helper.services.spec import build_spec, suggest_alias
+
+    if not req.model:
+        raise CodeHelperError(
+            f"--model is required (try: code-helper add --agent {agent.name} "
+            f"--provider {provider.name} --list-models)"
+        )
+    shape = _parse_shape(req.shape)
+    resolve_shape(agent, provider, preferred=shape)
+    return build_spec(
+        agent=agent,
+        provider=provider,
+        model=req.model,
+        alias=req.alias or suggest_alias(req.model, agent.name, profile_name),
+        shape=shape,
+        profile_name=profile_name,
+    )
+
+
+def _add_spec_from_preset(req, paths, profile_name):
+    """Build the ``WrapperSpec`` — preset path.
+
+    Disambiguation: ``name`` that is not a preset but IS an agent gets a
+    teaching message showing the constructor form rather than a plain
+    "unknown". Issue #23 preset-branch fallback: pick up the stored active
+    profile for the preset's own provider when ``--profile`` is absent.
+
+    Raises:
+        CodeHelperError: unknown preset/agent name.
+    """
+    from code_helper.services.model import get_agent
+    from code_helper.services.secrets import valid_active_profile
+    from code_helper.services.spec import get_preset, spec_from_preset
+
+    if not req.name:
+        raise CodeHelperError("give a preset name, or --agent with --provider")
+    try:
+        preset = get_preset(req.name)
+    except CodeHelperError as unknown_preset:
+        # A bare agent name is a likely mistake worth teaching, not just
+        # rejecting.
+        try:
+            get_agent(req.name)
+        except CodeHelperError:
+            # Re-raise get_preset's own message: it names the known presets,
+            # and that hint matters most in exactly this case.
+            raise unknown_preset from None
+        raise CodeHelperError(
+            f"unknown wrapper name: {req.name} — {req.name} is an agent; "
+            f"try: code-helper add --agent {req.name} --provider ollama "
+            f"--model <model>"
+        ) from None
+    if profile_name is None:
+        profile_name = valid_active_profile(paths, preset.provider)
+    return spec_from_preset(
+        preset,
+        model_override=req.model,
+        alias_override=req.alias,
+        profile_name=profile_name,
+    )
+
+
+def _add_resolve_token(spec, req, paths, profile_name):
+    """Resolve the token for ``spec``: pre-typed → env/cache/prompt → literal.
+
+    Returns ``(token, resolved)`` where ``resolved`` is the
+    :class:`ResolvedToken` for a secret spec (or ``None`` for literal/none
+    auth), so the caller can decide whether to cache it.
+    """
+    from code_helper.services.secrets import (
+        SOURCE_PROMPT,
+        ResolvedToken,
+        resolve_token,
+    )
+
+    if spec.auth != "secret":
+        return spec.auth_value, None
+    if req.profile_token is not None:
+        if not req.profile_token:
+            raise CodeHelperError("no token entered — aborting")
+        resolved = ResolvedToken(req.profile_token, SOURCE_PROMPT)
+    else:
+        resolved = resolve_token(
+            env_var=spec.token_env_var,
+            prompt=f"{spec.name} token ({spec.token_env_var}): ",
+            paths=paths,
+            provider_name=spec.provider.name,
+            profile_name=profile_name,
+            base_url_policy=spec.provider.base_url_policy,
+        )
+    return resolved.value, resolved
+
+
+def _add_install_and_cache(spec, req, paths, token, resolved, profile_name):
+    """Install the wrapper, then keep the credential cache in step.
+
+    Caches only once ``install_wrapper`` has returned WITHOUT raising: a
+    refusal (foreign-file guard, discard-only-secret guard) raises
+    :class:`CodeHelperError` earlier and skips this entirely. See the inline
+    comments for the staleness-invalidation rule (env-sourced token that
+    disagrees with the cache → invalidate, not overwrite).
+
+    Returns ``True`` iff anything was written.
+    """
+    from code_helper.services.secrets import (
+        DEFAULT_PROFILE,
+        SOURCE_ENV,
+        cache_freshly_typed_token,
+        credential_for,
+        invalidate_cached_credential,
+        rename_profile,
+    )
+    from code_helper.services.wrappers import install_wrapper
+
+    dry_run = req.dry_run
+    wrote = install_wrapper(
+        paths,
+        spec,
+        token=token,
+        dry_run=dry_run,
+        force=req.force,
+        confirm=_confirm_overwrite,
+    )
+    if resolved is not None:
+        cache_profile = profile_name or DEFAULT_PROFILE
+        cache_freshly_typed_token(
+            paths,
+            spec.provider.name,
+            token,
+            profile_name=cache_profile,
+            source=resolved.source,
+            dry_run=dry_run,
+        )
+        # A non-prompt source (env/cache) is never itself written to the cache
+        # — see cache_freshly_typed_token's docstring. But an env-sourced
+        # token that disagrees with what's cached means the cache is stale
+        # relative to what's installed: invalidate rather than overwrite.
+        # Deliberately NOT gated on ``wrote`` — staleness is about whether the
+        # cache disagrees with the resolved token, not whether this call
+        # changed bytes. Only ``dry_run`` is excluded.
+        if resolved.source == SOURCE_ENV and not dry_run:
+            cached = credential_for(paths, spec.provider.name, cache_profile)
+            if cached and cached != token:
+                invalidate_cached_credential(paths, spec.provider.name, cache_profile)
+    if (
+        resolved is not None
+        and req.profile_rename_from
+        and req.profile_rename_to
+        and not dry_run
+    ):
+        rename_profile(
+            paths,
+            spec.provider.name,
+            req.profile_rename_from,
+            req.profile_rename_to,
+        )
+    return wrote
 
 
 def _handle_add(args: argparse.Namespace) -> int:
@@ -170,55 +405,20 @@ def _handle_add(args: argparse.Namespace) -> int:
        the name.
     3. a bare ``name`` that is not a preset but IS an agent gets a message
        showing the constructor form rather than a plain "unknown".
+
+    Thin orchestrator over the ``_add_*`` pipeline: validate flags → resolve
+    provider (axes) → early ``--list-models`` return → build spec → resolve
+    token → install + cache. Each stage lives in its own function so the
+    branching surface stays readable; see the individual docstrings for the
+    invariants each carries.
     """
-    from code_helper.errors import CodeHelperError
-    from code_helper.services.model import (
-        get_agent,
-        get_provider,
-        resolve_shape,
-        with_auth,
-        with_base_url,
-    )
-    from code_helper.services.models_api import list_models
+    from code_helper.cli.requests import AddRequest
     from code_helper.services.paths import Paths
-    from code_helper.services.secrets import (
-        DEFAULT_PROFILE,
-        SOURCE_ENV,
-        SOURCE_PROMPT,
-        ResolvedToken,
-        cache_freshly_typed_token,
-        credential_for,
-        invalidate_cached_credential,
-        rename_profile,
-        resolve_token,
-        token_for_discovery,
-        valid_active_profile,
-    )
-    from code_helper.services.spec import (
-        build_spec,
-        get_preset,
-        spec_from_preset,
-        suggest_alias,
-    )
-    from code_helper.services.wrappers import install_wrapper
+    from code_helper.services.secrets import valid_active_profile
 
     paths = Paths.default()
-    dry_run = getattr(args, "dry_run", False)
-    agent_name = getattr(args, "agent", None)
-    provider_name = getattr(args, "provider", None)
-    # Read through getattr throughout: the TUI builds this Namespace itself and
-    # only fills the fields its flow uses, so an absent attribute is normal
-    # here, not a bug.
-    name = getattr(args, "name", None)
-    model = getattr(args, "model", None)
-    alias = getattr(args, "alias", None)
-    base_url = getattr(args, "base_url", None)
-    auth = getattr(args, "auth", None)
-    profile_name = getattr(args, "profile", None)
-    profile_token = getattr(args, "profile_token", None)
-    profile_rename_from = getattr(args, "profile_rename_from", None)
-    profile_rename_to = getattr(args, "profile_rename_to", None)
-    using_axes = agent_name is not None or provider_name is not None
+    req = AddRequest.from_namespace(args)
+    using_axes = req.agent is not None or req.provider is not None
 
     # Issue #23: an explicit --profile always wins; otherwise the CLI picks up
     # the TUI's stored active profile for this provider as a default, if it
@@ -228,189 +428,121 @@ def _handle_add(args: argparse.Namespace) -> int:
     # profile was never authorized for, so the caller must opt in explicitly
     # with --profile (or an env token) there — never a silent persisted
     # pointer. The constructor branch knows the provider immediately; the
-    # preset branch (no custom base-url possible) falls back right after
-    # get_preset, below.
-    if profile_name is None and provider_name and base_url is None:
-        profile_name = valid_active_profile(paths, provider_name)
+    # preset branch (no custom base-url possible) falls back inside
+    # _add_spec_from_preset.
+    profile_name = req.profile
+    if profile_name is None and req.provider and req.base_url is None:
+        profile_name = valid_active_profile(paths, req.provider)
 
-    if using_axes and name:
+    if using_axes and req.name:
         raise CodeHelperError(
             "give either a preset name or --agent/--provider, not both"
         )
-
-    if not using_axes and base_url:
+    if not using_axes and req.base_url:
         # Checked before get_preset so the message is about the flag, not
         # about an unrecognised preset name.
         raise CodeHelperError(
             "--base-url applies to the constructor form only "
             "(--agent/--provider) — a preset carries its own provider"
         )
-
-    if not using_axes and auth:
+    if not using_axes and req.auth:
         raise CodeHelperError(
             "--auth applies to the constructor form only "
             "(--agent/--provider) — a preset carries its own provider"
         )
 
     if using_axes:
-        if not agent_name or not provider_name:
-            raise CodeHelperError("--agent and --provider must be given together")
-        agent = get_agent(agent_name)
-        # The ONE substitution point: every downstream reader of base_url
-        # (list_models below, resolve_shape/build_spec, the eventual
-        # renderer) reads it off this provider object, so subbing it in here
-        # — before --list-models, before build_spec — is enough for all of
-        # them to see the right value. with_auth is the matching substitution
-        # for auth (--auth secret), same reasoning, same call order.
-        provider = with_base_url(get_provider(provider_name), base_url)
-        provider = with_auth(provider, want_secret=auth == "secret")
-
-        if getattr(args, "list_models", False):
-            result = list_models(
-                provider,
-                token=token_for_discovery(paths, provider, profile_name=profile_name),
-            )
-            if not result.ok:
-                raise CodeHelperError(result.error)
-            for available in result.models:
-                print(available)
-            return 0
-
-        if not model:
-            raise CodeHelperError(
-                f"--model is required (try: code-helper add --agent {agent.name} "
-                f"--provider {provider.name} --list-models)"
-            )
-
-        shape = _parse_shape(getattr(args, "shape", None))
-        # Resolve compatibility BEFORE anything interactive: a bad pairing must
-        # never reach a secret prompt for a wrapper that will not be written.
-        resolve_shape(agent, provider, preferred=shape)
-        spec = build_spec(
-            agent=agent,
-            provider=provider,
-            model=model,
-            alias=alias or suggest_alias(model, agent.name, profile_name),
-            shape=shape,
-            profile_name=profile_name,
-        )
+        agent, provider = _add_resolve_provider(req, paths)
+        early = _add_list_models_or_none(req, paths, agent, provider, profile_name)
+        if early is not None:
+            return early
+        spec = _add_resolve_spec(req, paths, agent, provider, profile_name)
     else:
-        if not name:
-            raise CodeHelperError("give a preset name, or --agent with --provider")
-        try:
-            preset = get_preset(name)
-        except CodeHelperError as unknown_preset:
-            # A bare agent name is a likely mistake worth teaching, not just
-            # rejecting.
-            try:
-                agent = get_agent(name)
-            except CodeHelperError:
-                # Re-raise get_preset's own message: it names the known
-                # presets, and that hint matters most in exactly this case.
-                raise unknown_preset from None
-            raise CodeHelperError(
-                f"unknown wrapper name: {name} — {name} is an agent; "
-                f"try: code-helper add --agent {name} --provider ollama "
-                f"--model <model>"
-            ) from None
-        # Issue #23 preset-branch fallback (the constructor branch handled the
-        # axes case above): pick up the stored active profile for the preset's
-        # own provider when --profile is absent, before profile_name feeds
-        # spec_from_preset / suggest_alias.
-        if profile_name is None:
-            profile_name = valid_active_profile(paths, preset.provider)
-        spec = spec_from_preset(
-            preset,
-            model_override=model,
-            alias_override=alias,
-            profile_name=profile_name,
-        )
+        spec = _add_spec_from_preset(req, paths, profile_name)
+        # _add_spec_from_preset may have filled profile_name via its own
+        # active-profile fallback; re-read it off the built spec.
+        profile_name = spec.profile_name
 
-    if spec.auth == "secret":
-        if profile_token is not None:
-            if not profile_token:
-                raise CodeHelperError("no token entered — aborting")
-            resolved = ResolvedToken(profile_token, SOURCE_PROMPT)
-        else:
-            resolved = resolve_token(
-                env_var=spec.token_env_var,
-                prompt=f"{spec.name} token ({spec.token_env_var}): ",
-                paths=paths,
-                provider_name=spec.provider.name,
-                profile_name=profile_name,
-                base_url_policy=spec.provider.base_url_policy,
-            )
-        token = resolved.value
-    else:
-        resolved = None
-        token = spec.auth_value
-
-    wrote = install_wrapper(
-        paths,
-        spec,
-        token=token,
-        dry_run=dry_run,
-        force=getattr(args, "force", False),
-        confirm=_confirm_overwrite,
-    )
-    # Cache only once install_wrapper has returned WITHOUT raising: a refusal
-    # (foreign-file guard, discard-only-secret guard) raises CodeHelperError
-    # and skips this line entirely, so a token typed for an install that never
-    # happened is never persisted. ``wrote`` itself is deliberately NOT part
-    # of the gate — ``wrote=False`` means "install_wrapper no-opped because
-    # the content was already byte-identical", not a refusal, and the token
-    # that produced that byte-identical content is exactly the one worth
-    # having cached.
-    if resolved is not None:
-        cache_profile = profile_name or DEFAULT_PROFILE
-        cache_freshly_typed_token(
-            paths,
-            spec.provider.name,
-            token,
-            profile_name=cache_profile,
-            source=resolved.source,
-            dry_run=dry_run,
-        )
-        # A non-prompt source (env/cache) is never itself written to the
-        # cache — see cache_freshly_typed_token's docstring, an env value
-        # already outlives this process. But an env-sourced token that
-        # disagrees with what's cached for this provider means the cache is
-        # stale relative to what's actually installed: an env-free run later
-        # would resolve that stale cache value and silently revert the
-        # wrapper to it (a rotated/revoked credential resurrected with no
-        # confirmation). Invalidate rather than "helpfully" overwrite it with
-        # the env value — env values aren't meant to be cached, and dropping
-        # the stale entry is enough to make the next env-free run fall
-        # through to a fresh prompt instead of reusing either value.
-        #
-        # Deliberately NOT gated on ``wrote``: staleness is a fact about
-        # whether the cache disagrees with the token just resolved, not about
-        # whether THIS call happened to change any bytes. A byte-identical
-        # reinstall (``wrote=False`` — the wrapper already has this exact env
-        # token) with a stale, DIFFERENT cache entry is just as much a
-        # staleness hazard as a real write: the entry is still there, still
-        # wrong, and still waiting for an env-free run to resurrect it. Only
-        # ``dry_run`` is excluded — a dry run changes nothing on disk, so
-        # there is nothing yet to reconcile the cache against.
-        if resolved.source == SOURCE_ENV and not dry_run:
-            cached = credential_for(paths, spec.provider.name, cache_profile)
-            if cached and cached != token:
-                invalidate_cached_credential(paths, spec.provider.name, cache_profile)
-    if (
-        resolved is not None
-        and profile_rename_from
-        and profile_rename_to
-        and not dry_run
-    ):
-        rename_profile(
-            paths,
-            spec.provider.name,
-            profile_rename_from,
-            profile_rename_to,
-        )
+    token, resolved = _add_resolve_token(spec, req, paths, profile_name)
+    wrote = _add_install_and_cache(spec, req, paths, token, resolved, profile_name)
     if not wrote:
         print("no changes")
     return 0
+
+
+def _edit_token_resolve_profile(
+    paths, provider_name: str
+) -> tuple[str, str | None, str | None] | None:
+    """Pick (or create) a token profile for ``provider_name`` interactively.
+
+    Returns ``(profile_name, rename_from, rename_to)`` — where ``rename_*``
+    carry the prior profile's rename when a new profile is created alongside
+    a single existing one, or ``None`` otherwise. Returns ``None`` on a soft
+    cancel (Esc at the menu, Ctrl-C at a name prompt), signalling the caller
+    to print "cancelled" and exit 0.
+
+    The new-profile naming decision is owned by :mod:`code_helper.services.profiles`
+    (issue #37, P1.2): this function maps the classifier's outcome to the
+    CLI's raises (lowercase messages, SAME and COLLISION_NEW merged). See
+    ``_new_profile`` in ``cli/tui.py`` for the TUI's own mapping.
+    """
+    from code_helper.cli.menu import MenuCancelled, select_from_menu
+    from code_helper.services.profiles import (
+        NewProfileOutcome,
+        classify_new_profile,
+        validate_new_profile_name,
+    )
+    from code_helper.services.secrets import DEFAULT_PROFILE, profile_names
+
+    names = list(profile_names(paths, provider_name))
+    if not names:
+        return None  # no menu to show — caller falls through to DEFAULT_PROFILE
+
+    profile_items = [
+        (name, "default" if name == DEFAULT_PROFILE else name) for name in names
+    ]
+    profile_items.append(("__new_profile__", "create new profile"))
+    try:
+        selected = select_from_menu(
+            profile_items,
+            prompt="select token profile to rotate:",
+        )
+    except MenuCancelled as e:
+        if e.hard:
+            # Ctrl-C: propagate so a TUI caller treats this as "leave", not
+            # "succeed + re-show menu" — see cli/tui.py's top-level catch.
+            raise
+        return None
+
+    if selected != "__new_profile__":
+        return selected, None, None
+
+    if len(names) == 1:
+        current_name = _read_profile_name(f"name for current profile ({names[0]}): ")
+        if current_name is None:
+            return None
+        new_name = _read_profile_name("name for new profile: ")
+        if new_name is None:
+            return None
+        outcome = classify_new_profile(names, current_name, new_name)
+        if outcome is NewProfileOutcome.EMPTY:
+            raise CodeHelperError("profile names cannot be empty")
+        # CLI merges SAME and COLLISION_NEW into one message, matching the
+        # pre-refactor `current_name == new_name or new_name in names` check.
+        # COLLISION_RENAMED is NOT mapped here: the original CLI never checked
+        # it in this branch, and downstream rename_profile surfaces it.
+        if outcome in (NewProfileOutcome.SAME, NewProfileOutcome.COLLISION_NEW):
+            raise CodeHelperError("profile names must be unique")
+        return new_name, names[0], current_name
+
+    # Multi-profile branch: only a new name is collected.
+    new_name = _read_profile_name("name for new profile: ")
+    if new_name is None:
+        return None
+    outcome = validate_new_profile_name(new_name, names)
+    if outcome in (NewProfileOutcome.EMPTY, NewProfileOutcome.COLLISION_NEW):
+        raise CodeHelperError("new profile name must be non-empty and unique")
+    return new_name, None, None
 
 
 def _handle_edit_token(args: argparse.Namespace) -> int:
@@ -426,7 +558,7 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     import getpass
 
     from code_helper.cli.menu import MenuCancelled, select_from_menu
-    from code_helper.errors import CodeHelperError
+    from code_helper.cli.requests import EditTokenRequest
     from code_helper.services.paths import Paths
     from code_helper.services.secrets import (
         DEFAULT_PROFILE,
@@ -445,8 +577,13 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
         spec_from_installed,
     )
 
+    req = EditTokenRequest.from_namespace(args)
+
     paths = Paths.default()
-    dry_run = getattr(args, "dry_run", False)
+    dry_run = req.dry_run
+    profile_token = req.profile_token
+    profile_rename_from = req.profile_rename_from
+    profile_rename_to = req.profile_rename_to
 
     def _resolve(name: str):
         """The INSTALLED wrapper's spec, falling back to the preset registry.
@@ -458,8 +595,8 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
         """
         return spec_from_installed(paths, name) or get_spec(name)
 
-    if args.name:
-        spec = _resolve(args.name)
+    if req.name:
+        spec = _resolve(req.name)
     else:
         # Presets plus anything the constructor installed — the latter are
         # first-class wrappers and were previously unreachable from here.
@@ -497,65 +634,21 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     if spec.auth != "secret":
         raise CodeHelperError(f"{spec.name} has no editable token (auth={spec.auth})")
 
-    profile_name = getattr(args, "profile", None)
-    profile_token = getattr(args, "profile_token", None)
-    profile_rename_from = getattr(args, "profile_rename_from", None)
-    profile_rename_to = getattr(args, "profile_rename_to", None)
+    profile_name = req.profile
     if profile_name is None:
-        names = list(profile_names(paths, spec.provider.name))
-        if names:
-            profile_items = [
-                (name, "default" if name == DEFAULT_PROFILE else name) for name in names
-            ]
-            profile_items.append(("__new_profile__", "create new profile"))
-            try:
-                selected = select_from_menu(
-                    profile_items,
-                    prompt="select token profile to rotate:",
-                )
-            except MenuCancelled as e:
-                if e.hard:
-                    raise
+        # Only offer the profile menu when profiles exist; with none cached
+        # the original code skipped straight to DEFAULT_PROFILE (no menu to
+        # pick from). _edit_token_resolve_profile returns None on a soft
+        # cancel (Esc/Ctrl-C at the menu or a name prompt) — distinct from
+        # the "no profiles" skip, which never calls it.
+        if profile_names(paths, spec.provider.name):
+            resolved = _edit_token_resolve_profile(paths, spec.provider.name)
+            if resolved is None:
+                # Soft cancel → "cancelled" + exit 0, matching the picker's
+                # own soft-cancel behavior.
                 print("cancelled")
                 return 0
-
-            def _read_profile_name(prompt: str) -> str | None:
-                try:
-                    return input(prompt).strip()
-                except KeyboardInterrupt:
-                    print()
-                    return None
-
-            if selected == "__new_profile__":
-                if len(names) == 1:
-                    current_name = _read_profile_name(
-                        f"name for current profile ({names[0]}): "
-                    )
-                    if current_name is None:
-                        print("cancelled")
-                        return 0
-                    new_name = _read_profile_name("name for new profile: ")
-                    if new_name is None:
-                        print("cancelled")
-                        return 0
-                    if not current_name or not new_name:
-                        raise CodeHelperError("profile names cannot be empty")
-                    if current_name == new_name or new_name in names:
-                        raise CodeHelperError("profile names must be unique")
-                    profile_rename_from = names[0]
-                    profile_rename_to = current_name
-                    profile_name = new_name
-                else:
-                    profile_name = _read_profile_name("name for new profile: ")
-                    if profile_name is None:
-                        print("cancelled")
-                        return 0
-                    if not profile_name or profile_name in names:
-                        raise CodeHelperError(
-                            "new profile name must be non-empty and unique"
-                        )
-            else:
-                profile_name = selected
+            profile_name, profile_rename_from, profile_rename_to = resolved
     if profile_name is None:
         profile_name = DEFAULT_PROFILE
     spec = replace(spec, profile_name=profile_name)
@@ -614,47 +707,42 @@ def _handle_set_default(args: argparse.Namespace) -> int:
     agent's own configuration file — see ``services/codex_default.py`` for
     why that is safe (patch, never replace; always backed up first).
     """
-    from code_helper.errors import CodeHelperError
+    from code_helper.cli.requests import SetDefaultRequest
     from code_helper.services.codex_default import apply_set_default, restore_default
     from code_helper.services.model import get_agent, get_provider, with_base_url
     from code_helper.services.paths import Paths
 
-    paths = Paths.default()
-    dry_run = getattr(args, "dry_run", False)
-    force = getattr(args, "force", False)
-    restore = getattr(args, "restore", False)
-    agent_name = getattr(args, "agent", None)
-    provider_name = getattr(args, "provider", None)
-    model = getattr(args, "model", None)
-    base_url = getattr(args, "base_url", None)
+    req = SetDefaultRequest.from_namespace(args)
 
-    if restore and (agent_name or provider_name or model or base_url):
+    paths = Paths.default()
+
+    if req.restore and (req.agent or req.provider or req.model or req.base_url):
         raise CodeHelperError(
             "--restore cannot be combined with --agent/--provider/--model/--base-url"
         )
-    if getattr(args, "slot", None) is not None and not restore:
+    if req.slot is not None and not req.restore:
         raise CodeHelperError("--slot only applies together with --restore")
 
-    if restore:
-        slot = getattr(args, "slot", None) or 1
+    if req.restore:
+        slot = req.slot or 1
         wrote = restore_default(
             paths,
             slot=slot,
-            catalog_json=getattr(args, "catalog_json", None),
-            dry_run=dry_run,
-            force=force,
+            catalog_json=req.catalog_json,
+            dry_run=req.dry_run,
+            force=req.force,
             confirm=_confirm_set_default,
         )
         if not wrote:
             print("no changes")
         return 0
 
-    if not agent_name or not provider_name:
+    if not req.agent or not req.provider:
         raise CodeHelperError("--agent and --provider must be given together")
-    if not model:
+    if not req.model:
         raise CodeHelperError("--model is required")
 
-    agent = get_agent(agent_name)
+    agent = get_agent(req.agent)
     # Same substitution point as _handle_add's — and here it is not merely
     # convenient but load-bearing: without it, a runtime-base_url provider
     # with an empty registry base_url would make openai_base_url("") return
@@ -663,16 +751,16 @@ def _handle_set_default(args: argparse.Namespace) -> int:
     # a successful set-default that silently breaks codex, with the
     # verification net unable to catch it because both sides of the check
     # are wrong in the same way.
-    provider = with_base_url(get_provider(provider_name), base_url)
+    provider = with_base_url(get_provider(req.provider), req.base_url)
 
     wrote = apply_set_default(
         paths,
         agent=agent,
         provider=provider,
-        model=model,
-        catalog_json=getattr(args, "catalog_json", None),
-        dry_run=dry_run,
-        force=force,
+        model=req.model,
+        catalog_json=req.catalog_json,
+        dry_run=req.dry_run,
+        force=req.force,
         confirm=_confirm_set_default,
     )
     if not wrote:

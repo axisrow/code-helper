@@ -204,76 +204,110 @@ def _translate(
     return "OTHER"
 
 
-#: One-byte pushback slot, spanning :func:`_read_key_raw` calls.
-#:
-#: :func:`_translate` peeks one byte past a keypress to detect the LF half of
-#: a CRLF Enter. When that byte turns out to be a real next keypress instead,
-#: it cannot be un-read from the fd — so it is parked here and the NEXT call
-#: consumes it before touching the fd again. Module-level (not a local) for
-#: exactly that reason: the byte has to outlive the call that read it.
-#:
-#: Single-byte is sufficient because only the Enter branch ever pushes back,
-#: and it pushes at most one byte per keypress — which the next call drains
-#: before it can read (and therefore push back) anything else.
-_pending_byte: str | None = None
+class KeyReader:
+    """Reads one raw keypress at a time from a real TTY, owning its pushback slot.
+
+    Replaces the former module-level ``_pending_byte`` global + ``_read_key_raw``
+    function pair. The one-byte pushback slot is per-instance state so two
+    readers (e.g. a real TTY reader and a test fake) cannot leak bytes into
+    each other — the module global they replaced was a single shared slot,
+    which worked only because exactly one reader was ever active.
+
+    Reads via ``os.read(fd, 1)``, NOT ``stream.read(1)``: ``stream`` is a
+    buffered ``TextIOWrapper`` whose internal buffer ``select.select`` cannot
+    see, so a byte already sitting in that buffer never shows up as "ready"
+    again. Reading raw bytes straight from the fd sidesteps this.
+
+    A byte :func:`_translate` peeked but did not consume is parked in
+    ``self._pending`` and drained by the next call. Single-byte is sufficient
+    because only the Enter branch ever pushes back, and it pushes at most one
+    byte per keypress — which the next call drains before it can read (and
+    therefore push back) anything else.
+
+    Bytes are decoded ONE AT A TIME with ``errors="replace"``, so a multi-byte
+    UTF-8 character decodes to U+FFFD per byte and translates to several
+    ``"OTHER"`` keys. That is harmless here — the menu only acts on ASCII keys
+    and ignores ``"OTHER"`` — but this reader is NOT usable for reading text.
+    """
+
+    __slots__ = ("_stream", "_pending")
+
+    def __init__(self, stream=sys.stdin) -> None:
+        self._stream = stream
+        self._pending: str | None = None
+
+    def read(self) -> str:
+        """Read one fully-parsed keypress via :func:`_translate`."""
+        import select
+        import termios
+        import tty
+
+        stream = self._stream
+        fd = stream.fileno()
+        old = termios.tcgetattr(fd)
+
+        def _read_more(timeout: float) -> str | None:
+            if self._pending is not None:
+                b, self._pending = self._pending, None
+                return b
+            ready, _, _ = select.select([fd], [], [], timeout)
+            if not ready:
+                return None
+            return os.read(fd, 1).decode("utf-8", errors="replace")
+
+        def _push_back(b: str) -> None:
+            self._pending = b
+
+        try:
+            tty.setraw(fd)
+            if self._pending is not None:
+                first, self._pending = self._pending, None
+            else:
+                first = os.read(fd, 1).decode("utf-8", errors="replace")
+            return _translate(first, _read_more, _push_back)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 def _read_key_raw(stream=sys.stdin) -> str:
-    """Read one raw keypress from a real TTY, fully parsed via :func:`_translate`.
+    """One keypress via a fresh, throwaway :class:`KeyReader`.
 
-    Reads via ``os.read(fd, 1)``, NOT ``stream.read(1)``. ``stream`` is a
-    buffered ``TextIOWrapper``: a single ``.read(1)`` call is free to pull
-    more than one byte off the underlying fd into its own internal buffer
-    before decoding and returning the first character. ``select.select``
-    only ever sees the fd itself — it has no visibility into that internal
-    buffer, so a byte already sitting in the wrapper's buffer never shows up
-    as "ready" again. Reading raw bytes straight from the fd sidesteps this:
-    every byte ``select`` reports ready is read immediately, never parked in
-    a layer ``select`` can't see.
-
-    A byte :func:`_translate` peeked but did not consume is parked in
-    :data:`_pending_byte` and drained by the next call — see there.
-
-    .. note::
-       Bytes are decoded ONE AT A TIME with ``errors="replace"``, so a
-       multi-byte UTF-8 character (e.g. a Cyrillic letter) decodes to U+FFFD
-       per byte and translates to several ``"OTHER"`` keys. That is harmless
-       here — the menu only acts on ASCII keys and ignores ``"OTHER"`` — but
-       this function is NOT usable as-is for reading text; that would need
-       accumulating continuation bytes into a full character first.
+    NOT used as ``select_from_menu``'s default ``read_key`` (that would drop
+    a pushed-back byte across keypresses — see :data:`_default_key_reader`
+    below). This wrapper constructs its own one-shot reader instead, so it is
+    only safe for a single isolated read with no pushback expected — see
+    :func:`press_any_key`, its only caller.
     """
-    global _pending_byte
+    return KeyReader(stream).read()
 
-    import select
-    import termios
-    import tty
 
-    fd = stream.fileno()
-    old = termios.tcgetattr(fd)
+_default_key_reader: KeyReader | None = None
 
-    def _read_more(timeout: float) -> str | None:
-        global _pending_byte
-        if _pending_byte is not None:
-            b, _pending_byte = _pending_byte, None
-            return b
-        ready, _, _ = select.select([fd], [], [], timeout)
-        if not ready:
-            return None
-        return os.read(fd, 1).decode("utf-8", errors="replace")
 
-    def _push_back(b: str) -> None:
-        global _pending_byte
-        _pending_byte = b
+def _default_read_key() -> str:
+    """Default ``read_key`` for :func:`select_from_menu` — one shared reader.
 
-    try:
-        tty.setraw(fd)
-        if _pending_byte is not None:
-            first, _pending_byte = _pending_byte, None
-        else:
-            first = os.read(fd, 1).decode("utf-8", errors="replace")
-        return _translate(first, _read_more, _push_back)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    A single module-level :class:`KeyReader` bound to real stdin, reused
+    across EVERY call to :func:`select_from_menu` for the life of the
+    process — not just within one call. This mirrors the pre-refactor
+    module-level ``_pending_byte`` global it replaces: the TUI opens many
+    menus in sequence (main menu -> sub-menu -> ...), each via its own
+    ``select_from_menu`` call, and a byte parked by Enter's CRLF-pair peek
+    (e.g. the user types Enter then immediately Down, intending the Down for
+    whichever menu opens next) must survive into the NEXT call's first read,
+    not just the next keypress within the same call. A fresh ``KeyReader``
+    per call (or per keypress, as ``_read_key_raw`` builds) would drop that
+    byte on the floor exactly where the old global didn't.
+
+    Lazily constructed on first use (not at import time) so ``sys.stdin`` is
+    read at call time, matching whatever stream is current when the TUI
+    actually starts reading keys — tests never hit this path since they
+    always inject ``read_key`` explicitly.
+    """
+    global _default_key_reader
+    if _default_key_reader is None:
+        _default_key_reader = KeyReader(sys.stdin)
+    return _default_key_reader.read()
 
 
 def _normalize(
@@ -309,6 +343,193 @@ def _fit(line: str, width: int) -> str:
     return line[: width - 1] + "…"
 
 
+class _MenuState:
+    """Mutable state of a ``select_from_menu`` session, separated from its IO.
+
+    Pure construction (no IO) lives in :func:`_build_menu_state`; the redraw
+    loop in :func:`select_from_menu` reads and mutates ``index`` / ``first``
+    while delegating every frame's rendering to :func:`_render_frame` and
+    every keypress's effect to :func:`_dispatch_key`. Splitting the state out
+    is what lets the 200-line monolithic body become three readable parts.
+
+    Kept as a plain class (not ``@dataclass``) because ``index`` and ``first``
+    are mutated in place by the dispatch return path — a frozen dataclass
+    would force rebuilding the whole state on every keypress.
+    """
+
+    __slots__ = (
+        "pairs",
+        "selectable",
+        "digit_of",
+        "by_digit",
+        "index",
+        "first",
+        "redraw",
+        "width",
+        "hint_text",
+        "frame_lines",
+    )
+
+    def __init__(
+        self,
+        *,
+        pairs,
+        selectable,
+        digit_of,
+        by_digit,
+        redraw,
+        width,
+        hint_text,
+        frame_lines,
+    ) -> None:
+        self.pairs = pairs
+        self.selectable = selectable
+        self.digit_of = digit_of
+        self.by_digit = by_digit
+        self.redraw = redraw
+        self.width = width
+        self.hint_text = hint_text
+        self.frame_lines = frame_lines
+        self.index = 0
+        self.first = True
+
+
+def _build_menu_state(
+    items: Sequence[str | tuple[str, str | Callable[[], str]] | Section],
+    *,
+    hint: str | None | Callable[[], str],
+    unnumbered: frozenset[str],
+) -> _MenuState:
+    """Construct a :class:`_MenuState` from raw ``items`` — pure, no IO.
+
+    Owns the three invariants the redraw loop relies on: which entries are
+    selectable (skipping :class:`Section` headers), the value→digit and
+    digit→value mappings (kept as one derivation so the rendered digit and
+    the dispatch digit can never disagree), and the frame-line count that
+    drives the in-place redraw's cursor-up escape.
+    """
+    pairs = _normalize(items)
+
+    selectable = [i for i, entry in enumerate(pairs) if not isinstance(entry, Section)]
+    if not selectable:
+        raise ValueError("items must be non-empty")
+
+    digit_of: dict[str, int] = {}
+    for entry in pairs:
+        if isinstance(entry, Section):
+            continue
+        value = entry[0]
+        if value not in unnumbered and len(digit_of) < MAX_DIGIT_ITEMS:
+            digit_of[value] = len(digit_of) + 1
+    by_digit = {n: value for value, n in digit_of.items()}
+
+    redraw = sys.stdout.isatty()
+    width = shutil.get_terminal_size((80, 24)).columns if redraw else 0
+    hint_text = hint() if callable(hint) else hint
+    frame_lines = len(pairs) + 2 + (2 if hint_text else 0)
+
+    return _MenuState(
+        pairs=pairs,
+        selectable=selectable,
+        digit_of=digit_of,
+        by_digit=by_digit,
+        redraw=redraw,
+        width=width,
+        hint_text=hint_text,
+        frame_lines=frame_lines,
+    )
+
+
+def _render_frame(
+    state: _MenuState,
+    *,
+    prompt: str | Callable[[], str],
+    clear: bool,
+    clear_seq: str,
+    clear_screen: str,
+    print_fn: Callable[[str], None],
+) -> None:
+    """Render one menu frame to ``print_fn`` — pure output, no key reading.
+
+    Evaluates a callable ``prompt`` fresh each frame so a header that
+    reflects state an ``on_tab`` handler mutated stays current. Every
+    rendered row is truncated to the terminal width via :func:`_fit` — a row
+    longer than the terminal wraps into extra physical rows the in-place
+    redraw does not know about, and the menu creeps down the screen.
+    """
+    width = state.width
+    redraw = state.redraw
+    prompt_text = prompt() if callable(prompt) else prompt
+    heading = _fit(prompt_text, width) if redraw else prompt_text
+    if redraw:
+        lead = clear_seq if not state.first else (clear_screen if clear else "")
+        print_fn(f"{lead}{heading}\n")
+    else:
+        print_fn(f"\n{heading}")
+    cursor_pair = state.selectable[state.index]
+    for i, entry in enumerate(state.pairs):
+        if isinstance(entry, Section):
+            header = entry.text
+            print_fn(f" {_fit(header, width - 1) if redraw else header}")
+            continue
+        value, label = entry
+        label_text = label() if callable(label) else label
+        marker = ">" if i == cursor_pair else " "
+        digit = str(state.digit_of[value]) if value in state.digit_of else "·"
+        row = f"{digit} {marker} {label_text}"
+        print_fn(f" {_fit(row, width - 1) if redraw else row}")
+    if state.hint_text:
+        fitted_hint = _fit(state.hint_text, width) if redraw else state.hint_text
+        print_fn(f"\n {fitted_hint}" if redraw else f" {fitted_hint}")
+
+
+def _dispatch_key(
+    key: str,
+    state: _MenuState,
+    *,
+    on_tab: Callable[[], None] | None,
+    on_token: Callable[[str], None] | None,
+):
+    """Act on one translated ``key`` — returns a sentinel or a selected value.
+
+    Returns:
+        The selected value when the key selects one (Enter / a digit);
+        ``None`` when the key only mutated state (navigation / on_tab /
+        on_token) and the loop should redraw; never returns for CANCEL /
+        HARD_CANCEL (raises :class:`MenuCancelled`).
+    """
+    if key == "TAB" and on_tab is not None:
+        on_tab()
+        return None
+    if key == "TOKEN" and on_token is not None:
+        on_token(state.pairs[state.selectable[state.index]][0])
+        return None
+    if key == "UP":
+        state.index = (state.index - 1) % len(state.selectable)
+        return None
+    if key == "DOWN":
+        state.index = (state.index + 1) % len(state.selectable)
+        return None
+    if key in ("HOME", "PAGE_UP"):
+        state.index = 0
+        return None
+    if key in ("END", "PAGE_DOWN"):
+        state.index = len(state.selectable) - 1
+        return None
+    if key == "ENTER":
+        return state.pairs[state.selectable[state.index]][0]
+    if key.startswith("DIGIT_"):
+        n = int(key[len("DIGIT_") :])
+        if n in state.by_digit:
+            return state.by_digit[n]
+        return None
+    if key == "CANCEL":
+        raise MenuCancelled(hard=False)
+    if key == "HARD_CANCEL":
+        raise MenuCancelled(hard=True)
+    return None  # OTHER / TAB-without-on_tab / TOKEN-without-on_token
+
+
 def select_from_menu(
     items: Sequence[str | tuple[str, str | Callable[[], str]] | Section],
     *,
@@ -317,7 +538,7 @@ def select_from_menu(
     on_tab: Callable[[], None] | None = None,
     on_token: Callable[[str], None] | None = None,
     unnumbered: frozenset[str] = frozenset(),
-    read_key: Callable[[], str] = _read_key_raw,
+    read_key: Callable[[], str] | None = None,
     print_fn: Callable[[str], None] = print,
     clear: bool = False,
 ) -> str:
@@ -374,8 +595,12 @@ def select_from_menu(
             it can never drift apart (the failure mode a caller-side
             ``str.startswith`` on the label used to cause — see
             ``cli/tui.py`` history).
-        read_key: Source of translated keypresses. Defaults to reading a real
-            TTY; tests inject a fake sequence instead.
+        read_key: Source of translated keypresses. Defaults to a single
+            :class:`KeyReader` shared across the whole process (see
+            :func:`_default_read_key`) — NOT :func:`_read_key_raw` (which
+            builds a fresh reader per keypress and would drop a byte parked
+            in its pushback slot by the previous keypress, or by the
+            previous menu); tests inject a fake sequence instead.
         print_fn: Injectable output sink for the rendered menu.
         clear: On a TTY, clear the *whole* screen before the first frame
             instead of leaving prior content above it. Ignored when
@@ -399,118 +624,36 @@ def select_from_menu(
         MenuCancelled: the user cancelled — ``hard=True`` for Ctrl-C,
             ``hard=False`` for Esc/``q``.
     """
-    pairs = _normalize(items)
+    state = _build_menu_state(items, hint=hint, unnumbered=unnumbered)
+    if read_key is None:
+        # One reader shared across the whole process, NOT `_read_key_raw` —
+        # see `_default_read_key`'s docstring for why a fresh reader (per
+        # keypress OR per `select_from_menu` call) drops a pushed-back byte.
+        read_key = _default_read_key
 
-    # Indices into `pairs` that point at SELECTABLE entries (i.e. not a
-    # `Section` header). Navigation (`index`) moves over THIS list, not
-    # `pairs` directly, so Up/Down/Home/End silently skip section headers —
-    # the cursor never lands on a header, and Enter can never return one.
-    # `selectable[index]` maps the cursor position back to a `pairs` index
-    # wherever the renderer or the ENTER handler needs the actual entry.
-    selectable = [i for i, entry in enumerate(pairs) if not isinstance(entry, Section)]
-    if not selectable:
-        raise ValueError("items must be non-empty")
-
-    # value -> digit, assigned by iteration order, skipping `unnumbered`
-    # values AND `Section` headers (a header is not an item and gets no
-    # digit). Looked up by both the row renderer (what digit to print next to
-    # a value) and the DIGIT_<n> handler (what value that digit selects) so
-    # the two can never disagree. `by_digit` is the same mapping inverted,
-    # needed only by the DIGIT_<n> handler.
-    digit_of: dict[str, int] = {}
-    for entry in pairs:
-        if isinstance(entry, Section):
-            continue
-        value = entry[0]
-        if value not in unnumbered and len(digit_of) < MAX_DIGIT_ITEMS:
-            digit_of[value] = len(digit_of) + 1
-    by_digit = {n: value for value, n in digit_of.items()}
-
-    redraw = sys.stdout.isatty()
-    width = shutil.get_terminal_size((80, 24)).columns if redraw else 0
-    first = True
-    # On a TTY, one rendered frame = prompt line + a blank spacer line + one
-    # line per item + (if hint) a blank spacer line + the hint line. The
-    # spacers give the heading/hint visual room instead of running straight
-    # into the list (see CLAUDE.md). They are folded into the SAME
-    # `print_fn` call as the heading/hint text (one trailing/leading `\n`)
-    # rather than printed separately, so this count is the only place that
-    # has to know about them — get it wrong and the in-place redraw erases
-    # the wrong number of rows and the menu creeps down the screen. Off a
-    # TTY there is no redraw to protect and the legacy single-leading-blank
-    # layout is kept as-is. A callable hint is resolved ONCE here — before the
-    # frame line count is computed — so the count cannot depend on what the
-    # callable would return later; the TUI's hint is static per menu anyway.
-    hint_text = hint() if callable(hint) else hint
-    frame_lines = len(pairs) + 2 + (2 if hint_text else 0)
-    clear_seq = f"\033[{frame_lines}A\033[J"
+    clear_seq = f"\033[{state.frame_lines}A\033[J"
     clear_screen = "\033[2J\033[H"
     hide_cursor = "\033[?25l"
     show_cursor = "\033[?25h"
-    index = 0
     try:
-        if redraw:
+        if state.redraw:
             print_fn(hide_cursor)
         while True:
-            # `_fit` only ever wraps the VISIBLE text (`prompt`, a row's
-            # label, `hint`) — never a string with ANSI escapes or an
-            # embedded newline spliced in, since `_fit` counts `len()` as
-            # columns and either would throw that count off. A callable
-            # `prompt` is evaluated FRESH here, each frame, so a header that
-            # reflects state an `on_tab` handler mutated stays current.
-            prompt_text = prompt() if callable(prompt) else prompt
-            heading = _fit(prompt_text, width) if redraw else prompt_text
-            if redraw:
-                # After the first frame, always erase-and-redraw in place;
-                # only the very first frame considers `clear` (a full-screen
-                # clear) vs. no prefix at all.
-                lead = clear_seq if not first else (clear_screen if clear else "")
-                print_fn(f"{lead}{heading}\n")
-            else:
-                print_fn(f"\n{heading}")
-            cursor_pair = selectable[index]
-            for i, entry in enumerate(pairs):
-                if isinstance(entry, Section):
-                    # Header row: a bare label, no digit, no `>` marker. It
-                    # is never the cursor position (`selectable` excludes it),
-                    # so there is no marker branch to get right here.
-                    header = entry.text
-                    print_fn(f" {_fit(header, width - 1) if redraw else header}")
-                    continue
-                value, label = entry
-                label_text = label() if callable(label) else label
-                marker = ">" if i == cursor_pair else " "
-                digit = str(digit_of[value]) if value in digit_of else "·"
-                row = f"{digit} {marker} {label_text}"
-                print_fn(f" {_fit(row, width - 1) if redraw else row}")
-            if hint_text:
-                fitted_hint = _fit(hint_text, width) if redraw else hint_text
-                print_fn(f"\n {fitted_hint}" if redraw else f" {fitted_hint}")
-            first = False
+            _render_frame(
+                state,
+                prompt=prompt,
+                clear=clear,
+                clear_seq=clear_seq,
+                clear_screen=clear_screen,
+                print_fn=print_fn,
+            )
+            state.first = False
 
-            key = read_key()
-            if key == "TAB" and on_tab is not None:
-                on_tab()
-            elif key == "TOKEN" and on_token is not None:
-                on_token(pairs[selectable[index]][0])
-            elif key == "UP":
-                index = (index - 1) % len(selectable)
-            elif key == "DOWN":
-                index = (index + 1) % len(selectable)
-            elif key == "HOME" or key == "PAGE_UP":
-                index = 0
-            elif key == "END" or key == "PAGE_DOWN":
-                index = len(selectable) - 1
-            elif key == "ENTER":
-                return pairs[selectable[index]][0]
-            elif key.startswith("DIGIT_"):
-                n = int(key[len("DIGIT_") :])
-                if n in by_digit:
-                    return by_digit[n]
-            elif key == "CANCEL":
-                raise MenuCancelled(hard=False)
-            elif key == "HARD_CANCEL":
-                raise MenuCancelled(hard=True)
+            selected = _dispatch_key(
+                read_key(), state, on_tab=on_tab, on_token=on_token
+            )
+            if selected is not None:
+                return selected
     except KeyboardInterrupt:
         # Belt-and-suspenders: a real terminal in raw mode has ISIG off, so
         # Ctrl-C arrives as the "\x03" byte above (-> HARD_CANCEL), never as
@@ -519,7 +662,7 @@ def select_from_menu(
         # directly instead of returning a translated key name.
         raise MenuCancelled(hard=True) from None
     finally:
-        if redraw:
+        if state.redraw:
             print_fn(show_cursor)
 
 

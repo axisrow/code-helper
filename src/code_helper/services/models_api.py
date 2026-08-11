@@ -142,6 +142,27 @@ _PARSERS: dict[ModelListAPI, Callable[[dict], tuple[str, ...]]] = {
 }
 
 
+def _classify_fetch_error(e: Exception, url: str, provider: Provider) -> str:
+    """Turn a fetch exception into a printable ``ModelListResult.error`` string.
+
+    A 401/403 means the endpoint is UP but unauthorized — "start the daemon"
+    is the wrong advice there, so it gets its own message naming the token
+    env var. Every other failure (connection refused, timeout, 500/404, a
+    mid-body ``IncompleteRead``) reads as a reachability fault and falls
+    through to the generic "could not reach" wording.
+    """
+    if isinstance(e, urllib.error.HTTPError) and e.code in (401, 403):
+        return (
+            f"{provider.name} rejected the request at {url} (HTTP {e.code}) "
+            f"— it requires a token: set {provider.token_env_var} or add one "
+            f"to the credentials file"
+        )
+    return (
+        f"could not reach {provider.name} at {url}: {e} "
+        f"— start it, or type the model name manually"
+    )
+
+
 def list_models(
     provider: Provider,
     *,
@@ -209,19 +230,10 @@ def list_models(
         # sibling ``except`` escapes the whole ``try`` rather than landing in
         # the next arm — splitting them would leak non-auth HTTP errors out
         # and break the never-raises contract.
-        if isinstance(e, urllib.error.HTTPError) and e.code in (401, 403):
-            return ModelListResult(
-                (),
-                url,
-                f"{provider.name} rejected the request at {url} (HTTP {e.code}) "
-                f"— it requires a token: set {provider.token_env_var} or add one "
-                f"to the credentials file",
-            )
         return ModelListResult(
             (),
             url,
-            f"could not reach {provider.name} at {url}: {e} "
-            f"— start it, or type the model name manually",
+            _classify_fetch_error(e, url, provider),
         )
 
     try:

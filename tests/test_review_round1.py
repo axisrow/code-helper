@@ -96,14 +96,15 @@ def test_an_unreadable_file_is_never_mistaken_for_ours(tmp_path):
     shape with no renderer, so the rendered body IS empty — the exact case
     that makes the distinction observable rather than academic.
     """
-    from code_helper.services.wrappers import _is_ours, _read_text_or_none
+    from code_helper.backends._atomic import read_text_or_none
+    from code_helper.services.wrappers import _ownership_full_match
 
     paths = _bin(tmp_path)
     spec = build_spec(agent="claude", provider="ollama", model="m", alias="weird")
     (paths.bin_dir / "weird").write_bytes(b"\xff\xfe\xfd")
 
-    assert _read_text_or_none(paths.bin_dir / "weird") is None
-    assert _is_ours(paths, spec, "") is False
+    assert read_text_or_none(paths.bin_dir / "weird") is None
+    assert _ownership_full_match(paths, spec, "") is False
 
 
 # --- CLI contract ----------------------------------------------------------

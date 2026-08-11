@@ -378,7 +378,7 @@ def render_legacy_script(spec: WrapperSpec, token: str = "") -> str:
 
     Used by the install guard to recognise the tool's own prior output, which
     predates :data:`MARKER_PREFIX` and would otherwise be classified as a
-    third-party file (see ``wrappers._is_ours``). Every renderer here differs
+    third-party file (see ``wrappers._ownership_full_match``). Every renderer here differs
     from its pre-marker ancestor by exactly the marker line — verified against
     the base commit — so this drops that line rather than duplicating the
     bodies, which would let the two copies drift apart silently.

@@ -66,49 +66,45 @@ def _hint(
 
 def run_tui(args: argparse.Namespace) -> int:
     """Run the hierarchical interactive UI and always return a shell status."""
-    from code_helper.cli.menu import MenuCancelled, Section, read_line, select_from_menu
-    from code_helper.cli.parser import (
-        _handle_add,
-        _handle_edit_token,
-        _handle_set_default,
-    )
-    from code_helper.errors import CodeHelperError, emit_error
-    from code_helper.services.model import (
-        AGENTS,
-        PROVIDERS,
-        AuthPolicy,
-        BaseUrlPolicy,
-        Provider,
-        resolve_shape,
-        with_auth,
-        with_base_url,
-    )
-    from code_helper.services.models_api import list_models
-    from code_helper.services.paths import Paths
-    from code_helper.services.secrets import (
-        DEFAULT_PROFILE,
-        profile_names,
-        seed_default_profile,
-        token_for_discovery,
-        valid_active_profile,
-    )
-    from code_helper.services.spec import suggest_alias
-    from code_helper.services.state import (
-        active_selection,
-        set_active_selection,
-        set_default_wrapper,
-    )
-    from code_helper.services.wrappers import (
-        WRAPPERS,
-        describe_all,
-        discover_managed,
-        get_spec,
-        spec_from_installed,
-        token_from_installed,
-        valid_default_wrapper,
-    )
+    return TuiSession(args).run()
+
+
+class TuiSession:
+    """One interactive UI session — replaces the former ``run_tui`` closure.
+
+    The 24 nested functions inside ``run_tui`` shared state through three
+    implicit channels: the ``args`` Namespace (mutated 21 times before
+    dispatch), the ``_tab_provider_cache`` dict, and Python closures. This
+    class makes those channels EXPLICIT as ``self.args`` and
+    ``self._tab_provider``/``self._tab_label``, so the coupling is visible and
+    the methods are individually testable. ``run`` is the main loop; every
+    ``_run_*`` is a screen; the ``_``-prefixed helpers are UI primitives
+    shared across screens.
+
+    The dispatch contract is unchanged: ``_run(handler)`` still calls
+    ``handler(self.args)``, so the CLI handlers (``_handle_add`` etc.) see
+    the same Namespace they always did. The TUI's mutation of ``self.args``
+    before each dispatch is the load-bearing bridge — see P2.4's
+    ``AddRequest``/``EditTokenRequest``/``SetDefaultRequest`` for the typed
+    view the handlers themselves consume.
+    """
+
+    __slots__ = ("args", "_tab_provider", "_tab_label")
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.args = args
+        # `_resolve_tab_provider` does real I/O (`state.json` + a profile
+        # scan), and `_main_prompt`/`_profile_row_label` are callables
+        # re-evaluated every redraw frame — so they read this cache instead
+        # of re-deriving per frame. Refreshed once per main-loop iteration
+        # and again by `_on_tab` the moment Tab changes the selection.
+        self._tab_provider: str | None = None
+        self._tab_label: str = ""
+
+    # --- UI primitives ---------------------------------------------------
 
     def _pick(
+        self,
         items: Sequence[tuple[str, str]],
         prompt: str | Callable[[], str],
         *,
@@ -117,9 +113,8 @@ def run_tui(args: argparse.Namespace) -> int:
         on_token: Callable[[str], None] | None = None,
         tab_provider: str | None = None,
     ) -> str:
-        # `items` may now contain `Section` headers (issue #29 main screen) —
-        # they are not `(value, label)` pairs, so skip them when counting
-        # numbered rows. `select_from_menu` does the same via `isinstance`.
+        from code_helper.cli.menu import MenuCancelled, Section, select_from_menu
+
         numbered = sum(
             1
             for entry in items
@@ -145,13 +140,17 @@ def run_tui(args: argparse.Namespace) -> int:
                 raise
             return _BACK
 
-    def _run(handler) -> None:
-        try:
-            handler(args)
-        except CodeHelperError as exc:
-            emit_error(exc, getattr(args, "debug", False))
+    def _run(self, handler) -> None:
+        from code_helper.errors import CodeHelperError, emit_error
 
-    def _read_text(prompt: str) -> str | None:
+        try:
+            handler(self.args)
+        except CodeHelperError as exc:
+            emit_error(exc, getattr(self.args, "debug", False))
+
+    def _read_text(self, prompt: str) -> str | None:
+        from code_helper.cli.menu import MenuCancelled, read_line
+
         try:
             return read_line(prompt)
         except MenuCancelled as exc:
@@ -159,7 +158,9 @@ def run_tui(args: argparse.Namespace) -> int:
                 raise
             return None
 
-    def _read_token(prompt: str) -> str | None:
+    def _read_token(self, prompt: str) -> str | None:
+        from code_helper.cli.menu import MenuCancelled, read_line
+
         while True:
             try:
                 token = read_line(prompt, secret=True)
@@ -175,8 +176,20 @@ def run_tui(args: argparse.Namespace) -> int:
                 return None
             return token
 
-    def _recover_default(provider_name: str) -> None:
+    # --- profiles --------------------------------------------------------
+
+    def _recover_default(self, provider_name: str) -> None:
         """Best-effort profile-cache recovery from an installed wrapper."""
+        from code_helper.services.paths import Paths
+        from code_helper.services.secrets import (
+            profile_names,
+            seed_default_profile,
+        )
+        from code_helper.services.wrappers import (
+            discover_managed,
+            token_from_installed,
+        )
+
         paths = Paths.default()
         if profile_names(paths, provider_name):
             return
@@ -187,64 +200,84 @@ def run_tui(args: argparse.Namespace) -> int:
                 return
 
     def _new_profile(
-        names: list[str], provider_name: str
+        self, names: list[str], provider_name: str
     ) -> ProfileChoice | str | None:
         """Collect a new profile and token before model discovery."""
+        from code_helper.services.profiles import (
+            NewProfileOutcome,
+            classify_new_profile,
+            validate_new_profile_name,
+        )
+        from code_helper.services.secrets import DEFAULT_PROFILE
+
         if not names:
-            token = _read_token(f"Token for {provider_name}: ")
+            token = self._read_token(f"Token for {provider_name}: ")
             return (DEFAULT_PROFILE, token, None, None) if token else None
 
         if len(names) == 1:
             old_name = names[0]
-            renamed_old = _read_text(f"Name for current profile ({old_name}): ")
+            renamed_old = self._read_text(f"Name for current profile ({old_name}): ")
             if renamed_old is None:
                 return _BACK
-            new_name = _read_text("Name for new profile: ")
+            new_name = self._read_text("Name for new profile: ")
             if new_name is None:
                 return _BACK
-            if not renamed_old or not new_name:
+            # The naming decision is owned by services.profiles (issue #37,
+            # P1.2): the same rules the CLI applies, but this TUI reacts with
+            # print + return None and splits the outcomes into separate
+            # messages — word-for-word unchanged.
+            outcome = classify_new_profile(names, renamed_old, new_name)
+            if outcome is NewProfileOutcome.EMPTY:
                 print("Profile names cannot be empty.")
                 return None
-            if renamed_old == new_name:
+            if outcome is NewProfileOutcome.SAME:
                 print("Profile names must be different.")
                 return None
-            if renamed_old in names and renamed_old != old_name:
+            if outcome is NewProfileOutcome.COLLISION_RENAMED:
                 print(f"Profile {renamed_old!r} already exists.")
                 return None
-            if new_name in names:
+            if outcome is NewProfileOutcome.COLLISION_NEW:
                 print(f"Profile {new_name!r} already exists.")
                 return None
-            token = _read_token(f"Token for {provider_name} ({new_name}): ")
+            token = self._read_token(f"Token for {provider_name} ({new_name}): ")
             return (new_name, token, old_name, renamed_old) if token else _BACK
 
-        new_name = _read_text("Name for new profile: ")
+        new_name = self._read_text("Name for new profile: ")
         if new_name is None:
             return _BACK
-        if not new_name:
+        outcome = validate_new_profile_name(new_name, names)
+        if outcome is NewProfileOutcome.EMPTY:
             print("Profile name cannot be empty.")
             return None
-        if new_name in names:
+        if outcome is NewProfileOutcome.COLLISION_NEW:
             print(f"Profile {new_name!r} already exists.")
             return None
-        token = _read_token(f"Token for {provider_name} ({new_name}): ")
+        token = self._read_token(f"Token for {provider_name} ({new_name}): ")
         return (new_name, token, None, None) if token else _BACK
 
-    def _select_profile(provider_name: str, *, editing: bool) -> ProfileChoice | None:
+    def _select_profile(
+        self, provider_name: str, *, editing: bool
+    ) -> ProfileChoice | None:
         """Choose a profile, optionally replacing its token, or create one.
 
         A new/replaced token is intentionally kept only on the Namespace until
         the shared handler has installed the wrapper successfully.
         """
+        from code_helper.services.paths import Paths
+        from code_helper.services.secrets import (
+            DEFAULT_PROFILE,
+            profile_names,
+            valid_active_profile,
+        )
+
         while True:
-            _recover_default(provider_name)
+            self._recover_default(provider_name)
             names = list(profile_names(Paths.default(), provider_name))
             if not names:
-                return _new_profile(names, provider_name)
+                return self._new_profile(names, provider_name)
 
-            # The stored active profile is the pre-selection: put it FIRST with
-            # a marker so the cursor (index 0) lands on it and Enter accepts it,
-            # while arrows/digits can still pick another — a default, not a trap.
-            # A stale/missing profile yields None and the normal order stands.
+            # The stored active profile is the pre-selection: put it FIRST
+            # with a marker so the cursor (index 0) lands on it.
             active = valid_active_profile(Paths.default(), provider_name)
             items: list[tuple[str, str]] = []
             for name in names:
@@ -255,20 +288,22 @@ def run_tui(args: argparse.Namespace) -> int:
                 else:
                     items.append((name, label))
             items.extend(((_NEW_PROFILE, "Add profile"), (_BACK, "Back")))
-            selected = _pick(items, f"Token profile for {provider_name}:")
+            selected = self._pick(items, f"Token profile for {provider_name}:")
             if selected == _BACK:
                 return None
             if selected == _NEW_PROFILE:
-                created = _new_profile(names, provider_name)
+                created = self._new_profile(names, provider_name)
                 if created == _BACK:
                     continue
                 return created
 
             if editing:
-                token = _read_token(f"New token for {provider_name} ({selected}): ")
+                token = self._read_token(
+                    f"New token for {provider_name} ({selected}): "
+                )
                 return (selected, token, None, None) if token else None
 
-            action = _pick(
+            action = self._pick(
                 [
                     (_USE_PROFILE, "Use profile"),
                     (_REPLACE_TOKEN, "Replace token"),
@@ -280,25 +315,25 @@ def run_tui(args: argparse.Namespace) -> int:
                 continue
             if action == _USE_PROFILE:
                 return selected, None, None, None
-            token = _read_token(f"New token for {provider_name} ({selected}): ")
+            token = self._read_token(f"New token for {provider_name} ({selected}): ")
             if token:
                 return selected, token, None, None
 
-    def _all_wrapper_specs():
-        """Presets plus managed constructor wrappers, without duplicate names.
+    # --- wrappers --------------------------------------------------------
 
-        A managed wrapper installed under a preset alias of a DIFFERENT agent
-        (e.g. a codex wrapper named ``glm``, a claude preset) must be grouped
-        under the installed wrapper's agent — the same installed-first rule
-        :func:`_resolve_spec` uses on Enter, so display grouping and resolution
-        never disagree about which agent a row belongs to.
-        """
+    def _all_wrapper_specs(self):
+        """Presets plus managed constructor wrappers, without duplicate names."""
+        from code_helper.services.paths import Paths
+        from code_helper.services.wrappers import (
+            WRAPPERS,
+            discover_managed,
+            spec_from_installed,
+        )
+
         paths = Paths.default()
         specs = []
         known = set()
         for spec in WRAPPERS:
-            # Installed wrapper wins over the same-named preset, exactly as
-            # _resolve_spec resolves on Enter.
             resolved = spec_from_installed(paths, spec.name) or spec
             specs.append(resolved)
             known.add(resolved.name)
@@ -308,21 +343,16 @@ def run_tui(args: argparse.Namespace) -> int:
                 known.add(name)
         return specs
 
-    def _wrapper_rows(paths: Paths) -> list:
-        """Menu items for the main screen's wrapper list, grouped by agent.
+    def _wrapper_rows(self, paths) -> list:
+        """Menu items for the main screen's wrapper list, grouped by agent."""
+        from code_helper.cli.menu import Section
+        from code_helper.services.model import AGENTS
+        from code_helper.services.wrappers import (
+            describe_all,
+            valid_default_wrapper,
+        )
 
-        Each agent that has ANY wrapper gets a non-selectable ``Section``
-        header (issue #27) followed by its wrappers' rows; the rows come from
-        :func:`describe_all` with a live ``defaults`` map so the one wrapper
-        that is ``default_wrapper`` for its agent is prefixed with ``●``
-        (issue #29). The map is resolved ONCE here (two ``valid_default_wrapper``
-        calls — one per agent — not one per row), because the main screen
-        rebuilds it every loop iteration and re-reading ``state.json`` per
-        row would multiply I/O needlessly. Agents with no wrappers are skipped
-        (no empty ``Section``), so a fresh install shows only the agents that
-        actually have presets or installed wrappers.
-        """
-        specs = _all_wrapper_specs()
+        specs = self._all_wrapper_specs()
         rows: list = []
         for agent in AGENTS:
             agent_specs = [s for s in specs if s.agent.name == agent.name]
@@ -335,66 +365,53 @@ def run_tui(args: argparse.Namespace) -> int:
                     agent_specs,
                     installed_word="installed",
                     not_installed_word="not installed",
-                    # Resolve the default only for agents that actually have
-                    # wrappers — a per-agent ``valid_default_wrapper`` call
-                    # reads ``state.json``, so skipping empty agents avoids
-                    # wasted I/O on the main screen's hot render path.
                     defaults={agent.name: valid_default_wrapper(paths, agent.name)},
                 )
             )
         return rows
 
-    def _resolve_spec(alias: str) -> object | None:
-        """Resolve ``alias`` to a spec — installed wrapper first, else preset.
+    def _resolve_spec(self, alias: str) -> object | None:
+        """Resolve ``alias`` to a spec — installed wrapper first, else preset."""
+        from code_helper.errors import CodeHelperError, emit_error
+        from code_helper.services.paths import Paths
+        from code_helper.services.wrappers import get_spec, spec_from_installed
 
-        Returns ``None`` (after emitting the error) when resolution fails, so
-        callers bail out without repeating the try/except. Shared by ``_on_token``
-        and the main screen's Enter-on-wrapper branch, which both need the same
-        "installed wrapper takes precedence over a same-named preset" lookup.
-        """
         try:
             return spec_from_installed(Paths.default(), alias) or get_spec(alias)
         except CodeHelperError as exc:
-            emit_error(exc, getattr(args, "debug", False))
+            emit_error(exc, getattr(self.args, "debug", False))
             return None
 
-    def _on_token(alias: str) -> None:
-        """Rotate the token of wrapper ``alias`` (the ``t`` key on the main screen).
+    # --- actions ---------------------------------------------------------
 
-        Reuses the exact wiring the old ``_run_list`` had for a selected
-        wrapper — profile pick then ``_handle_edit_token`` — moved here
-        because #29 inlines the wrapper list into the main screen and binds
-        token rotation to ``t`` instead of Enter. Enter is now reserved for
-        ``set_default_wrapper``. A non-secret wrapper is a SILENT no-op: the
-        old dead-end ``"{alias} has no editable token."`` screen is gone, so
-        ``t`` on a non-secret row simply does nothing rather than trapping the
-        user in a one-item ``Back`` menu.
-        """
-        spec = _resolve_spec(alias)
+    def _on_token(self, alias: str) -> None:
+        """Rotate the token of wrapper ``alias`` (``t`` on the main screen)."""
+        from code_helper.cli.parser import _handle_edit_token
+
+        spec = self._resolve_spec(alias)
         if spec is None:
             return
         if spec.auth != "secret":
             return  # silent no-op — no dead-end screen (issue #29)
-        profile = _select_profile(spec.provider.name, editing=True)
+        profile = self._select_profile(spec.provider.name, editing=True)
         if profile is None:
             return
-        args.name = alias
+        self.args.name = alias
         (
-            args.profile,
-            args.profile_token,
-            args.profile_rename_from,
-            args.profile_rename_to,
+            self.args.profile,
+            self.args.profile_token,
+            self.args.profile_rename_from,
+            self.args.profile_rename_to,
         ) = profile
-        _run(_handle_edit_token)
+        self._run(_handle_edit_token)
 
-    def _run_set_default(paths: Paths) -> None:
-        """Patch ``~/.codex/config.toml`` with codex's default wrapper (issue #30).
+    def _run_set_default(self, paths) -> None:
+        """Patch ``~/.codex/config.toml`` with codex's default wrapper."""
+        from code_helper.cli.parser import _handle_set_default
+        from code_helper.errors import CodeHelperError, emit_error
+        from code_helper.services.model import BaseUrlPolicy
+        from code_helper.services.wrappers import valid_default_wrapper
 
-        Dispatches into the same ``_handle_set_default`` the CLI's
-        ``set-default`` command uses (CLAUDE.md: it's the only writer for an
-        agent's native config), with ``force=True`` since selecting this row
-        is itself the confirmation.
-        """
         alias = valid_default_wrapper(paths, "codex")
         if alias is None:
             emit_error(
@@ -402,42 +419,51 @@ def run_tui(args: argparse.Namespace) -> int:
                     "no default wrapper set for codex — pick a codex wrapper "
                     "(Enter on its row) first"
                 ),
-                getattr(args, "debug", False),
+                getattr(self.args, "debug", False),
             )
             return
-        spec = _resolve_spec(alias)
+        spec = self._resolve_spec(alias)
         if spec is None:
             return
-        args.agent = spec.agent.name
-        args.provider = spec.provider.name
-        args.model = spec.model
+        self.args.agent = spec.agent.name
+        self.args.provider = spec.provider.name
+        self.args.model = spec.model
         # FIXED providers reject a --base-url even when it equals their own
-        # registry default (with_base_url treats ANY value as an override
-        # attempt); forward the resolved address only for REQUIRED/OVERRIDABLE,
-        # where the installed wrapper's own runtime URL must survive the
-        # round-trip through set-default (issue #30 follow-up).
-        args.base_url = (
+        # registry default; forward the resolved address only for
+        # REQUIRED/OVERRIDABLE (issue #30 follow-up).
+        self.args.base_url = (
             spec.provider.base_url
             if spec.provider.base_url_policy is not BaseUrlPolicy.FIXED
             else None
         )
-        args.restore = False
-        args.slot = None
-        args.catalog_json = None
-        args.force = True
-        _run(_handle_set_default)
+        self.args.restore = False
+        self.args.slot = None
+        self.args.catalog_json = None
+        self.args.force = True
+        self._run(_handle_set_default)
 
-    def _run_add() -> None:
+    def _run_add(self) -> None:
         """Create a wrapper through provider → profile → model → agent → name."""
-        # An OVERRIDABLE provider (auth_policy) gets a SECOND row rather than
-        # an extra interstitial screen: `ollama` (registry default, no token)
-        # and `ollama (with token)` (--auth secret equivalent) both pick the
-        # same provider — so the common "just want ollama" path stays a
-        # single Enter, exactly as before this axis existed. Each row's menu
-        # value is its own unique key into `provider_choices`, a direct
-        # lookup rather than string-encoding the auth choice into the value
-        # itself (`select_from_menu` already separates `value` from the
-        # rendered `label` for exactly this reason).
+        from code_helper.cli.parser import _handle_add
+        from code_helper.errors import CodeHelperError, emit_error
+        from code_helper.services.model import (
+            AGENTS,
+            PROVIDERS,
+            AuthPolicy,
+            BaseUrlPolicy,
+            Provider,
+            resolve_shape,
+            with_auth,
+            with_base_url,
+        )
+        from code_helper.services.models_api import list_models
+        from code_helper.services.paths import Paths
+        from code_helper.services.secrets import token_for_discovery
+        from code_helper.services.spec import suggest_alias
+
+        # An OVERRIDABLE provider gets a SECOND row rather than an extra
+        # screen: `ollama` (default) and `ollama (with token)` both pick the
+        # same provider.
         provider_items: list[tuple[str, str]] = []
         provider_choices: dict[str, tuple[Provider, bool]] = {}
         for provider in PROVIDERS:
@@ -458,7 +484,9 @@ def run_tui(args: argparse.Namespace) -> int:
                 )
                 provider_choices[secret_value] = (provider, True)
         while True:  # provider level
-            selection = _pick([*provider_items, (_BACK, "Back")], "Select a provider:")
+            selection = self._pick(
+                [*provider_items, (_BACK, "Back")], "Select a provider:"
+            )
             if selection == _BACK:
                 return
             provider, want_secret_auth = provider_choices[selection]
@@ -467,7 +495,7 @@ def run_tui(args: argparse.Namespace) -> int:
             typed_url: str | None = None
             if provider.base_url_policy is not BaseUrlPolicy.FIXED:
                 default = f" [{provider.base_url}]" if provider.base_url else ""
-                typed_url = _read_text(f"Base URL for {provider.name}{default}: ")
+                typed_url = self._read_text(f"Base URL for {provider.name}{default}: ")
                 if typed_url is None:
                     continue
                 if provider.base_url_policy is BaseUrlPolicy.REQUIRED and not typed_url:
@@ -475,15 +503,14 @@ def run_tui(args: argparse.Namespace) -> int:
                 try:
                     provider = with_base_url(provider, typed_url or None)
                 except CodeHelperError as exc:
-                    emit_error(exc, getattr(args, "debug", False))
+                    emit_error(exc, getattr(self.args, "debug", False))
                     continue
 
-            # Profile is the previous level for model selection. If it is
-            # cancelled, restart at provider rather than jumping to main.
+            # Profile is the previous level for model selection.
             while True:
                 profile: ProfileChoice | None
                 if provider.auth == "secret":
-                    profile = _select_profile(provider.name, editing=False)
+                    profile = self._select_profile(provider.name, editing=False)
                     if profile is None:
                         break
                 else:
@@ -506,14 +533,12 @@ def run_tui(args: argparse.Namespace) -> int:
 
                 # Model is the previous level for agent selection.
                 while True:
-                    model = _pick(model_items, prompt)
+                    model = self._pick(model_items, prompt)
                     if model == _BACK:
                         break
                     if model == "__custom__":
-                        typed_model = _read_text("Model: ")
-                        if typed_model is None:
-                            continue
-                        if not typed_model:
+                        typed_model = self._read_text("Model: ")
+                        if typed_model is None or not typed_model:
                             continue
                         model = typed_model
 
@@ -529,7 +554,7 @@ def run_tui(args: argparse.Namespace) -> int:
 
                     # Agent is the previous level for alias input.
                     while True:
-                        agent_name = _pick(
+                        agent_name = self._pick(
                             [*agent_items, (_BACK, "Back")], "Select an agent:"
                         )
                         if agent_name == _BACK:
@@ -539,34 +564,31 @@ def run_tui(args: argparse.Namespace) -> int:
                                 model, agent_name, profile_name or None
                             )
                         except CodeHelperError as exc:
-                            emit_error(exc, getattr(args, "debug", False))
+                            emit_error(exc, getattr(self.args, "debug", False))
                             break
-                        alias = _read_text(f"Command name [{default_alias}]: ")
+                        alias = self._read_text(f"Command name [{default_alias}]: ")
                         if alias is None:
                             continue
 
-                        args.name = None
-                        args.agent = agent_name
-                        args.provider = provider.name
-                        args.model = model
-                        args.alias = alias or default_alias
-                        args.shape = None
-                        args.base_url = typed_url
-                        args.auth = "secret" if want_secret_auth else None
-                        args.profile = profile_name or None
-                        args.profile_token = profile_token
-                        args.profile_rename_from = rename_from
-                        args.profile_rename_to = rename_to
-                        _run(_handle_add)
+                        self.args.name = None
+                        self.args.agent = agent_name
+                        self.args.provider = provider.name
+                        self.args.model = model
+                        self.args.alias = alias or default_alias
+                        self.args.shape = None
+                        self.args.base_url = typed_url
+                        self.args.auth = "secret" if want_secret_auth else None
+                        self.args.profile = profile_name or None
+                        self.args.profile_token = profile_token
+                        self.args.profile_rename_from = rename_from
+                        self.args.profile_rename_to = rename_to
+                        self._run(_handle_add)
                         return
-                    # Back from alias/agent level returns to model selection.
-                # Back from model returns to profile selection.
-            # Back from profile returns to provider selection.
 
-    def _run_settings() -> None:
+    def _run_settings(self) -> None:
         while True:
-            debug = getattr(args, "debug", False)
-            choice = _pick(
+            debug = getattr(self.args, "debug", False)
+            choice = self._pick(
                 [
                     ("debug", f"Debug: {'on' if debug else 'off'}"),
                     (_BACK, "Back"),
@@ -575,15 +597,25 @@ def run_tui(args: argparse.Namespace) -> int:
             )
             if choice == _BACK:
                 return
-            args.debug = not debug
+            self.args.debug = not debug
 
-    def _run_profile_screen() -> None:
+    def _run_profile_screen(self) -> None:
         """Choose the active provider and its active profile (the Tab cycle)."""
+        from code_helper.services.paths import Paths
+        from code_helper.services.secrets import (
+            DEFAULT_PROFILE,
+            profile_names,
+            valid_active_profile,
+        )
+        from code_helper.services.state import set_active_selection
+
         paths = Paths.default()
         provider_items = [
-            (p.name, f"{p.name} — {p.description}") for p in _secret_providers()
+            (p.name, f"{p.name} — {p.description}") for p in self._secret_providers()
         ]
-        provider = _pick([*provider_items, (_BACK, "Back")], "Active profile provider:")
+        provider = self._pick(
+            [*provider_items, (_BACK, "Back")], "Active profile provider:"
+        )
         if provider == _BACK:
             return
         names = list(profile_names(paths, provider))
@@ -600,61 +632,53 @@ def run_tui(args: argparse.Namespace) -> int:
             for name in names
         ]
         items.extend([(_BACK, "Back")])
-        choice = _pick(items, f"Active profile for {provider}:")
+        choice = self._pick(items, f"Active profile for {provider}:")
         if choice == _BACK:
             return
         set_active_selection(paths, provider, choice)
 
+    # --- active-label subsystem -----------------------------------------
+
+    @staticmethod
     def _secret_providers() -> list:
         """Providers that can have named token profiles at all.
 
         NOT just ``p.auth == "secret"``: an OVERRIDABLE provider's registry
-        entry always keeps its default ``auth`` (``with_auth`` returns a
-        RUNTIME copy, never mutates ``PROVIDERS`` — see ``services/model.py``)
-        — so ``ollama`` stays ``auth="literal"`` in this list even after an
-        `add --auth secret` install has cached real profiles for it under
-        that same provider name. Filtering on ``auth_policy`` instead of the
-        registry's snapshot ``auth`` is what keeps the Profile screen and
-        Tab's fallback scan able to find those profiles.
+        entry keeps its default ``auth`` (``with_auth`` returns a RUNTIME
+        copy, never mutates ``PROVIDERS``). Filtering on ``auth_policy``
+        keeps the Profile screen and Tab's fallback scan able to find
+        profiles cached under an OVERRIDABLE provider.
         """
+        from code_helper.services.model import PROVIDERS, AuthPolicy
+
         return [
             p
             for p in PROVIDERS
             if p.auth == "secret" or p.auth_policy is AuthPolicy.OVERRIDABLE
         ]
 
-    def _resolve_tab_provider() -> str | None:
-        """Resolve which provider Tab/the header should act on.
+    def _resolve_tab_provider(self) -> str | None:
+        """Resolve which provider Tab/the header should act on."""
+        from code_helper.services.paths import Paths
+        from code_helper.services.secrets import profile_names
+        from code_helper.services.state import active_selection
 
-        The stored active selection is preferred, but it is only ever
-        *written* from the Profile screen (`_run_profile_screen`) or a prior
-        Tab press — on a fresh install (or after credentials were cleared)
-        nothing has ever written it, which used to make Tab a permanent
-        no-op with no indication why. Falling back to whichever secret
-        provider already has cached profiles makes Tab work immediately,
-        matching issue #23's intent of skipping the manual walk rather than
-        requiring one first.
-        """
         paths = Paths.default()
         selection = active_selection(paths)
         if selection is not None:
             stored, _ = selection
             if profile_names(paths, stored):
                 return stored
-        for provider in _secret_providers():
+        for provider in self._secret_providers():
             if profile_names(paths, provider.name):
                 return provider.name
         return None
 
-    def _tab_profile(provider: str) -> str | None:
-        """The profile Tab currently shows/would land on for ``provider``.
+    def _tab_profile(self, provider: str) -> str | None:
+        """The profile Tab currently shows/would land on for ``provider``."""
+        from code_helper.services.paths import Paths
+        from code_helper.services.secrets import profile_names, valid_active_profile
 
-        Mirrors ``_on_tab``'s own fallback: a stored-but-stale or never-set
-        active profile is treated as "before the first profile", so this
-        agrees with what one Tab press would select — without writing
-        anything (``valid_active_profile`` only reads; nothing here has the
-        side effect ``_on_tab`` has via ``set_active_selection``).
-        """
         paths = Paths.default()
         stored = valid_active_profile(paths, provider)
         if stored:
@@ -662,124 +686,95 @@ def run_tui(args: argparse.Namespace) -> int:
         names = profile_names(paths, provider)
         return names[0] if names else None
 
-    def _active_label(tab_provider: str | None) -> str:
-        """``"provider/profile"``, ``"provider"``, or ``""`` for the header
-        and the Profile row — the one place both derive their text from.
-
-        Takes the already-resolved provider rather than re-resolving it
-        (see the cache in the main loop below) — ``_resolve_tab_provider``
-        reads ``state.json`` and, on its fallback path, loops every secret
-        provider's cached profiles, so re-deriving it per caller here would
-        turn one main-menu redraw into several rounds of that I/O.
-        """
+    def _active_label(self, tab_provider: str | None) -> str:
+        """``"provider/profile"``, ``"provider"``, or ``""`` for header/row."""
         if not tab_provider:
             return ""
-        profile = _tab_profile(tab_provider)
+        profile = self._tab_profile(tab_provider)
         return f"{tab_provider}/{profile}" if profile else tab_provider
 
-    def _on_tab() -> None:
+    def _on_tab(self) -> None:
         """Cycle the active profile of the current provider on Tab."""
+        from code_helper.services.paths import Paths
+        from code_helper.services.secrets import profile_names, valid_active_profile
+        from code_helper.services.state import set_active_selection
+
         paths = Paths.default()
-        provider = _tab_provider_cache["value"]
+        provider = self._tab_provider
         if not provider:
             return
         names = list(profile_names(paths, provider))
         if not names:
             return
-        # A valid stored profile advances to the next; a stale or never-set
-        # one is "before the first profile", so Tab lands on names[0] (the
-        # same frame the header already claims) rather than skipping it.
         stored = valid_active_profile(paths, provider)
         idx = names.index(stored) if stored in names else -1
         set_active_selection(paths, provider, names[(idx + 1) % len(names)])
-        # The selection just changed — refresh so the header/row/hint
-        # reflect it on the next read instead of the pre-Tab provider.
-        _refresh_active_label()
+        self._refresh_active_label()
 
-    # `_resolve_tab_provider()` does real I/O (a `state.json` read and,
-    # on its fallback path, a `profile_names` scan of every secret
-    # provider), and `_tab_profile` beneath `_active_label` reads the
-    # profile cache too — too expensive to re-run on every menu redraw
-    # frame. `_main_prompt` and the Profile row label are BOTH callables
-    # re-evaluated every frame (see CLAUDE.md's callable-prompt contract),
-    # so they read this cache instead of re-deriving the label themselves;
-    # the cache is refreshed once per main-loop iteration and again by
-    # `_on_tab` the moment Tab actually changes the selection. Storing the
-    # fully-rendered label (not just the provider) lets header and row share
-    # ONE I/O pass per refresh instead of each doing its own
-    # `valid_active_profile`/`profile_names` read on every frame.
-    _tab_provider_cache: dict[str, str | None] = {"value": None, "label": ""}
+    def _refresh_active_label(self) -> None:
+        """Resolve the active provider and its rendered label, once."""
+        self._tab_provider = self._resolve_tab_provider()
+        self._tab_label = self._active_label(self._tab_provider)
 
-    def _refresh_active_label() -> None:
-        """Resolve the active provider and its rendered label, once.
-
-        Called once per main-loop iteration and by `_on_tab` after it
-        changes the selection; both the header and the Profile row read the
-        cached ``label`` from then on instead of re-deriving it per frame.
-        """
-        value = _resolve_tab_provider()
-        _tab_provider_cache["value"] = value
-        _tab_provider_cache["label"] = _active_label(value)
-
-    def _main_prompt() -> str:
+    def _main_prompt(self) -> str:
         """Live main-menu header, showing the active provider/profile."""
-        label = _tab_provider_cache["label"]
-        return f"code-helper — {label}" if label else "code-helper"
+        return f"code-helper — {self._tab_label}" if self._tab_label else "code-helper"
 
-    def _profile_row_label() -> str:
-        label = _tab_provider_cache["label"]
-        return f"Profile: {label}" if label else "Profile"
+    def _profile_row_label(self) -> str:
+        return f"Profile: {self._tab_label}" if self._tab_label else "Profile"
 
-    try:
-        while True:
-            # Resolved ONCE per loop iteration and reused for the row label,
-            # the hint gate, and (via the cached label) the live header and
-            # Profile row — see `_refresh_active_label`/`_main_prompt` above
-            # for why re-deriving it per reader would multiply the I/O.
-            _refresh_active_label()
-            tab_provider = _tab_provider_cache["value"]
-            paths = Paths.default()
-            # The wrapper list IS the main screen now (issue #29): grouped by
-            # agent via `Section`, with `●` on the default wrapper and `t` for
-            # per-row token rotation. Enter on a wrapper row makes it the
-            # default for its agent (`set_default_wrapper`); the service rows
-            # (`Add`/`Profile`/`Settings`/`Quit`) sit below the wrappers.
-            choice = _pick(
-                [
-                    *_wrapper_rows(paths),
-                    (_ADD, "Add"),
-                    (_PROFILE, _profile_row_label),
-                    (_SET_DEFAULT, "Apply codex default"),
-                    (_SETTINGS, "Settings"),
-                    (_QUIT, "Quit"),
-                ],
-                _main_prompt,
-                exit_word="quit",
-                on_tab=_on_tab,
-                tab_provider=tab_provider,
-                on_token=_on_token,
-            )
-            if choice in (_BACK, _QUIT):
-                return 0
-            if choice == _ADD:
-                _run_add()
-            elif choice == _PROFILE:
-                _run_profile_screen()
-            elif choice == _SET_DEFAULT:
-                _run_set_default(paths)
-            elif choice == _SETTINGS:
-                _run_settings()
-            else:
-                # A wrapper alias — Enter makes it the default for its agent.
-                # `set_default_wrapper` is the raw store (#28); it does not
-                # validate, but `choice` came straight from `_wrapper_rows`,
-                # which only yields aliases that exist as presets or installed
-                # managed wrappers, so the write is always of a real alias.
-                spec = _resolve_spec(choice)
-                if spec is None:
-                    continue
-                set_default_wrapper(paths, spec.agent.name, choice)
-    except MenuCancelled as exc:
-        if exc.hard:
-            raise
-        return 0
+    # --- main loop -------------------------------------------------------
+
+    def run(self) -> int:
+        """The main menu loop — show wrappers + service rows, dispatch."""
+        from code_helper.cli.menu import MenuCancelled
+        from code_helper.services.paths import Paths
+        from code_helper.services.state import set_default_wrapper
+
+        try:
+            while True:
+                self._refresh_active_label()
+                tab_provider = self._tab_provider
+                paths = Paths.default()
+                # The wrapper list IS the main screen (issue #29): grouped by
+                # agent via `Section`, with `●` on the default wrapper and `t`
+                # for per-row token rotation. Enter makes a wrapper the default
+                # for its agent; the service rows sit below the wrappers.
+                choice = self._pick(
+                    [
+                        *self._wrapper_rows(paths),
+                        (_ADD, "Add"),
+                        (_PROFILE, self._profile_row_label),
+                        (_SET_DEFAULT, "Apply codex default"),
+                        (_SETTINGS, "Settings"),
+                        (_QUIT, "Quit"),
+                    ],
+                    self._main_prompt,
+                    exit_word="quit",
+                    on_tab=self._on_tab,
+                    tab_provider=tab_provider,
+                    on_token=self._on_token,
+                )
+                if choice in (_BACK, _QUIT):
+                    return 0
+                if choice == _ADD:
+                    self._run_add()
+                elif choice == _PROFILE:
+                    self._run_profile_screen()
+                elif choice == _SET_DEFAULT:
+                    self._run_set_default(paths)
+                elif choice == _SETTINGS:
+                    self._run_settings()
+                else:
+                    # A wrapper alias — Enter makes it the default for its
+                    # agent. `set_default_wrapper` is the raw store (#28);
+                    # `choice` came from `_wrapper_rows`, which only yields
+                    # real aliases, so the write is always of a real alias.
+                    spec = self._resolve_spec(choice)
+                    if spec is None:
+                        continue
+                    set_default_wrapper(paths, spec.agent.name, choice)
+        except MenuCancelled as exc:
+            if exc.hard:
+                raise
+            return 0

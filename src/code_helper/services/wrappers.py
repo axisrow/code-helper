@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import unquote
 
-from code_helper.backends._atomic import atomic_write
+from code_helper.backends._atomic import atomic_write, read_text_or_none
 from code_helper.errors import CodeHelperError
 from code_helper.services.model import (
     Agent,
@@ -139,7 +139,7 @@ def _marker_at(path: Path) -> bool:
     permission error, a dangling symlink) counts as *not* ours — the safe
     answer, since it makes the guard refuse rather than clobber. The single
     marker-sniff behind :func:`is_managed` (which resolves the path from a
-    wrapper name) and :func:`_is_ours_marker_only` (which takes a raw path for
+    wrapper name) and :func:`_ownership_marker_only` (which takes a raw path for
     the OPENAI_TOML siblings), so the read order and the "unreadable = not
     ours" exception tuple live in one place.
     """
@@ -189,7 +189,7 @@ def _installed_marker_provider_is_secret(paths: Paths, name: str) -> bool:
     the same fail-open-to-"not secret" default the guard already had, just no
     longer reachable via a corrupt profile specifically.
     """
-    body = _read_text_or_none(paths.script_for(name))
+    body = read_text_or_none(paths.script_for(name))
     if body is None:
         return False
     marker = next(
@@ -207,6 +207,60 @@ def _installed_marker_provider_is_secret(paths: Paths, name: str) -> bool:
         return False
 
 
+def _recover_base_url(
+    provider_obj: Provider,
+    shape_field: str | None,
+    toml_profile: dict | None,
+    body: str,
+    provider_name: str,
+) -> Provider | None:
+    """Recover the installed wrapper's ``base_url`` onto ``provider_obj``.
+
+    Round-trip rule: the FILE wins for anything but a FIXED base_url. This is
+    a direct consequence of edit-token's "rotate a credential WITHOUT
+    re-expanding a preset from scratch" contract applied to ``base_url``: an
+    installed wrapper is a complete record of itself, and a credential
+    rotation is not licence to change an unrelated setting. For FIXED the
+    registry wins instead — there is no user-supplied value on that axis, so
+    the file could not have recorded a legitimate override, only a hand-edit;
+    siding with the registry is what lets a genuine address change (e.g. z.ai
+    moving domains) reach already-installed wrappers on the next edit-token.
+
+    Returns the (possibly substituted) provider, or ``None`` when recovery is
+    impossible — a malformed recovered URL or a REQUIRED provider with
+    nothing to recover. ``None`` is the same "unrecoverable → spec_from_installed
+    returns None" outcome as a missing model, keeping that function's
+    never-raises contract intact.
+    """
+    if provider_obj.base_url_policy is BaseUrlPolicy.FIXED:
+        return provider_obj
+
+    if shape_field == ConfigShape.OPENAI_TOML.value:
+        recovered_url = _base_url_from_toml_data(toml_profile, provider_name)
+    else:
+        recovered_url = _env_value(body, "ANTHROPIC_BASE_URL")
+
+    if recovered_url:
+        try:
+            return with_base_url(provider_obj, recovered_url)
+        except CodeHelperError:
+            # The recovered value came from a hand-edited or truncated file,
+            # not our own renderer — validate_base_url can reject it (bad
+            # scheme, control chars). Same "unrecoverable" outcome as a
+            # missing value, not an exception for the caller to catch.
+            return None
+
+    if provider_obj.base_url_policy is BaseUrlPolicy.REQUIRED:
+        # No registry fallback exists for REQUIRED, and the file didn't carry
+        # one either — returning a spec with an empty base_url would let
+        # edit-token silently reinstall pointed at nothing.
+        return None
+
+    # OVERRIDABLE with nothing recovered — the registry default on
+    # provider_obj (untouched by with_base_url) stands.
+    return provider_obj
+
+
 def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     """Reconstruct the spec of an installed wrapper from its own marker line.
 
@@ -221,7 +275,7 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     something this version does not recognise: every caller must be able to
     fall back to the preset path, so this never raises.
     """
-    body = _read_text_or_none(paths.script_for(name))
+    body = read_text_or_none(paths.script_for(name))
     if body is None:
         return None
 
@@ -270,45 +324,14 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     except CodeHelperError:
         return None
 
-    # Round-trip rule: the FILE wins for anything but a FIXED base_url. This
-    # is a direct consequence of edit-token's own contract just above ("rotate
-    # a credential WITHOUT re-expanding a preset from scratch" — the same bug
-    # class as silently reverting --model) applied to base_url: an installed
-    # wrapper is a complete record of itself, and a credential rotation is not
-    # licence to change an unrelated setting. For FIXED the registry wins
-    # instead — there IS no user-supplied value on that axis, so the file
-    # could not have recorded a legitimate override, only a hand-edit; siding
-    # with the registry there is what lets a genuine address change (e.g.
-    # z.ai moving domains) reach already-installed wrappers on the next
-    # edit-token, exactly as the docstring above intends for the model.
-    if provider_obj.base_url_policy is not BaseUrlPolicy.FIXED:
-        if shape_field == ConfigShape.OPENAI_TOML.value:
-            recovered_url = _base_url_from_toml_data(toml_profile, fields["provider"])
-        else:
-            recovered_url = _env_value(body, "ANTHROPIC_BASE_URL")
-        if recovered_url:
-            try:
-                provider_obj = with_base_url(provider_obj, recovered_url)
-            except CodeHelperError:
-                # The recovered value came from a hand-edited or truncated
-                # file (ANTHROPIC_BASE_URL line / TOML base_url), not from
-                # our own renderer — validate_base_url can reject it (bad
-                # scheme, control chars, ...). This function's whole contract
-                # is that it never raises; a malformed recovered address is
-                # the same "unrecoverable" outcome as a missing one, not an
-                # exception for the caller (edit-token/add --alias) to catch.
-                return None
-        elif provider_obj.base_url_policy is BaseUrlPolicy.REQUIRED:
-            # No registry fallback exists for REQUIRED, and the file didn't
-            # carry one either (a truncated profile, a hand-edited wrapper) —
-            # returning a spec with an empty base_url here would let
-            # edit-token silently reinstall the wrapper pointed at nothing.
-            # Refusing to reconstruct is the same fail-safe as the "not
-            # all(...)" check above for a missing model.
-            return None
-        # else: OVERRIDABLE with nothing recovered — the registry default on
-        # provider_obj (untouched by with_base_url) stands, which is correct:
-        # there is a real default, so refusing here would be needless.
+    # Round-trip rule: the FILE wins for anything but a FIXED base_url —
+    # see :func:`_recover_base_url` for the full rationale (edit-token's
+    # "rotate WITHOUT re-expanding a preset" contract applied to base_url).
+    provider_obj = _recover_base_url(
+        provider_obj, shape_field, toml_profile, body, fields["provider"]
+    )
+    if provider_obj is None:
+        return None
 
     try:
         return build_spec(
@@ -350,7 +373,7 @@ def token_from_installed(paths: Paths, name: str, provider_name: str) -> str | N
     if spec is None or spec.auth != "secret" or spec.provider.name != provider_name:
         return None
 
-    body = _read_text_or_none(paths.script_for(name))
+    body = read_text_or_none(paths.script_for(name))
     if body is None:
         return None
     if spec.shape is ConfigShape.ANTHROPIC_ENV:
@@ -516,7 +539,7 @@ def _toml_profile_data(paths: Paths, alias: str) -> dict | None:
     guard whose entire job is to handle a bad file in the way (and which
     ``--force`` could otherwise rescue).
     """
-    profile = _read_text_or_none(paths.codex_config_for(alias))
+    profile = read_text_or_none(paths.codex_config_for(alias))
     if profile is None:
         return None
     try:
@@ -610,22 +633,7 @@ def _base_url_from_toml_data(data: dict | None, provider_name: str) -> str | Non
     return base_url if isinstance(base_url, str) and base_url else None
 
 
-def _read_text_or_none(script: Path) -> str | None:
-    """``script``'s text, or None if it is not decodable as UTF-8.
-
-    The idempotence check runs BEFORE the ownership guard, so an undecodable
-    file here must not raise — otherwise the guard it feeds never runs and a
-    binary in the way aborts with a traceback instead of the guard's message
-    (or its ``--force`` override). ``is_managed`` already treats unreadable as
-    "not ours"; this keeps the earlier read consistent with it.
-    """
-    try:
-        return script.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
-def _is_ours(paths: Paths, spec: WrapperSpec, token: str) -> bool:
+def _ownership_full_match(paths: Paths, spec: WrapperSpec, token: str) -> bool:
     """True iff the file at ``spec.alias`` is one we may replace unasked.
 
     Two ways to qualify:
@@ -661,7 +669,7 @@ def _is_ours(paths: Paths, spec: WrapperSpec, token: str) -> bool:
     """
     if is_managed(paths, spec.alias):
         return True
-    existing = _read_text_or_none(paths.script_for(spec.alias))
+    existing = read_text_or_none(paths.script_for(spec.alias))
     if existing is None:
         return False
 
@@ -748,13 +756,13 @@ def _strip_token(body: str) -> str:
     )
 
 
-def _is_ours_marker_only(path: Path) -> bool:
+def _ownership_marker_only(path: Path) -> bool:
     """True iff ``path`` carries our marker on its first or second line.
 
     The OPENAI_TOML TOML profile carries the same marker comment the bash
     wrapper does, which is what lets the ownership guard recognise it as ours.
     That file has NO pre-marker legacy form (the shape is new), so unlike
-    :func:`_is_ours` there is no byte-identical-to-legacy migration clause —
+    :func:`_ownership_full_match` there is no byte-identical-to-legacy migration clause —
     the marker alone is the proof of authorship. Unreadable (binary, perms, a
     dangling symlink) counts as not ours, so the guard refuses rather than
     clobbers — the same safe answer :func:`is_managed` gives.
@@ -775,7 +783,7 @@ def _catalog_self_marked(path: Path) -> bool:
     that. Unreadable/non-JSON/missing key → False, the same safe-refuse answer
     every other ownership check in this module gives.
     """
-    body = _read_text_or_none(path)
+    body = read_text_or_none(path)
     if body is None:
         return False
     try:
@@ -797,7 +805,7 @@ def _is_our_catalog(paths: Paths, alias: str) -> bool:
     (:func:`_catalog_self_marked`) — no sibling-profile fallback. An earlier
     version also accepted "the sibling ``<alias>.config.toml`` profile carries
     our marker" as a second, migration-path proof (mirroring how
-    :func:`_is_ours` accepts a byte-identical legacy render for the wrapper).
+    :func:`_ownership_full_match` accepts a byte-identical legacy render for the wrapper).
     That fallback could not distinguish a legacy catalog WE wrote (before the
     ``managed_by`` field existed) from a FOREIGN hand-curated catalog a user
     simply placed next to our already-installed, marker-carrying profile —
@@ -885,7 +893,7 @@ def _decide(paths: Paths, spec: WrapperSpec, f: _FilePlan) -> _Action:
     """
     if not f.path.exists():
         return _Action.WRITE
-    if _read_text_or_none(f.path) == f.body:
+    if read_text_or_none(f.path) == f.body:
         return _Action.SKIP
     if not f.managed_check(f.path):
         return _Action.OVERWRITE_FOREIGN
@@ -975,7 +983,7 @@ def _wrapper_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_FilePlan
             paths.script_for(spec.alias),
             render_script(spec, token),
             _mode_for(spec),
-            lambda _p: _is_ours(paths, spec, token),
+            lambda _p: _ownership_full_match(paths, spec, token),
             True,
         )
     ]
@@ -991,10 +999,10 @@ def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_File
     replaced could leave a broken executable on ``PATH`` during the failure
     window.
 
-    Each slot carries its own ownership check — :func:`_is_ours_marker_only`
+    Each slot carries its own ownership check — :func:`_ownership_marker_only`
     for the wrapper AND the TOML profile (both carry the marker comment;
     OPENAI_TOML is a new shape with no pre-marker legacy form, so the
-    legacy byte-match clause :func:`_is_ours` uses for the other shapes would
+    legacy byte-match clause :func:`_ownership_full_match` uses for the other shapes would
     only ever match a third-party hand-written ``exec codex --profile`` script
     and adopt it as ours), and :func:`_is_our_catalog` for the catalog (JSON
     cannot carry a comment marker, so authorship is proven by the sibling
@@ -1018,14 +1026,14 @@ def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_File
             config_path,
             openai_toml_body(spec, str(catalog_path)),
             0o600,
-            _is_ours_marker_only,
+            _ownership_marker_only,
             False,
         ),
         _FilePlan(
             paths.script_for(spec.alias),
             render_script(spec, token),
             _mode_for(spec),
-            _is_ours_marker_only,
+            _ownership_marker_only,
             True,
         ),
     ]
@@ -1041,7 +1049,7 @@ def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) ->
     ever reused for OPENAI_TOML again).
 
     Each sibling is gated by ITS OWN ownership proof, independently —
-    :func:`_is_ours_marker_only` for the profile, :func:`_catalog_self_marked`
+    :func:`_ownership_marker_only` for the profile, :func:`_catalog_self_marked`
     for the catalog. This is deliberately NOT "the profile's marker decides
     both": an earlier version inferred the catalog's fate from the profile
     alone, which meant a hand-curated catalog sitting next to OUR profile was
@@ -1083,7 +1091,7 @@ def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) ->
         path
         for path, is_ours in (
             (catalog_path, _catalog_self_marked(catalog_path)),
-            (config_path, _is_ours_marker_only(config_path)),
+            (config_path, _ownership_marker_only(config_path)),
         )
         if path.exists() and is_ours
     ]
