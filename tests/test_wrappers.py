@@ -517,6 +517,28 @@ def test_valid_default_wrapper_rejects_a_wrong_agent_preset(tmp_path):
 
 
 @pytest.mark.integration
+def test_valid_default_wrapper_installed_wrapper_wins_over_same_named_preset(tmp_path):
+    """A managed wrapper on disk takes precedence over a same-named preset —
+    the on-disk wrapper's agent is authoritative, not the preset's. Otherwise a
+    claude consumer could be handed a wrapper that actually launches codex."""
+    from code_helper.services.spec import build_spec
+    from code_helper.services.state import set_default_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    # Install a codex wrapper named "glm" (collides with the claude preset).
+    install_wrapper(
+        paths,
+        build_spec(agent="codex", provider="ollama", model="qwen3.5:9b", alias="glm"),
+    )
+    set_default_wrapper(paths, "claude", "glm")
+    assert (
+        valid_default_wrapper(paths, "claude") is None
+    )  # on-disk glm is codex, not claude
+    set_default_wrapper(paths, "codex", "glm")
+    assert valid_default_wrapper(paths, "codex") == "glm"  # on-disk glm IS codex
+
+
+@pytest.mark.integration
 def test_valid_default_wrapper_none_for_a_malformed_alias(tmp_path):
     """A hand-edited/corrupt state entry with a path separator must degrade to
     None, never raise — the read path is contractually non-raising."""

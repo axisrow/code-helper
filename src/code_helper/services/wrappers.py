@@ -1309,14 +1309,19 @@ def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
         return None
     if not _is_usable_alias(alias):
         return None
-    if alias in preset_names():
-        if get_preset(alias).agent == agent_name:
-            return alias
-        return None
+    # A managed wrapper on disk takes precedence over a same-named preset: the
+    # on-disk wrapper's agent is authoritative, not the preset's. Checking the
+    # installed wrapper first means a codex wrapper named "glm" (colliding with
+    # the claude preset) is correctly handed to codex and withheld from claude.
     if is_installed(paths, alias) and is_managed(paths, alias):
         spec = spec_from_installed(paths, alias)
         if spec is not None and spec.agent.name == agent_name:
             return alias
+        return None
+    if alias in preset_names():
+        if get_preset(alias).agent == agent_name:
+            return alias
+        return None
     return None
 
 
