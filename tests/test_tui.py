@@ -421,6 +421,48 @@ def test_tui_tab_cycles_the_active_profile(monkeypatch):
 
 
 @pytest.mark.integration
+def test_tui_tab_updates_profile_row_label_not_just_header(monkeypatch):
+    """Issue #26: after Tab the header updated but the 'Profile: ...' row
+    stayed frozen at its pre-Tab value, because the row label was a static
+    string resolved before the menu opened while the header was a callable.
+    The fix makes the row label a callable too — here we verify the row's
+    callable reflects the post-Tab profile, not the pre-Tab one."""
+    import code_helper.services.secrets as secrets
+    from code_helper.services.state import active_selection, set_active_selection
+
+    paths = Paths.default()
+    secrets.save_credential(paths, "litellm", "sk-work", "work")
+    secrets.save_credential(paths, "litellm", "sk-personal", "personal")
+    set_active_selection(paths, "litellm", "work")
+
+    captured = {}
+
+    def _select(items, *, on_tab=None, **_kwargs):
+        # Find the Profile row — its label is now a callable that reads the
+        # live active selection. Resolve it before Tab, then after.
+        profile_label = next(label for value, label in items if value == "profile")
+        assert callable(profile_label), (
+            "Profile row label must be a callable (issue #26)"
+        )
+        before = profile_label()
+        if on_tab is not None:
+            on_tab()
+        after = profile_label()
+        captured["before"] = before
+        captured["after"] = after
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+    # Before Tab the row shows the pre-Tab profile; after Tab it tracks the
+    # new active profile — the two must differ (the desync froze them equal).
+    assert "work" in captured["before"]
+    assert "personal" in captured["after"]
+    assert captured["before"] != captured["after"]
+    assert active_selection(paths) == ("litellm", "personal")
+
+
+@pytest.mark.integration
 def test_tui_tab_works_on_a_fresh_install_with_no_prior_profile_screen_visit(
     monkeypatch,
 ):
