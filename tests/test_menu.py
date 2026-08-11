@@ -12,6 +12,7 @@ import pytest
 
 from code_helper.cli.menu import (
     MenuCancelled,
+    Section,
     press_any_key,
     read_line,
     select_from_menu,
@@ -571,3 +572,124 @@ def test_select_from_menu_callable_hint_none_adds_no_frame_lines(monkeypatch):
     # the erasable frame (a count drift that creeps the menu down the screen).
     joined = _run_menu(monkeypatch, ["DOWN", "ENTER"], hint=lambda: None)
     assert "\x1b[4A" in joined  # 2 items + heading spacer = 4, no hint lines
+
+
+# --- Section headers (issue #27) --------------------------------------------
+
+
+@pytest.mark.unit
+def test_select_from_menu_section_header_is_rendered_without_digit():
+    # A Section renders as a bare label: no digit, no `>` cursor marker. The
+    # selectable items on either side keep their digits and are the only rows
+    # that can show the cursor.
+    lines = []
+    select_from_menu(
+        [Section("group"), "a", "b"],
+        read_key=_fake_keys(["ENTER"]),
+        print_fn=lines.append,
+    )
+    group_line = next(line for line in lines if "group" in line)
+    assert "1" not in group_line  # no digit for a header
+    assert ">" not in group_line  # cursor never on a header
+    # The actual items still get numbered.
+    a_line = next(line for line in lines if line.lstrip().startswith("1"))
+    b_line = next(line for line in lines if line.lstrip().startswith("2"))
+    assert "a" in a_line
+    assert "b" in b_line
+
+
+@pytest.mark.unit
+def test_select_from_menu_navigation_skips_section_headers():
+    # Two sections, two items. The cursor moves over the SELECTABLE items only
+    # — ENTER (no nav) picks the first selectable, UP wraps to the last
+    # selectable, DOWN cycles back to the first.
+    items = [Section("g1"), "a", Section("g2"), "b"]
+
+    # No navigation: first selectable ("a"), not the "g1" header.
+    assert (
+        select_from_menu(items, read_key=_fake_keys(["ENTER"]), print_fn=lambda _: None)
+        == "a"
+    )
+
+    # UP from the first wraps to the LAST selectable ("b"), not to "g2".
+    assert (
+        select_from_menu(
+            items, read_key=_fake_keys(["UP", "ENTER"]), print_fn=lambda _: None
+        )
+        == "b"
+    )
+
+    # DOWN, DOWN: a -> b -> a. The cursor jumps both section headers on the
+    # wrap (b -> a passes over "g2" and "g1") without ever landing on them.
+    assert (
+        select_from_menu(
+            items,
+            read_key=_fake_keys(["DOWN", "DOWN", "ENTER"]),
+            print_fn=lambda _: None,
+        )
+        == "a"
+    )
+
+
+@pytest.mark.unit
+def test_select_from_menu_home_end_land_on_selectable_not_header():
+    # HOME/END must land on the first/last SELECTABLE item, never on a Section
+    # header — even though the header is the very first / very last row.
+    items = [Section("g1"), "a", Section("g2"), "b"]
+
+    assert (
+        select_from_menu(
+            items, read_key=_fake_keys(["HOME", "ENTER"]), print_fn=lambda _: None
+        )
+        == "a"
+    )
+    assert (
+        select_from_menu(
+            items, read_key=_fake_keys(["END", "ENTER"]), print_fn=lambda _: None
+        )
+        == "b"
+    )
+
+    # PAGE_UP/PAGE_DOWN behave the same as HOME/END in this menu.
+    assert (
+        select_from_menu(
+            items, read_key=_fake_keys(["PAGE_DOWN", "ENTER"]), print_fn=lambda _: None
+        )
+        == "b"
+    )
+    assert (
+        select_from_menu(
+            items,
+            read_key=_fake_keys(["END", "PAGE_UP", "ENTER"]),
+            print_fn=lambda _: None,
+        )
+        == "a"
+    )
+
+
+@pytest.mark.unit
+def test_select_from_menu_section_header_counted_in_frame_lines(monkeypatch):
+    # A Section occupies one rendered row, so frame_lines must count it. With
+    # Section + 2 items, frame_lines = 3 pairs + heading + spacer = 5; a
+    # missing section row in the count would make the in-place redraw erase
+    # one row too few and the menu would creep down the screen.
+    fake = _FakeTTY()
+    monkeypatch.setattr(sys, "stdout", fake)
+    select_from_menu(
+        [Section("g"), "a", "b"],
+        read_key=_fake_keys(["DOWN", "ENTER"]),
+        clear=True,
+    )
+    joined = "".join(fake.writes)
+    assert "\x1b[5A" in joined  # 3 pairs (Section + a + b) + 2 = 5
+
+
+@pytest.mark.unit
+def test_select_from_menu_section_only_items_raises():
+    # A menu of nothing but section headers has no selectable entry and must
+    # fail the same non-empty contract as a truly empty items list — there is
+    # nothing for Enter to return.
+    with pytest.raises(ValueError, match="non-empty"):
+        select_from_menu(
+            [Section("only")], read_key=_fake_keys(["ENTER"]), print_fn=lambda _: None
+        )
