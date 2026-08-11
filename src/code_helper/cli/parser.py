@@ -24,6 +24,8 @@ import argparse
 import sys
 from dataclasses import replace
 
+from code_helper.errors import CodeHelperError
+
 
 def _handle_list_axes(what: str) -> int:
     """Print the agent/provider registries, or the compatibility matrix.
@@ -32,7 +34,6 @@ def _handle_list_axes(what: str) -> int:
     ``resolve_shape`` itself, so what it shows and what ``add`` accepts cannot
     disagree. It is where a user sees that some pairings are simply blank.
     """
-    from code_helper.errors import CodeHelperError
     from code_helper.services.model import AGENTS, PROVIDERS, resolve_shape
 
     if what == "agents":
@@ -165,7 +166,6 @@ def _parse_shape(raw: str | None):
     escaped as a raw ``ValueError`` traceback — and, because ``main`` only
     catches ``CodeHelperError``, still exited 0.
     """
-    from code_helper.errors import CodeHelperError
     from code_helper.services.model import ConfigShape
 
     if not raw:
@@ -190,7 +190,6 @@ def _add_resolve_provider(req, paths):
     Raises:
         CodeHelperError: ``--agent``/``--provider`` not given together.
     """
-    from code_helper.errors import CodeHelperError
     from code_helper.services.model import (
         get_agent,
         get_provider,
@@ -214,7 +213,6 @@ def _add_list_models_or_none(req, paths, agent, provider, profile_name):
     env → cache (FIXED provider only) → unauthenticated fallback — never a
     prompt, so an optional listing never blocks a script on stdin.
     """
-    from code_helper.errors import CodeHelperError
     from code_helper.services.models_api import list_models
     from code_helper.services.secrets import token_for_discovery
 
@@ -237,7 +235,6 @@ def _add_resolve_spec(req, paths, agent, provider, profile_name):
     Resolves compatibility BEFORE anything interactive: a bad pairing must
     never reach a secret prompt for a wrapper that will not be written.
     """
-    from code_helper.errors import CodeHelperError
     from code_helper.services.model import resolve_shape
     from code_helper.services.spec import build_spec, suggest_alias
 
@@ -269,7 +266,6 @@ def _add_spec_from_preset(req, paths, profile_name):
     Raises:
         CodeHelperError: unknown preset/agent name.
     """
-    from code_helper.errors import CodeHelperError
     from code_helper.services.model import get_agent
     from code_helper.services.secrets import valid_active_profile
     from code_helper.services.spec import get_preset, spec_from_preset
@@ -309,7 +305,6 @@ def _add_resolve_token(spec, req, paths, profile_name):
     :class:`ResolvedToken` for a secret spec (or ``None`` for literal/none
     auth), so the caller can decide whether to cache it.
     """
-    from code_helper.errors import CodeHelperError
     from code_helper.services.secrets import (
         SOURCE_PROMPT,
         ResolvedToken,
@@ -418,7 +413,6 @@ def _handle_add(args: argparse.Namespace) -> int:
     invariants each carries.
     """
     from code_helper.cli.requests import AddRequest
-    from code_helper.errors import CodeHelperError
     from code_helper.services.paths import Paths
     from code_helper.services.secrets import valid_active_profile
 
@@ -493,7 +487,6 @@ def _edit_token_resolve_profile(
     ``_new_profile`` in ``cli/tui.py`` for the TUI's own mapping.
     """
     from code_helper.cli.menu import MenuCancelled, select_from_menu
-    from code_helper.errors import CodeHelperError
     from code_helper.services.profiles import (
         NewProfileOutcome,
         classify_new_profile,
@@ -566,7 +559,6 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
 
     from code_helper.cli.menu import MenuCancelled, select_from_menu
     from code_helper.cli.requests import EditTokenRequest
-    from code_helper.errors import CodeHelperError
     from code_helper.services.paths import Paths
     from code_helper.services.secrets import (
         DEFAULT_PROFILE,
@@ -716,7 +708,6 @@ def _handle_set_default(args: argparse.Namespace) -> int:
     why that is safe (patch, never replace; always backed up first).
     """
     from code_helper.cli.requests import SetDefaultRequest
-    from code_helper.errors import CodeHelperError
     from code_helper.services.codex_default import apply_set_default, restore_default
     from code_helper.services.model import get_agent, get_provider, with_base_url
     from code_helper.services.paths import Paths
