@@ -19,6 +19,7 @@ __all__ = ["run_tui"]
 _ADD = "add"
 _SETTINGS = "settings"
 _PROFILE = "profile"
+_SET_DEFAULT = "set-default"
 _QUIT = "quit"
 _BACK = "__back__"
 _NEW_PROFILE = "__new_profile__"
@@ -66,7 +67,11 @@ def _hint(
 def run_tui(args: argparse.Namespace) -> int:
     """Run the hierarchical interactive UI and always return a shell status."""
     from code_helper.cli.menu import MenuCancelled, Section, read_line, select_from_menu
-    from code_helper.cli.parser import _handle_add, _handle_edit_token
+    from code_helper.cli.parser import (
+        _handle_add,
+        _handle_edit_token,
+        _handle_set_default,
+    )
     from code_helper.errors import CodeHelperError, emit_error
     from code_helper.services.model import (
         AGENTS,
@@ -381,6 +386,46 @@ def run_tui(args: argparse.Namespace) -> int:
             args.profile_rename_to,
         ) = profile
         _run(_handle_edit_token)
+
+    def _run_set_default(paths: Paths) -> None:
+        """Patch ``~/.codex/config.toml`` with codex's default wrapper (issue #30).
+
+        Dispatches into the same ``_handle_set_default`` the CLI's
+        ``set-default`` command uses (CLAUDE.md: it's the only writer for an
+        agent's native config), with ``force=True`` since selecting this row
+        is itself the confirmation.
+        """
+        alias = valid_default_wrapper(paths, "codex")
+        if alias is None:
+            emit_error(
+                CodeHelperError(
+                    "no default wrapper set for codex — pick a codex wrapper "
+                    "(Enter on its row) first"
+                ),
+                getattr(args, "debug", False),
+            )
+            return
+        spec = _resolve_spec(alias)
+        if spec is None:
+            return
+        args.agent = spec.agent.name
+        args.provider = spec.provider.name
+        args.model = spec.model
+        # FIXED providers reject a --base-url even when it equals their own
+        # registry default (with_base_url treats ANY value as an override
+        # attempt); forward the resolved address only for REQUIRED/OVERRIDABLE,
+        # where the installed wrapper's own runtime URL must survive the
+        # round-trip through set-default (issue #30 follow-up).
+        args.base_url = (
+            spec.provider.base_url
+            if spec.provider.base_url_policy is not BaseUrlPolicy.FIXED
+            else None
+        )
+        args.restore = False
+        args.slot = None
+        args.catalog_json = None
+        args.force = True
+        _run(_handle_set_default)
 
     def _run_add() -> None:
         """Create a wrapper through provider → profile → model → agent → name."""
@@ -704,6 +749,7 @@ def run_tui(args: argparse.Namespace) -> int:
                     *_wrapper_rows(paths),
                     (_ADD, "Add"),
                     (_PROFILE, _profile_row_label),
+                    (_SET_DEFAULT, "Apply codex default"),
                     (_SETTINGS, "Settings"),
                     (_QUIT, "Quit"),
                 ],
@@ -719,6 +765,8 @@ def run_tui(args: argparse.Namespace) -> int:
                 _run_add()
             elif choice == _PROFILE:
                 _run_profile_screen()
+            elif choice == _SET_DEFAULT:
+                _run_set_default(paths)
             elif choice == _SETTINGS:
                 _run_settings()
             else:
