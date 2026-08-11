@@ -411,7 +411,16 @@ def run_tui(args: argparse.Namespace) -> int:
         args.agent = spec.agent.name
         args.provider = spec.provider.name
         args.model = spec.model
-        args.base_url = None
+        # FIXED providers reject a --base-url even when it equals their own
+        # registry default (with_base_url treats ANY value as an override
+        # attempt); forward the resolved address only for REQUIRED/OVERRIDABLE,
+        # where the installed wrapper's own runtime URL must survive the
+        # round-trip through set-default (issue #30 follow-up).
+        args.base_url = (
+            spec.provider.base_url
+            if spec.provider.base_url_policy is not BaseUrlPolicy.FIXED
+            else None
+        )
         args.restore = False
         args.slot = None
         args.catalog_json = None

@@ -1065,6 +1065,41 @@ def test_apply_codex_default_dispatches_into_apply_set_default(monkeypatch):
 
 
 @pytest.mark.integration
+def test_apply_codex_default_forwards_runtime_base_url(monkeypatch):
+    """A codex default wrapper on a REQUIRED-base_url provider (e.g. litellm)
+    must have its resolved base_url forwarded to ``apply_set_default`` — the
+    row hardcoded ``args.base_url = None``, which makes ``_handle_set_default``
+    re-derive the provider from the registry (empty base_url for REQUIRED)
+    and crash with 'needs a base URL', discarding the exact endpoint the
+    installed wrapper was built with (issue #30 follow-up)."""
+    import code_helper.services.codex_default as codex_default
+    from code_helper.services.model import get_provider, with_base_url
+    from code_helper.services.spec import build_spec
+    from code_helper.services.state import set_default_wrapper
+    from code_helper.services.wrappers import install_wrapper
+
+    paths = Paths.default()
+    litellm = with_base_url(get_provider("litellm"), "http://h:4000/v1")
+    install_wrapper(
+        paths, build_spec(agent="codex", provider=litellm, model="gpt-4o")
+    )
+    set_default_wrapper(paths, "codex", "gpt-4o-codex")
+
+    calls: list[dict] = []
+
+    def _fake_apply(paths_arg, *, agent, provider, model, **_kw):
+        calls.append({"base_url": provider.base_url})
+        return True
+
+    monkeypatch.setattr(codex_default, "apply_set_default", _fake_apply)
+    _menu_sequence(monkeypatch, ["set-default", "quit"])
+
+    assert main(["tui"]) == 0
+    assert len(calls) == 1
+    assert calls[0]["base_url"] == "http://h:4000/v1/"
+
+
+@pytest.mark.integration
 def test_apply_codex_default_errors_when_no_codex_default_set(monkeypatch, capsys):
     """Without a codex default wrapper, the action reports a clear error
     naming the prerequisite (Enter on a codex wrapper row) rather than
