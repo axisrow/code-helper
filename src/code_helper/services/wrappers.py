@@ -89,6 +89,7 @@ __all__ = [
     "describe_wrapper",
     "describe_all",
     "discover_managed",
+    "valid_default_wrapper",
     "get_spec",
     "WRAPPERS",
 ]
@@ -1283,6 +1284,45 @@ def discover_managed(paths: Paths) -> list[str]:
         and _is_usable_alias(entry.name)
     ]
     return sorted(found)
+
+
+def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
+    """The saved default-wrapper alias for ``agent_name`` if it still exists.
+
+    A saved alias can go stale (uninstalled/renamed), so a reader must fall
+    back to ``None`` on a miss rather than highlight a ghost wrapper. Lives
+    here (not in ``state.py``) because it needs the live wrapper set, and
+    ``state.py`` must not depend on this module — the same one-way edge
+    ``secrets.valid_active_profile`` relies on. Checks the single alias
+    directly (``is_installed``/``is_managed``) rather than scanning the whole
+    ``bin_dir``, since this runs on the TUI's hot render path.
+
+    The alias must also belong to ``agent_name`` — a per-agent consumer must
+    never be handed a wrapper that launches a different agent. And the read
+    never raises: a malformed alias (path separator, ``.``/``..``) degrades to
+    ``None`` before any path arithmetic.
+    """
+    from code_helper.services.state import default_wrapper
+
+    alias = default_wrapper(paths, agent_name)
+    if alias is None:
+        return None
+    if not _is_usable_alias(alias):
+        return None
+    # A managed wrapper on disk takes precedence over a same-named preset: the
+    # on-disk wrapper's agent is authoritative, not the preset's. Checking the
+    # installed wrapper first means a codex wrapper named "glm" (colliding with
+    # the claude preset) is correctly handed to codex and withheld from claude.
+    if is_installed(paths, alias) and is_managed(paths, alias):
+        spec = spec_from_installed(paths, alias)
+        if spec is not None and spec.agent.name == agent_name:
+            return alias
+        return None
+    if alias in preset_names():
+        if get_preset(alias).agent == agent_name:
+            return alias
+        return None
+    return None
 
 
 def _is_usable_alias(name: str) -> bool:
