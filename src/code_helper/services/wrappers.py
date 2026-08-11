@@ -89,6 +89,7 @@ __all__ = [
     "describe_wrapper",
     "describe_all",
     "discover_managed",
+    "valid_default_wrapper",
     "get_spec",
     "WRAPPERS",
 ]
@@ -1283,6 +1284,29 @@ def discover_managed(paths: Paths) -> list[str]:
         and _is_usable_alias(entry.name)
     ]
     return sorted(found)
+
+
+def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
+    """The saved default-wrapper alias for ``agent_name`` if it still exists.
+
+    A saved alias can go stale (uninstalled/renamed), so a reader must fall
+    back to ``None`` on a miss rather than highlight a ghost wrapper. Lives
+    here (not in ``state.py``) because it needs the live wrapper set, and
+    ``state.py`` must not depend on this module — the same one-way edge
+    ``secrets.valid_active_profile`` relies on. Checks the single alias
+    directly (``is_installed``/``is_managed``) rather than scanning the whole
+    ``bin_dir``, since this runs on the TUI's hot render path.
+    """
+    from code_helper.services.state import default_wrapper
+
+    alias = default_wrapper(paths, agent_name)
+    if alias is None:
+        return None
+    if alias in preset_names():
+        return alias
+    if is_installed(paths, alias) and is_managed(paths, alias) and _is_usable_alias(alias):
+        return alias
+    return None
 
 
 def _is_usable_alias(name: str) -> bool:

@@ -43,6 +43,7 @@ from code_helper.services.wrappers import (
     list_wrappers,
     spec_from_installed,
     token_from_installed,
+    valid_default_wrapper,
 )
 
 
@@ -440,6 +441,67 @@ def test_discover_managed_finds_ad_hoc_wrappers(tmp_path):
     paths.script_for("stranger").write_text("#!/bin/sh\n", encoding="utf-8")
 
     assert discover_managed(paths) == ["qwen3.5-codex"]
+
+
+# --------------------------------------------------------------------------- #
+# valid_default_wrapper — staleness cross-check (issue #28)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_valid_default_wrapper_none_when_unset(tmp_path):
+    """No saved alias — the common case before the user picks a default."""
+    paths = Paths.from_home(tmp_path)
+    assert valid_default_wrapper(paths, "claude") is None
+
+
+@pytest.mark.integration
+def test_valid_default_wrapper_returns_a_preset_alias(tmp_path):
+    """A preset alias is live even with nothing on disk — ``preset_names``
+    is the static half of the live set, independent of ``bin_dir``."""
+    from code_helper.services.state import set_default_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    set_default_wrapper(paths, "claude", "glm")
+    assert valid_default_wrapper(paths, "claude") == "glm"
+
+
+@pytest.mark.integration
+def test_valid_default_wrapper_returns_a_managed_alias(tmp_path):
+    """An ad-hoc managed wrapper (no preset) is live via ``discover_managed``."""
+    from code_helper.services.state import set_default_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(
+        paths, build_spec(agent="codex", provider="ollama", model="qwen3.5:9b")
+    )
+    set_default_wrapper(paths, "codex", "qwen3.5-codex")
+    assert valid_default_wrapper(paths, "codex") == "qwen3.5-codex"
+
+
+@pytest.mark.integration
+def test_valid_default_wrapper_none_for_a_stale_alias(tmp_path):
+    """A saved alias that is neither a preset nor on disk is stale — readers
+    must fall back to None instead of highlighting a ghost wrapper."""
+    from code_helper.services.state import set_default_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    set_default_wrapper(paths, "claude", "ghost")
+    assert valid_default_wrapper(paths, "claude") is None
+
+
+@pytest.mark.integration
+def test_valid_default_wrapper_none_for_an_unmanaged_file(tmp_path):
+    """A bare file on disk without our marker is NOT a managed wrapper — the
+    live check goes through ``discover_managed`` (which requires the marker),
+    not bare ``script_for(name).exists()``."""
+    from code_helper.services.state import set_default_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    paths.bin_dir.mkdir(parents=True, exist_ok=True)
+    paths.script_for("ghost").write_text("#!/bin/sh\n", encoding="utf-8")
+    set_default_wrapper(paths, "claude", "ghost")
+    assert valid_default_wrapper(paths, "claude") is None
 
 
 @pytest.mark.integration

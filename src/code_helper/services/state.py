@@ -28,12 +28,23 @@ profile is used again. ``load_state`` transparently reads the OLD two-key
 shape (never written again) so an existing installation's selection is not
 silently lost on upgrade; every write emits only the new ``active`` shape.
 
+A second, independent pointer, ``default_wrapper: {agent_name: alias}``,
+holds which wrapper alias is the default for each agent — the marker #29
+renders on the main screen and #30 applies in the agent's native config. It
+is a MAP (one slot per agent), not a single pair, because unlike the active
+profile there is a meaningful default per agent that should survive switching
+attention between agents. It is a separate top-level key from ``active`` so
+the two can never clobber each other, and neither's presence requires the
+other.
+
 A saved profile name can go stale (renamed via ``secrets.rename_profile`` or
 dropped via ``secrets.invalidate_cached_credential``), so readers must
 cross-check against the live ``secrets.profile_names``. That cross-check lives
 in ``secrets.valid_active_profile`` (NOT here): this module must not depend on
 ``secrets.py``, while ``secrets.py`` importing ``state.py`` is a one-way edge
-that creates no cycle.
+that creates no cycle. A saved ``default_wrapper`` alias can go stale too
+(uninstalled/renamed), and its cross-check lives in
+``wrappers.valid_default_wrapper`` for the same one-way-edge reason.
 
 Every read here **never raises** — a missing, corrupt, or oddly-shaped file is
 equivalent to "no pre-selection", mirroring ``secrets.load_credentials``.
@@ -50,6 +61,8 @@ __all__ = [
     "load_state",
     "active_selection",
     "set_active_selection",
+    "default_wrapper",
+    "set_default_wrapper",
 ]
 
 
@@ -80,6 +93,11 @@ def load_state(paths: Paths) -> dict[str, object]:
 
 def _string_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _write_state(paths: Paths, state: dict) -> None:
+    """Persist ``state`` to the state file atomically."""
+    atomic_write(paths.state_file(), json.dumps(state))
 
 
 def active_selection(paths: Paths) -> tuple[str, str] | None:
@@ -126,4 +144,34 @@ def set_active_selection(paths: Paths, provider_name: str, profile_name: str) ->
     state.pop("active_provider", None)
     state.pop("active_profiles", None)
     state["active"] = {"provider": provider_name, "profile": profile_name}
-    atomic_write(paths.state_file(), json.dumps(state))
+    _write_state(paths, state)
+
+
+def default_wrapper(paths: Paths, agent_name: str) -> str | None:
+    """The saved default-wrapper alias for ``agent_name``, or ``None``.
+
+    Raw read — no staleness check; that lives in ``wrappers.valid_default_wrapper``
+    (see module docstring for the one-way-edge reason).
+    """
+    state = load_state(paths)
+    wrappers = state.get("default_wrapper")
+    if not isinstance(wrappers, dict):
+        return None
+    return _string_or_none(wrappers.get(agent_name))
+
+
+def set_default_wrapper(paths: Paths, agent_name: str, alias: str) -> None:
+    """Record ``alias`` as the default wrapper for ``agent_name``.
+
+    Plain read-modify-write through ``atomic_write`` — no ``flock`` (losing a
+    pre-selection race is harmless). Sets only the ``agent_name`` slot, leaving
+    other agents' slots and every other top-level key untouched. Raw store — no
+    validation; staleness is ``wrappers.valid_default_wrapper``'s job.
+    """
+    state = load_state(paths)
+    wrappers = state.get("default_wrapper")
+    if not isinstance(wrappers, dict):
+        wrappers = {}
+    wrappers[agent_name] = alias
+    state["default_wrapper"] = wrappers
+    _write_state(paths, state)

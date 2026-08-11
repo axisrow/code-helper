@@ -23,8 +23,10 @@ import pytest
 from code_helper.services.paths import Paths
 from code_helper.services.state import (
     active_selection,
+    default_wrapper,
     load_state,
     set_active_selection,
+    set_default_wrapper,
 )
 
 
@@ -194,3 +196,103 @@ def test_set_active_selection_drops_legacy_keys_on_write(tmp_path):
     assert "active_provider" not in state
     assert "active_profiles" not in state
     assert state["active"] == {"provider": "litellm", "profile": "work"}
+
+
+# --------------------------------------------------------------------------- #
+# default_wrapper / set_default_wrapper — per-agent default pointer (issue #28)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_default_wrapper_unset_is_none(tmp_path):
+    assert default_wrapper(_paths(tmp_path), "claude") is None
+
+
+@pytest.mark.unit
+def test_set_default_wrapper_round_trips(tmp_path):
+    paths = _paths(tmp_path)
+    set_default_wrapper(paths, "codex", "codex-pro")
+    assert default_wrapper(paths, "codex") == "codex-pro"
+
+
+@pytest.mark.unit
+def test_set_default_wrapper_independent_per_agent(tmp_path):
+    """Unlike ``active`` (a single pointer), ``default_wrapper`` is a MAP with
+    one slot per agent — setting claude's default must not touch codex's slot,
+    so a per-agent preference survives switching attention between agents."""
+    paths = _paths(tmp_path)
+    set_default_wrapper(paths, "claude", "glm")
+    set_default_wrapper(paths, "codex", "codex-pro")
+    assert default_wrapper(paths, "claude") == "glm"
+    assert default_wrapper(paths, "codex") == "codex-pro"
+
+
+@pytest.mark.unit
+def test_set_default_wrapper_overwrites_same_agent(tmp_path):
+    """A second set for the SAME agent replaces the alias (one default per
+    agent), but leaves other agents untouched."""
+    paths = _paths(tmp_path)
+    set_default_wrapper(paths, "claude", "glm")
+    set_default_wrapper(paths, "codex", "codex-pro")
+    set_default_wrapper(paths, "claude", "glm-ollama")
+    assert default_wrapper(paths, "claude") == "glm-ollama"
+    assert default_wrapper(paths, "codex") == "codex-pro"
+
+
+@pytest.mark.unit
+def test_set_default_wrapper_independent_of_active_key(tmp_path):
+    """``default_wrapper`` and ``active`` are separate top-level keys — writing
+    one must never clobber the other, in either order."""
+    paths = _paths(tmp_path)
+    set_active_selection(paths, "litellm", "work")
+    set_default_wrapper(paths, "claude", "glm")
+    # Write active AGAIN after default_wrapper to prove the second key survives
+    # a later write to the first.
+    set_active_selection(paths, "litellm", "personal")
+    state = load_state(paths)
+    assert state["active"] == {"provider": "litellm", "profile": "personal"}
+    assert state["default_wrapper"] == {"claude": "glm"}
+
+
+@pytest.mark.unit
+def test_default_wrapper_ignores_a_malformed_value(tmp_path):
+    """A hand-edited or partially-corrupt ``default_wrapper`` value degrades to
+    None, never raises — the same defensive read ``active_selection`` applies
+    to its key."""
+    paths = _paths(tmp_path)
+    _write_state_file(paths, json.dumps({"default_wrapper": {"claude": 42}}))
+    assert default_wrapper(paths, "claude") is None  # non-string alias
+
+    _write_state_file(paths, json.dumps({"default_wrapper": "not-a-dict"}))
+    assert default_wrapper(paths, "claude") is None  # not a map at all
+
+    _write_state_file(paths, json.dumps({"default_wrapper": {"claude": ""}}))
+    assert default_wrapper(paths, "claude") is None  # empty string
+
+    # A different agent's slot is unaffected by a malformed slot value.
+    _write_state_file(
+        paths, json.dumps({"default_wrapper": {"claude": 42, "codex": "codex-pro"}})
+    )
+    assert default_wrapper(paths, "claude") is None
+    assert default_wrapper(paths, "codex") == "codex-pro"
+
+
+@pytest.mark.unit
+def test_set_default_wrapper_preserves_unrelated_keys(tmp_path):
+    """A read-modify-write must keep every other top-level key intact — both
+    ``active`` (the other pointer) and any future field."""
+    paths = _paths(tmp_path)
+    _write_state_file(
+        paths,
+        json.dumps(
+            {
+                "active": {"provider": "litellm", "profile": "work"},
+                "future_field": "keep-me",
+            }
+        ),
+    )
+    set_default_wrapper(paths, "claude", "glm")
+    state = load_state(paths)
+    assert state["active"] == {"provider": "litellm", "profile": "work"}
+    assert state["future_field"] == "keep-me"
+    assert state["default_wrapper"] == {"claude": "glm"}
