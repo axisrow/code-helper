@@ -139,6 +139,23 @@ def _confirm_set_default(path, preview: str) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
+def _read_profile_name(prompt: str) -> str | None:
+    """Read one profile name, returning ``None`` on Ctrl-C (a soft cancel).
+
+    Used by ``_handle_edit_token``'s interactive create/rename branches. A
+    bare ``KeyboardInterrupt`` here is translated to ``None`` (→ "cancelled"
+    → exit 0) rather than propagated: ``edit-token``'s picker already
+    distinguishes hard cancel (Ctrl-C at the menu, propagated) from soft
+    (Esc, exit 0), and a Ctrl-C at the follow-up text prompt should match
+    the soft path, not crash the CLI.
+    """
+    try:
+        return input(prompt).strip()
+    except KeyboardInterrupt:
+        print()
+        return None
+
+
 def _parse_shape(raw: str | None):
     """``--shape`` string -> ``ConfigShape``, or None when not given.
 
@@ -459,6 +476,82 @@ def _handle_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def _edit_token_resolve_profile(
+    paths, provider_name: str
+) -> tuple[str, str | None, str | None] | None:
+    """Pick (or create) a token profile for ``provider_name`` interactively.
+
+    Returns ``(profile_name, rename_from, rename_to)`` — where ``rename_*``
+    carry the prior profile's rename when a new profile is created alongside
+    a single existing one, or ``None`` otherwise. Returns ``None`` on a soft
+    cancel (Esc at the menu, Ctrl-C at a name prompt), signalling the caller
+    to print "cancelled" and exit 0.
+
+    The new-profile naming decision is owned by :mod:`code_helper.services.profiles`
+    (issue #37, P1.2): this function maps the classifier's outcome to the
+    CLI's raises (lowercase messages, SAME and COLLISION_NEW merged). See
+    ``_new_profile`` in ``cli/tui.py`` for the TUI's own mapping.
+    """
+    from code_helper.cli.menu import MenuCancelled, select_from_menu
+    from code_helper.errors import CodeHelperError
+    from code_helper.services.profiles import (
+        NewProfileOutcome,
+        classify_new_profile,
+        validate_new_profile_name,
+    )
+    from code_helper.services.secrets import DEFAULT_PROFILE, profile_names
+
+    names = list(profile_names(paths, provider_name))
+    if not names:
+        return None  # no menu to show — caller falls through to DEFAULT_PROFILE
+
+    profile_items = [
+        (name, "default" if name == DEFAULT_PROFILE else name) for name in names
+    ]
+    profile_items.append(("__new_profile__", "create new profile"))
+    try:
+        selected = select_from_menu(
+            profile_items,
+            prompt="select token profile to rotate:",
+        )
+    except MenuCancelled as e:
+        if e.hard:
+            # Ctrl-C: propagate so a TUI caller treats this as "leave", not
+            # "succeed + re-show menu" — see cli/tui.py's top-level catch.
+            raise
+        return None
+
+    if selected != "__new_profile__":
+        return selected, None, None
+
+    if len(names) == 1:
+        current_name = _read_profile_name(f"name for current profile ({names[0]}): ")
+        if current_name is None:
+            return None
+        new_name = _read_profile_name("name for new profile: ")
+        if new_name is None:
+            return None
+        outcome = classify_new_profile(names, current_name, new_name)
+        if outcome is NewProfileOutcome.EMPTY:
+            raise CodeHelperError("profile names cannot be empty")
+        # CLI merges SAME and COLLISION_NEW into one message, matching the
+        # pre-refactor `current_name == new_name or new_name in names` check.
+        # COLLISION_RENAMED is NOT mapped here: the original CLI never checked
+        # it in this branch, and downstream rename_profile surfaces it.
+        if outcome in (NewProfileOutcome.SAME, NewProfileOutcome.COLLISION_NEW):
+            raise CodeHelperError("profile names must be unique")
+        return new_name, names[0], current_name
+
+    # Multi-profile branch: only a new name is collected.
+    new_name = _read_profile_name("name for new profile: ")
+    if new_name is None:
+        return None
+    outcome = validate_new_profile_name(new_name, names)
+    if outcome in (NewProfileOutcome.EMPTY, NewProfileOutcome.COLLISION_NEW):
+        raise CodeHelperError("new profile name must be non-empty and unique")
+    return new_name, None, None
+
+
 def _handle_edit_token(args: argparse.Namespace) -> int:
     """Interactively rotate the token of a secret-auth wrapper.
 
@@ -551,88 +644,19 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
 
     profile_name = req.profile
     if profile_name is None:
-        names = list(profile_names(paths, spec.provider.name))
-        if names:
-            profile_items = [
-                (name, "default" if name == DEFAULT_PROFILE else name) for name in names
-            ]
-            profile_items.append(("__new_profile__", "create new profile"))
-            try:
-                selected = select_from_menu(
-                    profile_items,
-                    prompt="select token profile to rotate:",
-                )
-            except MenuCancelled as e:
-                if e.hard:
-                    raise
+        # Only offer the profile menu when profiles exist; with none cached
+        # the original code skipped straight to DEFAULT_PROFILE (no menu to
+        # pick from). _edit_token_resolve_profile returns None on a soft
+        # cancel (Esc/Ctrl-C at the menu or a name prompt) — distinct from
+        # the "no profiles" skip, which never calls it.
+        if profile_names(paths, spec.provider.name):
+            resolved = _edit_token_resolve_profile(paths, spec.provider.name)
+            if resolved is None:
+                # Soft cancel → "cancelled" + exit 0, matching the picker's
+                # own soft-cancel behavior.
                 print("cancelled")
                 return 0
-
-            def _read_profile_name(prompt: str) -> str | None:
-                try:
-                    return input(prompt).strip()
-                except KeyboardInterrupt:
-                    print()
-                    return None
-
-            if selected == "__new_profile__":
-                # The new-profile naming decision is owned by
-                # services.profiles (issue #37, P1.2): the CLI and TUI apply
-                # the SAME uniqueness/emptiness rules but react differently
-                # (raise vs print) and with different wording. The classifier
-                # returns a structured outcome; this handler maps it to the
-                # same raises the inline version used, so the CLI's messages
-                # are unchanged word-for-word.
-                from code_helper.services.profiles import (
-                    NewProfileOutcome,
-                    classify_new_profile,
-                    validate_new_profile_name,
-                )
-
-                if len(names) == 1:
-                    current_name = _read_profile_name(
-                        f"name for current profile ({names[0]}): "
-                    )
-                    if current_name is None:
-                        print("cancelled")
-                        return 0
-                    new_name = _read_profile_name("name for new profile: ")
-                    if new_name is None:
-                        print("cancelled")
-                        return 0
-                    outcome = classify_new_profile(names, current_name, new_name)
-                    if outcome is NewProfileOutcome.EMPTY:
-                        raise CodeHelperError("profile names cannot be empty")
-                    # CLI merges SAME and COLLISION_NEW into one message
-                    # ("profile names must be unique"), matching the inline
-                    # version's `current_name == new_name or new_name in names`
-                    # check. COLLISION_RENAMED is intentionally NOT mapped
-                    # here: the pre-refactor CLI never checked that case in
-                    # this branch, and the downstream rename_profile call
-                    # surfaces it via its own "already exists" error.
-                    if outcome in (
-                        NewProfileOutcome.SAME,
-                        NewProfileOutcome.COLLISION_NEW,
-                    ):
-                        raise CodeHelperError("profile names must be unique")
-                    profile_rename_from = names[0]
-                    profile_rename_to = current_name
-                    profile_name = new_name
-                else:
-                    profile_name = _read_profile_name("name for new profile: ")
-                    if profile_name is None:
-                        print("cancelled")
-                        return 0
-                    outcome = validate_new_profile_name(profile_name, names)
-                    if outcome in (
-                        NewProfileOutcome.EMPTY,
-                        NewProfileOutcome.COLLISION_NEW,
-                    ):
-                        raise CodeHelperError(
-                            "new profile name must be non-empty and unique"
-                        )
-            else:
-                profile_name = selected
+            profile_name, profile_rename_from, profile_rename_to = resolved
     if profile_name is None:
         profile_name = DEFAULT_PROFILE
     spec = replace(spec, profile_name=profile_name)
