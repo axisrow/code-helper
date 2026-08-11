@@ -140,7 +140,9 @@ def _translate(
     on its own and MUST be handled as a distinct key, not folded into
     ``CANCEL``), ``"TAB"`` (the Tab key — a caller-side hook key, see
     :func:`select_from_menu`'s ``on_tab``; without one it is ignored just like
-    ``"OTHER"``), ``"DIGIT_1"``..``"DIGIT_9"``, ``"OTHER"``.
+    ``"OTHER"``), ``"TOKEN"`` (the ``t``/``T`` key — a caller-side hook key,
+    see :func:`select_from_menu`'s ``on_token``; without one it is ignored
+    just like ``"OTHER"``), ``"DIGIT_1"``..``"DIGIT_9"``, ``"OTHER"``.
     """
     if first == "\x1b":
         nxt = read_more(_ESC_TIMEOUT)
@@ -185,6 +187,8 @@ def _translate(
         return "HARD_CANCEL"
     if first == "\t":
         return "TAB"
+    if first in ("t", "T"):
+        return "TOKEN"
     if first in ("q", "Q"):
         return "CANCEL"
     if first in ("k", "K"):
@@ -311,6 +315,7 @@ def select_from_menu(
     prompt: str | Callable[[], str] = "select:",
     hint: str | None | Callable[[], str] = None,
     on_tab: Callable[[], None] | None = None,
+    on_token: Callable[[str], None] | None = None,
     unnumbered: frozenset[str] = frozenset(),
     read_key: Callable[[], str] = _read_key_raw,
     print_fn: Callable[[str], None] = print,
@@ -355,6 +360,13 @@ def select_from_menu(
             per frame). Without ``on_tab``, Tab is silently ignored — the key
             resolves to ``"TAB"`` but the loop treats it like ``"OTHER"``, so it
             never starts doing anything in a menu that did not opt in.
+        on_token: Optional handler invoked on a ``"TOKEN"`` keypress (the
+            ``t``/``T`` key), UNLIKE ``on_tab`` receiving the VALUE under the
+            cursor as its single argument — a token action is per-row (rotate
+            the token of THIS wrapper), so the handler must know which row it
+            acts on, while Tab cycles a single shared resource (the active
+            profile) and needs no row identity. Without ``on_token``, ``t`` is
+            silently ignored, exactly like Tab without ``on_tab``.
         unnumbered: Values that should NOT get a digit shortcut (e.g. a
             trailing "← назад"/"quit" entry). Digits are assigned by the
             menu itself — the same place that handles ``DIGIT_<n>`` below —
@@ -479,6 +491,8 @@ def select_from_menu(
             key = read_key()
             if key == "TAB" and on_tab is not None:
                 on_tab()
+            elif key == "TOKEN" and on_token is not None:
+                on_token(pairs[selectable[index]][0])
             elif key == "UP":
                 index = (index - 1) % len(selectable)
             elif key == "DOWN":

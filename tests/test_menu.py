@@ -501,6 +501,47 @@ def test_select_from_menu_on_tab_invoked_and_frame_redraws(monkeypatch):
     assert "\x1b[J" in joined
 
 
+# --- on_token / TOKEN key (issue #29) ---------------------------------------
+
+
+@pytest.mark.unit
+def test_translate_t_and_T_return_token():
+    # `t`/`T` is the per-row token-rotation key on the main screen (#29). It
+    # maps to a caller-side hook name just like Tab, so a menu without on_token
+    # ignores it instead of doing something surprising.
+    from code_helper.cli.menu import _translate
+
+    assert _translate("t", lambda _t: None) == "TOKEN"
+    assert _translate("T", lambda _t: None) == "TOKEN"
+
+
+@pytest.mark.unit
+def test_select_from_menu_on_token_called_with_cursor_value():
+    # on_token UNLIKE on_tab receives the value under the cursor: token
+    # rotation is per-row, so the handler must know which wrapper to act on.
+    # DOWN moves to "b", TOKEN fires on_token("b").
+    calls = []
+    select_from_menu(
+        ["a", "b"],
+        read_key=_fake_keys(["DOWN", "TOKEN", "ENTER"]),
+        on_token=calls.append,
+        print_fn=lambda _: None,
+    )
+    assert calls == ["b"]
+
+
+@pytest.mark.unit
+def test_select_from_menu_token_ignored_without_on_token():
+    # Without on_token, `t` is silently ignored (like OTHER) — a menu that did
+    # not opt in must not start reacting to `t`.
+    result = select_from_menu(
+        ["a", "b"],
+        read_key=_fake_keys(["TOKEN", "DOWN", "ENTER"]),
+        print_fn=lambda _: None,
+    )
+    assert result == "b"
+
+
 @pytest.mark.unit
 def test_select_from_menu_callable_prompt_is_re_evaluated_each_frame():
     renderings = []

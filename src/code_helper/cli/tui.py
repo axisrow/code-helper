@@ -16,7 +16,6 @@ from collections.abc import Callable, Sequence
 
 __all__ = ["run_tui"]
 
-_LIST = "list"
 _ADD = "add"
 _SETTINGS = "settings"
 _PROFILE = "profile"
@@ -31,7 +30,11 @@ ProfileChoice = tuple[str, str | None, str | None, str | None]
 
 
 def _hint(
-    numbered_count: int, *, exit_word: str, tab_provider: str | None = None
+    numbered_count: int,
+    *,
+    exit_word: str,
+    tab_provider: str | None = None,
+    has_token_key: bool = False,
 ) -> str:
     """Return the uniform navigation hint for a menu.
 
@@ -40,6 +43,13 @@ def _hint(
     rather than just that it does something. It cycles *profiles within one
     provider*, never providers themselves (that is what the Profile screen is
     for), and this makes the distinction visible instead of implied.
+
+    ``has_token_key=True`` adds ``· t: token`` — the main screen (issue #29)
+    binds ``t`` to per-row token rotation, and the hint must say so. It is
+    always shown on the main screen even when the cursor is on a non-secret
+    wrapper, because ``t`` there is a silent no-op (no dead-end screen), and
+    hiding the hint only on non-secret rows would make it flicker as the user
+    moves the cursor.
     """
     from code_helper.cli.menu import MAX_DIGIT_ITEMS
 
@@ -48,12 +58,14 @@ def _hint(
     hint = f"Up/Down · {digits} · Enter select · Esc {exit_word} · Ctrl-C quit"
     if tab_provider:
         hint += f" · Tab: {tab_provider} profile"
+    if has_token_key:
+        hint += " · t: token"
     return hint
 
 
 def run_tui(args: argparse.Namespace) -> int:
     """Run the hierarchical interactive UI and always return a shell status."""
-    from code_helper.cli.menu import MenuCancelled, read_line, select_from_menu
+    from code_helper.cli.menu import MenuCancelled, Section, read_line, select_from_menu
     from code_helper.cli.parser import _handle_add, _handle_edit_token
     from code_helper.errors import CodeHelperError, emit_error
     from code_helper.services.model import (
@@ -76,7 +88,11 @@ def run_tui(args: argparse.Namespace) -> int:
         valid_active_profile,
     )
     from code_helper.services.spec import suggest_alias
-    from code_helper.services.state import active_selection, set_active_selection
+    from code_helper.services.state import (
+        active_selection,
+        set_active_selection,
+        set_default_wrapper,
+    )
     from code_helper.services.wrappers import (
         WRAPPERS,
         describe_all,
@@ -84,6 +100,7 @@ def run_tui(args: argparse.Namespace) -> int:
         get_spec,
         spec_from_installed,
         token_from_installed,
+        valid_default_wrapper,
     )
 
     def _pick(
@@ -92,15 +109,29 @@ def run_tui(args: argparse.Namespace) -> int:
         *,
         exit_word: str = "back",
         on_tab: Callable[[], None] | None = None,
+        on_token: Callable[[str], None] | None = None,
         tab_provider: str | None = None,
     ) -> str:
-        numbered = sum(1 for value, _ in items if value not in (_BACK, _QUIT))
+        # `items` may now contain `Section` headers (issue #29 main screen) —
+        # they are not `(value, label)` pairs, so skip them when counting
+        # numbered rows. `select_from_menu` does the same via `isinstance`.
+        numbered = sum(
+            1
+            for entry in items
+            if not isinstance(entry, Section) and entry[0] not in (_BACK, _QUIT)
+        )
         try:
             return select_from_menu(
                 items,
                 prompt=prompt,
-                hint=_hint(numbered, exit_word=exit_word, tab_provider=tab_provider),
+                hint=_hint(
+                    numbered,
+                    exit_word=exit_word,
+                    tab_provider=tab_provider,
+                    has_token_key=on_token is not None,
+                ),
                 on_tab=on_tab,
+                on_token=on_token,
                 unnumbered=frozenset({_BACK, _QUIT}),
                 clear=True,
             )
@@ -259,38 +290,84 @@ def run_tui(args: argparse.Namespace) -> int:
                 known.add(name)
         return specs
 
-    def _run_list() -> None:
-        """Browse wrappers; selecting a secret wrapper rotates its profile token."""
-        while True:
-            specs = _all_wrapper_specs()
-            rows = describe_all(
-                Paths.default(),
-                specs,
-                installed_word="installed",
-                not_installed_word="not installed",
+    def _wrapper_rows(paths: Paths) -> list:
+        """Menu items for the main screen's wrapper list, grouped by agent.
+
+        Each agent that has ANY wrapper gets a non-selectable ``Section``
+        header (issue #27) followed by its wrappers' rows; the rows come from
+        :func:`describe_all` with a live ``defaults`` map so the one wrapper
+        that is ``default_wrapper`` for its agent is prefixed with ``●``
+        (issue #29). The map is resolved ONCE here (two ``valid_default_wrapper``
+        calls — one per agent — not one per row), because the main screen
+        rebuilds it every loop iteration and re-reading ``state.json`` per
+        row would multiply I/O needlessly. Agents with no wrappers are skipped
+        (no empty ``Section``), so a fresh install shows only the agents that
+        actually have presets or installed wrappers.
+        """
+        specs = _all_wrapper_specs()
+        rows: list = []
+        for agent in AGENTS:
+            agent_specs = [s for s in specs if s.agent.name == agent.name]
+            if not agent_specs:
+                continue
+            rows.append(Section(agent.name))
+            rows.extend(
+                describe_all(
+                    paths,
+                    agent_specs,
+                    installed_word="installed",
+                    not_installed_word="not installed",
+                    # Resolve the default only for agents that actually have
+                    # wrappers — a per-agent ``valid_default_wrapper`` call
+                    # reads ``state.json``, so skipping empty agents avoids
+                    # wasted I/O on the main screen's hot render path.
+                    defaults={agent.name: valid_default_wrapper(paths, agent.name)},
+                )
             )
-            choice = _pick([*rows, (_BACK, "Back")], "Wrappers:")
-            if choice == _BACK:
-                return
-            try:
-                spec = spec_from_installed(Paths.default(), choice) or get_spec(choice)
-            except CodeHelperError as exc:
-                emit_error(exc, getattr(args, "debug", False))
-                continue
-            if spec.auth != "secret":
-                _pick([(_BACK, "Back")], f"{choice} has no editable token.")
-                continue
-            profile = _select_profile(spec.provider.name, editing=True)
-            if profile is None:
-                continue
-            args.name = choice
-            (
-                args.profile,
-                args.profile_token,
-                args.profile_rename_from,
-                args.profile_rename_to,
-            ) = profile
-            _run(_handle_edit_token)
+        return rows
+
+    def _resolve_spec(alias: str) -> object | None:
+        """Resolve ``alias`` to a spec — installed wrapper first, else preset.
+
+        Returns ``None`` (after emitting the error) when resolution fails, so
+        callers bail out without repeating the try/except. Shared by ``_on_token``
+        and the main screen's Enter-on-wrapper branch, which both need the same
+        "installed wrapper takes precedence over a same-named preset" lookup.
+        """
+        try:
+            return spec_from_installed(Paths.default(), alias) or get_spec(alias)
+        except CodeHelperError as exc:
+            emit_error(exc, getattr(args, "debug", False))
+            return None
+
+    def _on_token(alias: str) -> None:
+        """Rotate the token of wrapper ``alias`` (the ``t`` key on the main screen).
+
+        Reuses the exact wiring the old ``_run_list`` had for a selected
+        wrapper — profile pick then ``_handle_edit_token`` — moved here
+        because #29 inlines the wrapper list into the main screen and binds
+        token rotation to ``t`` instead of Enter. Enter is now reserved for
+        ``set_default_wrapper``. A non-secret wrapper is a SILENT no-op: the
+        old dead-end ``"{alias} has no editable token."`` screen is gone, so
+        ``t`` on a non-secret row simply does nothing rather than trapping the
+        user in a one-item ``Back`` menu.
+        """
+        spec = _resolve_spec(alias)
+        if spec is None:
+            return
+        if spec.auth != "secret":
+            return  # silent no-op — no dead-end screen (issue #29)
+        profile = _select_profile(spec.provider.name, editing=True)
+        if profile is None:
+            return
+        args.name = alias
+        (
+            args.profile,
+            args.profile_token,
+            args.profile_rename_from,
+            args.profile_rename_to,
+        ) = profile
+        _run(_handle_edit_token)
 
     def _run_add() -> None:
         """Create a wrapper through provider → profile → model → agent → name."""
@@ -603,9 +680,15 @@ def run_tui(args: argparse.Namespace) -> int:
             # for why re-deriving it per reader would multiply the I/O.
             _refresh_active_label()
             tab_provider = _tab_provider_cache["value"]
+            paths = Paths.default()
+            # The wrapper list IS the main screen now (issue #29): grouped by
+            # agent via `Section`, with `●` on the default wrapper and `t` for
+            # per-row token rotation. Enter on a wrapper row makes it the
+            # default for its agent (`set_default_wrapper`); the service rows
+            # (`Add`/`Profile`/`Settings`/`Quit`) sit below the wrappers.
             choice = _pick(
                 [
-                    (_LIST, "List"),
+                    *_wrapper_rows(paths),
                     (_ADD, "Add"),
                     (_PROFILE, _profile_row_label),
                     (_SETTINGS, "Settings"),
@@ -615,17 +698,26 @@ def run_tui(args: argparse.Namespace) -> int:
                 exit_word="quit",
                 on_tab=_on_tab,
                 tab_provider=tab_provider,
+                on_token=_on_token,
             )
             if choice in (_BACK, _QUIT):
                 return 0
-            if choice == _LIST:
-                _run_list()
-            elif choice == _ADD:
+            if choice == _ADD:
                 _run_add()
             elif choice == _PROFILE:
                 _run_profile_screen()
-            else:
+            elif choice == _SETTINGS:
                 _run_settings()
+            else:
+                # A wrapper alias — Enter makes it the default for its agent.
+                # `set_default_wrapper` is the raw store (#28); it does not
+                # validate, but `choice` came straight from `_wrapper_rows`,
+                # which only yields aliases that exist as presets or installed
+                # managed wrappers, so the write is always of a real alias.
+                spec = _resolve_spec(choice)
+                if spec is None:
+                    continue
+                set_default_wrapper(paths, spec.agent.name, choice)
     except MenuCancelled as exc:
         if exc.hard:
             raise
