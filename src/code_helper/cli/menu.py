@@ -30,6 +30,7 @@ __all__ = [
     "read_line",
     "MenuCancelled",
     "press_any_key",
+    "Section",
     "MAX_DIGIT_ITEMS",
 ]
 
@@ -82,6 +83,33 @@ class MenuCancelled(Exception):
     def __init__(self, hard: bool = True) -> None:
         super().__init__()
         self.hard = hard
+
+
+class Section:
+    """A non-selectable section header row inside ``items``.
+
+    A ``Section`` is placed in the ``items`` sequence between regular
+    ``(value, label)`` entries to render a bare header row (e.g. ``"claude"``
+    or ``"codex"``) that groups the items below it. Unlike an ``unnumbered``
+    entry (which is selectable but gets no digit), a ``Section`` is never
+    selectable: the cursor never lands on it, Up/Down/Home/End navigation
+    skips it, and it gets neither a digit nor a ``>`` marker. It DOES occupy
+    one rendered row, so :func:`select_from_menu`'s ``frame_lines`` count
+    accounts for it automatically (it counts ``len(pairs)``, and a
+    ``Section`` is one entry there) — that is what keeps the in-place redraw
+    honest when a section header is added.
+
+    The menu only reads ``.text``; the object is a marker ("render a header
+    here"), not a value that can be returned or compared, so it intentionally
+    defines no ``__eq__``/``__hash__``.
+    """
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        if "\n" in text or "\r" in text:
+            raise ValueError("Section text must be a single line")
+        self.text = text
 
 
 def _translate(
@@ -245,15 +273,18 @@ def _read_key_raw(stream=sys.stdin) -> str:
 
 
 def _normalize(
-    items: Sequence[str | tuple[str, str | Callable[[], str]]],
-) -> list[tuple[str, str | Callable[[], str]]]:
-    """Normalize ``items`` to ``(value, label)`` pairs.
+    items: Sequence[str | tuple[str, str | Callable[[], str]] | Section],
+) -> list[tuple[str, str | Callable[[], str]] | Section]:
+    """Normalize ``items`` to ``(value, label)`` pairs (``Section`` pass-through).
 
     A plain ``str`` item is both its own value and label — this is what keeps
     every pre-existing ``select_from_menu(["a", "b"])`` call (and all of
-    ``tests/test_menu.py``) working unchanged.
+    ``tests/test_menu.py``) working unchanged. A ``Section`` is passed through
+    untouched: it is not an item, so wrapping it in a pair would be wrong.
     """
-    return [item if isinstance(item, tuple) else (item, item) for item in items]
+    return [
+        item if isinstance(item, (tuple, Section)) else (item, item) for item in items
+    ]
 
 
 def _fit(line: str, width: int) -> str:
@@ -275,7 +306,7 @@ def _fit(line: str, width: int) -> str:
 
 
 def select_from_menu(
-    items: Sequence[str | tuple[str, str | Callable[[], str]]],
+    items: Sequence[str | tuple[str, str | Callable[[], str]] | Section],
     *,
     prompt: str | Callable[[], str] = "select:",
     hint: str | None | Callable[[], str] = None,
@@ -301,6 +332,13 @@ def select_from_menu(
             the change instead of freezing at the value it had when the menu
             opened. A callable label must return a single logical line with
             no ``\\n`` (same ``frame_lines`` constraint as ``prompt``).
+            An entry may also be a :class:`Section` — a non-selectable
+            header row that groups the items below it (e.g. ``Section("claude")``
+            above the claude wrappers). A ``Section`` is rendered as a bare
+            label with no digit and no ``>`` marker, is skipped by
+            Up/Down/Home/End/Page navigation, and cannot be selected by Enter.
+            It DOES occupy one rendered row, so ``frame_lines`` accounts for
+            it — the in-place redraw stays honest.
         prompt: Heading line printed above the list. May be a callable
             evaluated FRESH each frame — a menu whose header must reflect state
             an ``on_tab`` handler mutated (e.g. the active profile) can pass
@@ -350,16 +388,28 @@ def select_from_menu(
             ``hard=False`` for Esc/``q``.
     """
     pairs = _normalize(items)
-    if not pairs:
+
+    # Indices into `pairs` that point at SELECTABLE entries (i.e. not a
+    # `Section` header). Navigation (`index`) moves over THIS list, not
+    # `pairs` directly, so Up/Down/Home/End silently skip section headers —
+    # the cursor never lands on a header, and Enter can never return one.
+    # `selectable[index]` maps the cursor position back to a `pairs` index
+    # wherever the renderer or the ENTER handler needs the actual entry.
+    selectable = [i for i, entry in enumerate(pairs) if not isinstance(entry, Section)]
+    if not selectable:
         raise ValueError("items must be non-empty")
 
     # value -> digit, assigned by iteration order, skipping `unnumbered`
-    # values. Looked up by both the row renderer (what digit to print next to
+    # values AND `Section` headers (a header is not an item and gets no
+    # digit). Looked up by both the row renderer (what digit to print next to
     # a value) and the DIGIT_<n> handler (what value that digit selects) so
     # the two can never disagree. `by_digit` is the same mapping inverted,
     # needed only by the DIGIT_<n> handler.
     digit_of: dict[str, int] = {}
-    for value, _label in pairs:
+    for entry in pairs:
+        if isinstance(entry, Section):
+            continue
+        value = entry[0]
         if value not in unnumbered and len(digit_of) < MAX_DIGIT_ITEMS:
             digit_of[value] = len(digit_of) + 1
     by_digit = {n: value for value, n in digit_of.items()}
@@ -406,9 +456,18 @@ def select_from_menu(
                 print_fn(f"{lead}{heading}\n")
             else:
                 print_fn(f"\n{heading}")
-            for i, (value, label) in enumerate(pairs):
+            cursor_pair = selectable[index]
+            for i, entry in enumerate(pairs):
+                if isinstance(entry, Section):
+                    # Header row: a bare label, no digit, no `>` marker. It
+                    # is never the cursor position (`selectable` excludes it),
+                    # so there is no marker branch to get right here.
+                    header = entry.text
+                    print_fn(f" {_fit(header, width - 1) if redraw else header}")
+                    continue
+                value, label = entry
                 label_text = label() if callable(label) else label
-                marker = ">" if i == index else " "
+                marker = ">" if i == cursor_pair else " "
                 digit = str(digit_of[value]) if value in digit_of else "·"
                 row = f"{digit} {marker} {label_text}"
                 print_fn(f" {_fit(row, width - 1) if redraw else row}")
@@ -421,15 +480,15 @@ def select_from_menu(
             if key == "TAB" and on_tab is not None:
                 on_tab()
             elif key == "UP":
-                index = (index - 1) % len(pairs)
+                index = (index - 1) % len(selectable)
             elif key == "DOWN":
-                index = (index + 1) % len(pairs)
+                index = (index + 1) % len(selectable)
             elif key == "HOME" or key == "PAGE_UP":
                 index = 0
             elif key == "END" or key == "PAGE_DOWN":
-                index = len(pairs) - 1
+                index = len(selectable) - 1
             elif key == "ENTER":
-                return pairs[index][0]
+                return pairs[selectable[index]][0]
             elif key.startswith("DIGIT_"):
                 n = int(key[len("DIGIT_") :])
                 if n in by_digit:
