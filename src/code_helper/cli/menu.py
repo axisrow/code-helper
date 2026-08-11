@@ -309,6 +309,193 @@ def _fit(line: str, width: int) -> str:
     return line[: width - 1] + "…"
 
 
+class _MenuState:
+    """Mutable state of a ``select_from_menu`` session, separated from its IO.
+
+    Pure construction (no IO) lives in :func:`_build_menu_state`; the redraw
+    loop in :func:`select_from_menu` reads and mutates ``index`` / ``first``
+    while delegating every frame's rendering to :func:`_render_frame` and
+    every keypress's effect to :func:`_dispatch_key`. Splitting the state out
+    is what lets the 200-line monolithic body become three readable parts.
+
+    Kept as a plain class (not ``@dataclass``) because ``index`` and ``first``
+    are mutated in place by the dispatch return path — a frozen dataclass
+    would force rebuilding the whole state on every keypress.
+    """
+
+    __slots__ = (
+        "pairs",
+        "selectable",
+        "digit_of",
+        "by_digit",
+        "index",
+        "first",
+        "redraw",
+        "width",
+        "hint_text",
+        "frame_lines",
+    )
+
+    def __init__(
+        self,
+        *,
+        pairs,
+        selectable,
+        digit_of,
+        by_digit,
+        redraw,
+        width,
+        hint_text,
+        frame_lines,
+    ) -> None:
+        self.pairs = pairs
+        self.selectable = selectable
+        self.digit_of = digit_of
+        self.by_digit = by_digit
+        self.redraw = redraw
+        self.width = width
+        self.hint_text = hint_text
+        self.frame_lines = frame_lines
+        self.index = 0
+        self.first = True
+
+
+def _build_menu_state(
+    items: Sequence[str | tuple[str, str | Callable[[], str]] | Section],
+    *,
+    hint: str | None | Callable[[], str],
+    unnumbered: frozenset[str],
+) -> _MenuState:
+    """Construct a :class:`_MenuState` from raw ``items`` — pure, no IO.
+
+    Owns the three invariants the redraw loop relies on: which entries are
+    selectable (skipping :class:`Section` headers), the value→digit and
+    digit→value mappings (kept as one derivation so the rendered digit and
+    the dispatch digit can never disagree), and the frame-line count that
+    drives the in-place redraw's cursor-up escape.
+    """
+    pairs = _normalize(items)
+
+    selectable = [i for i, entry in enumerate(pairs) if not isinstance(entry, Section)]
+    if not selectable:
+        raise ValueError("items must be non-empty")
+
+    digit_of: dict[str, int] = {}
+    for entry in pairs:
+        if isinstance(entry, Section):
+            continue
+        value = entry[0]
+        if value not in unnumbered and len(digit_of) < MAX_DIGIT_ITEMS:
+            digit_of[value] = len(digit_of) + 1
+    by_digit = {n: value for value, n in digit_of.items()}
+
+    redraw = sys.stdout.isatty()
+    width = shutil.get_terminal_size((80, 24)).columns if redraw else 0
+    hint_text = hint() if callable(hint) else hint
+    frame_lines = len(pairs) + 2 + (2 if hint_text else 0)
+
+    return _MenuState(
+        pairs=pairs,
+        selectable=selectable,
+        digit_of=digit_of,
+        by_digit=by_digit,
+        redraw=redraw,
+        width=width,
+        hint_text=hint_text,
+        frame_lines=frame_lines,
+    )
+
+
+def _render_frame(
+    state: _MenuState,
+    *,
+    prompt: str | Callable[[], str],
+    clear: bool,
+    clear_seq: str,
+    clear_screen: str,
+    print_fn: Callable[[str], None],
+) -> None:
+    """Render one menu frame to ``print_fn`` — pure output, no key reading.
+
+    Evaluates a callable ``prompt`` fresh each frame so a header that
+    reflects state an ``on_tab`` handler mutated stays current. Every
+    rendered row is truncated to the terminal width via :func:`_fit` — a row
+    longer than the terminal wraps into extra physical rows the in-place
+    redraw does not know about, and the menu creeps down the screen.
+    """
+    width = state.width
+    redraw = state.redraw
+    prompt_text = prompt() if callable(prompt) else prompt
+    heading = _fit(prompt_text, width) if redraw else prompt_text
+    if redraw:
+        lead = clear_seq if not state.first else (clear_screen if clear else "")
+        print_fn(f"{lead}{heading}\n")
+    else:
+        print_fn(f"\n{heading}")
+    cursor_pair = state.selectable[state.index]
+    for i, entry in enumerate(state.pairs):
+        if isinstance(entry, Section):
+            header = entry.text
+            print_fn(f" {_fit(header, width - 1) if redraw else header}")
+            continue
+        value, label = entry
+        label_text = label() if callable(label) else label
+        marker = ">" if i == cursor_pair else " "
+        digit = str(state.digit_of[value]) if value in state.digit_of else "·"
+        row = f"{digit} {marker} {label_text}"
+        print_fn(f" {_fit(row, width - 1) if redraw else row}")
+    if state.hint_text:
+        fitted_hint = _fit(state.hint_text, width) if redraw else state.hint_text
+        print_fn(f"\n {fitted_hint}" if redraw else f" {fitted_hint}")
+
+
+def _dispatch_key(
+    key: str,
+    state: _MenuState,
+    *,
+    on_tab: Callable[[], None] | None,
+    on_token: Callable[[str], None] | None,
+):
+    """Act on one translated ``key`` — returns a sentinel or a selected value.
+
+    Returns:
+        The selected value when the key selects one (Enter / a digit);
+        ``None`` when the key only mutated state (navigation / on_tab /
+        on_token) and the loop should redraw; never returns for CANCEL /
+        HARD_CANCEL (raises :class:`MenuCancelled`).
+    """
+    if key == "TAB" and on_tab is not None:
+        on_tab()
+        return None
+    if key == "TOKEN" and on_token is not None:
+        on_token(state.pairs[state.selectable[state.index]][0])
+        return None
+    if key == "UP":
+        state.index = (state.index - 1) % len(state.selectable)
+        return None
+    if key == "DOWN":
+        state.index = (state.index + 1) % len(state.selectable)
+        return None
+    if key in ("HOME", "PAGE_UP"):
+        state.index = 0
+        return None
+    if key in ("END", "PAGE_DOWN"):
+        state.index = len(state.selectable) - 1
+        return None
+    if key == "ENTER":
+        return state.pairs[state.selectable[state.index]][0]
+    if key.startswith("DIGIT_"):
+        n = int(key[len("DIGIT_") :])
+        if n in state.by_digit:
+            return state.by_digit[n]
+        return None
+    if key == "CANCEL":
+        raise MenuCancelled(hard=False)
+    if key == "HARD_CANCEL":
+        raise MenuCancelled(hard=True)
+    return None  # OTHER / TAB-without-on_tab / TOKEN-without-on_token
+
+
 def select_from_menu(
     items: Sequence[str | tuple[str, str | Callable[[], str]] | Section],
     *,
@@ -399,118 +586,31 @@ def select_from_menu(
         MenuCancelled: the user cancelled — ``hard=True`` for Ctrl-C,
             ``hard=False`` for Esc/``q``.
     """
-    pairs = _normalize(items)
+    state = _build_menu_state(items, hint=hint, unnumbered=unnumbered)
 
-    # Indices into `pairs` that point at SELECTABLE entries (i.e. not a
-    # `Section` header). Navigation (`index`) moves over THIS list, not
-    # `pairs` directly, so Up/Down/Home/End silently skip section headers —
-    # the cursor never lands on a header, and Enter can never return one.
-    # `selectable[index]` maps the cursor position back to a `pairs` index
-    # wherever the renderer or the ENTER handler needs the actual entry.
-    selectable = [i for i, entry in enumerate(pairs) if not isinstance(entry, Section)]
-    if not selectable:
-        raise ValueError("items must be non-empty")
-
-    # value -> digit, assigned by iteration order, skipping `unnumbered`
-    # values AND `Section` headers (a header is not an item and gets no
-    # digit). Looked up by both the row renderer (what digit to print next to
-    # a value) and the DIGIT_<n> handler (what value that digit selects) so
-    # the two can never disagree. `by_digit` is the same mapping inverted,
-    # needed only by the DIGIT_<n> handler.
-    digit_of: dict[str, int] = {}
-    for entry in pairs:
-        if isinstance(entry, Section):
-            continue
-        value = entry[0]
-        if value not in unnumbered and len(digit_of) < MAX_DIGIT_ITEMS:
-            digit_of[value] = len(digit_of) + 1
-    by_digit = {n: value for value, n in digit_of.items()}
-
-    redraw = sys.stdout.isatty()
-    width = shutil.get_terminal_size((80, 24)).columns if redraw else 0
-    first = True
-    # On a TTY, one rendered frame = prompt line + a blank spacer line + one
-    # line per item + (if hint) a blank spacer line + the hint line. The
-    # spacers give the heading/hint visual room instead of running straight
-    # into the list (see CLAUDE.md). They are folded into the SAME
-    # `print_fn` call as the heading/hint text (one trailing/leading `\n`)
-    # rather than printed separately, so this count is the only place that
-    # has to know about them — get it wrong and the in-place redraw erases
-    # the wrong number of rows and the menu creeps down the screen. Off a
-    # TTY there is no redraw to protect and the legacy single-leading-blank
-    # layout is kept as-is. A callable hint is resolved ONCE here — before the
-    # frame line count is computed — so the count cannot depend on what the
-    # callable would return later; the TUI's hint is static per menu anyway.
-    hint_text = hint() if callable(hint) else hint
-    frame_lines = len(pairs) + 2 + (2 if hint_text else 0)
-    clear_seq = f"\033[{frame_lines}A\033[J"
+    clear_seq = f"\033[{state.frame_lines}A\033[J"
     clear_screen = "\033[2J\033[H"
     hide_cursor = "\033[?25l"
     show_cursor = "\033[?25h"
-    index = 0
     try:
-        if redraw:
+        if state.redraw:
             print_fn(hide_cursor)
         while True:
-            # `_fit` only ever wraps the VISIBLE text (`prompt`, a row's
-            # label, `hint`) — never a string with ANSI escapes or an
-            # embedded newline spliced in, since `_fit` counts `len()` as
-            # columns and either would throw that count off. A callable
-            # `prompt` is evaluated FRESH here, each frame, so a header that
-            # reflects state an `on_tab` handler mutated stays current.
-            prompt_text = prompt() if callable(prompt) else prompt
-            heading = _fit(prompt_text, width) if redraw else prompt_text
-            if redraw:
-                # After the first frame, always erase-and-redraw in place;
-                # only the very first frame considers `clear` (a full-screen
-                # clear) vs. no prefix at all.
-                lead = clear_seq if not first else (clear_screen if clear else "")
-                print_fn(f"{lead}{heading}\n")
-            else:
-                print_fn(f"\n{heading}")
-            cursor_pair = selectable[index]
-            for i, entry in enumerate(pairs):
-                if isinstance(entry, Section):
-                    # Header row: a bare label, no digit, no `>` marker. It
-                    # is never the cursor position (`selectable` excludes it),
-                    # so there is no marker branch to get right here.
-                    header = entry.text
-                    print_fn(f" {_fit(header, width - 1) if redraw else header}")
-                    continue
-                value, label = entry
-                label_text = label() if callable(label) else label
-                marker = ">" if i == cursor_pair else " "
-                digit = str(digit_of[value]) if value in digit_of else "·"
-                row = f"{digit} {marker} {label_text}"
-                print_fn(f" {_fit(row, width - 1) if redraw else row}")
-            if hint_text:
-                fitted_hint = _fit(hint_text, width) if redraw else hint_text
-                print_fn(f"\n {fitted_hint}" if redraw else f" {fitted_hint}")
-            first = False
+            _render_frame(
+                state,
+                prompt=prompt,
+                clear=clear,
+                clear_seq=clear_seq,
+                clear_screen=clear_screen,
+                print_fn=print_fn,
+            )
+            state.first = False
 
-            key = read_key()
-            if key == "TAB" and on_tab is not None:
-                on_tab()
-            elif key == "TOKEN" and on_token is not None:
-                on_token(pairs[selectable[index]][0])
-            elif key == "UP":
-                index = (index - 1) % len(selectable)
-            elif key == "DOWN":
-                index = (index + 1) % len(selectable)
-            elif key == "HOME" or key == "PAGE_UP":
-                index = 0
-            elif key == "END" or key == "PAGE_DOWN":
-                index = len(selectable) - 1
-            elif key == "ENTER":
-                return pairs[selectable[index]][0]
-            elif key.startswith("DIGIT_"):
-                n = int(key[len("DIGIT_") :])
-                if n in by_digit:
-                    return by_digit[n]
-            elif key == "CANCEL":
-                raise MenuCancelled(hard=False)
-            elif key == "HARD_CANCEL":
-                raise MenuCancelled(hard=True)
+            selected = _dispatch_key(
+                read_key(), state, on_tab=on_tab, on_token=on_token
+            )
+            if selected is not None:
+                return selected
     except KeyboardInterrupt:
         # Belt-and-suspenders: a real terminal in raw mode has ISIG off, so
         # Ctrl-C arrives as the "\x03" byte above (-> HARD_CANCEL), never as
@@ -519,7 +619,7 @@ def select_from_menu(
         # directly instead of returning a translated key name.
         raise MenuCancelled(hard=True) from None
     finally:
-        if redraw:
+        if state.redraw:
             print_fn(show_cursor)
 
 
