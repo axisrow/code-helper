@@ -85,6 +85,11 @@ def run_tui(args: argparse.Namespace) -> int:
     )
     from code_helper.services.models_api import list_models
     from code_helper.services.paths import Paths
+    from code_helper.services.profiles import (
+        NewProfileOutcome,
+        classify_new_profile,
+        validate_new_profile_name,
+    )
     from code_helper.services.secrets import (
         DEFAULT_PROFILE,
         profile_names,
@@ -202,16 +207,22 @@ def run_tui(args: argparse.Namespace) -> int:
             new_name = _read_text("Name for new profile: ")
             if new_name is None:
                 return _BACK
-            if not renamed_old or not new_name:
+            # The naming decision is owned by services.profiles (issue #37,
+            # P1.2): the same uniqueness/emptiness rules the CLI applies, but
+            # this TUI reacts with print + return None and splits SAME /
+            # COLLISION_RENAMED / COLLISION_NEW into separate messages the way
+            # the inline version did — word-for-word unchanged.
+            outcome = classify_new_profile(names, renamed_old, new_name)
+            if outcome is NewProfileOutcome.EMPTY:
                 print("Profile names cannot be empty.")
                 return None
-            if renamed_old == new_name:
+            if outcome is NewProfileOutcome.SAME:
                 print("Profile names must be different.")
                 return None
-            if renamed_old in names and renamed_old != old_name:
+            if outcome is NewProfileOutcome.COLLISION_RENAMED:
                 print(f"Profile {renamed_old!r} already exists.")
                 return None
-            if new_name in names:
+            if outcome is NewProfileOutcome.COLLISION_NEW:
                 print(f"Profile {new_name!r} already exists.")
                 return None
             token = _read_token(f"Token for {provider_name} ({new_name}): ")
@@ -220,10 +231,11 @@ def run_tui(args: argparse.Namespace) -> int:
         new_name = _read_text("Name for new profile: ")
         if new_name is None:
             return _BACK
-        if not new_name:
+        outcome = validate_new_profile_name(new_name, names)
+        if outcome is NewProfileOutcome.EMPTY:
             print("Profile name cannot be empty.")
             return None
-        if new_name in names:
+        if outcome is NewProfileOutcome.COLLISION_NEW:
             print(f"Profile {new_name!r} already exists.")
             return None
         token = _read_token(f"Token for {provider_name} ({new_name}): ")

@@ -527,6 +527,19 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
                     return None
 
             if selected == "__new_profile__":
+                # The new-profile naming decision is owned by
+                # services.profiles (issue #37, P1.2): the CLI and TUI apply
+                # the SAME uniqueness/emptiness rules but react differently
+                # (raise vs print) and with different wording. The classifier
+                # returns a structured outcome; this handler maps it to the
+                # same raises the inline version used, so the CLI's messages
+                # are unchanged word-for-word.
+                from code_helper.services.profiles import (
+                    NewProfileOutcome,
+                    classify_new_profile,
+                    validate_new_profile_name,
+                )
+
                 if len(names) == 1:
                     current_name = _read_profile_name(
                         f"name for current profile ({names[0]}): "
@@ -538,9 +551,20 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
                     if new_name is None:
                         print("cancelled")
                         return 0
-                    if not current_name or not new_name:
+                    outcome = classify_new_profile(names, current_name, new_name)
+                    if outcome is NewProfileOutcome.EMPTY:
                         raise CodeHelperError("profile names cannot be empty")
-                    if current_name == new_name or new_name in names:
+                    # CLI merges SAME and COLLISION_NEW into one message
+                    # ("profile names must be unique"), matching the inline
+                    # version's `current_name == new_name or new_name in names`
+                    # check. COLLISION_RENAMED is intentionally NOT mapped
+                    # here: the pre-refactor CLI never checked that case in
+                    # this branch, and the downstream rename_profile call
+                    # surfaces it via its own "already exists" error.
+                    if outcome in (
+                        NewProfileOutcome.SAME,
+                        NewProfileOutcome.COLLISION_NEW,
+                    ):
                         raise CodeHelperError("profile names must be unique")
                     profile_rename_from = names[0]
                     profile_rename_to = current_name
@@ -550,7 +574,11 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
                     if profile_name is None:
                         print("cancelled")
                         return 0
-                    if not profile_name or profile_name in names:
+                    outcome = validate_new_profile_name(profile_name, names)
+                    if outcome in (
+                        NewProfileOutcome.EMPTY,
+                        NewProfileOutcome.COLLISION_NEW,
+                    ):
                         raise CodeHelperError(
                             "new profile name must be non-empty and unique"
                         )
