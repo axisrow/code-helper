@@ -1202,7 +1202,8 @@ def describe_wrapper(
     screen (issue #29) draws on the one wrapper that is the
     ``default_wrapper`` for its agent, so the eye lands on it without scanning
     the column. It is a PREFIX to ``spec.name`` (not a new column), so the
-    ``:12``/``:13`` alignment every other caller depends on is unchanged.
+    name field shrinks by the marker's width and the ``:12``/``:13`` column
+    alignment every other caller depends on is unchanged.
     ``list_wrappers`` passes ``default=False`` (the default) — the CLI list is
     a flat registry dump and the marker belongs only to the interactive
     screen that can CHANGE which wrapper is default.
@@ -1210,7 +1211,7 @@ def describe_wrapper(
     state = installed_word if installed else not_installed_word
     profile = f" [profile: {profile_name}]" if profile_name else ""
     mark = "● " if default else ""
-    return f"{mark}{spec.name:12} {state:13} {spec.description}{profile}"
+    return f"{mark}{spec.name:{12 - len(mark)}} {state:13} {spec.description}{profile}"
 
 
 def describe_all(

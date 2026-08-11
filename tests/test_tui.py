@@ -929,6 +929,46 @@ def test_main_screen_enter_sets_default_wrapper(monkeypatch):
 
 
 @pytest.mark.integration
+def test_main_screen_groups_colliding_managed_wrapper_under_installed_agent(
+    monkeypatch,
+):
+    """A managed wrapper installed under a preset alias of a DIFFERENT agent
+    (e.g. a codex wrapper named `glm`, which is a claude preset) is grouped
+    under the installed wrapper's agent — display grouping must agree with
+    what Enter resolves (installed-first), or the same row would sit under
+    one agent's section but launch another."""
+    from code_helper.cli.menu import Section
+    from code_helper.services.spec import build_spec
+    from code_helper.services.wrappers import install_wrapper
+
+    paths = Paths.default()
+    # Install a codex wrapper named "glm" (collides with the claude preset).
+    install_wrapper(
+        paths,
+        build_spec(agent="codex", provider="ollama", model="qwen3.5:9b", alias="glm"),
+    )
+
+    captured: list[list] = []
+
+    def _select(items, **_kwargs):
+        captured.append(list(items))
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+
+    main_items = captured[0]
+    section_of: dict[str, str] = {}
+    current = None
+    for e in main_items:
+        if isinstance(e, Section):
+            current = e.text
+        elif e[0] not in ("add", "profile", "settings", "quit"):
+            section_of[e[0]] = current
+    assert section_of["glm"] == "codex"
+
+
+@pytest.mark.integration
 def test_main_screen_no_dead_end_for_non_secret_wrapper(monkeypatch, capsys):
     """`t` on a non-secret wrapper (deepseek is literal) is a silent no-op —
     the old dead-end 'has no editable token.' screen is gone (issue #29)."""

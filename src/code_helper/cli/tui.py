@@ -280,10 +280,23 @@ def run_tui(args: argparse.Namespace) -> int:
                 return selected, token, None, None
 
     def _all_wrapper_specs():
-        """Presets plus managed constructor wrappers, without duplicate names."""
+        """Presets plus managed constructor wrappers, without duplicate names.
+
+        A managed wrapper installed under a preset alias of a DIFFERENT agent
+        (e.g. a codex wrapper named ``glm``, a claude preset) must be grouped
+        under the installed wrapper's agent — the same installed-first rule
+        :func:`_resolve_spec` uses on Enter, so display grouping and resolution
+        never disagree about which agent a row belongs to.
+        """
         paths = Paths.default()
-        specs = list(WRAPPERS)
-        known = {spec.name for spec in specs}
+        specs = []
+        known = set()
+        for spec in WRAPPERS:
+            # Installed wrapper wins over the same-named preset, exactly as
+            # _resolve_spec resolves on Enter.
+            resolved = spec_from_installed(paths, spec.name) or spec
+            specs.append(resolved)
+            known.add(resolved.name)
         for name in discover_managed(paths):
             if name not in known and (spec := spec_from_installed(paths, name)):
                 specs.append(spec)
