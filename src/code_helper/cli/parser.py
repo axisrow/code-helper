@@ -141,19 +141,19 @@ def _confirm_set_default(path, preview: str) -> bool:
 
 
 def _read_profile_name(prompt: str) -> str | None:
-    """Read one profile name, returning ``None`` on Ctrl-C (a soft cancel).
+    """Read one profile name, returning ``None`` on cancel (Esc or Ctrl-C).
 
-    Used by ``_handle_edit_token``'s interactive create/rename branches. A
-    bare ``KeyboardInterrupt`` here is translated to ``None`` (→ "cancelled"
-    → exit 0) rather than propagated: ``edit-token``'s picker already
-    distinguishes hard cancel (Ctrl-C at the menu, propagated) from soft
-    (Esc, exit 0), and a Ctrl-C at the follow-up text prompt should match
-    the soft path, not crash the CLI.
+    Used by ``_handle_edit_token``'s interactive create/rename branches.
+    ``edit-token``'s picker already distinguishes hard cancel (Ctrl-C at the
+    menu, propagated) from soft (Esc, exit 0); a cancel at this follow-up
+    text prompt always matches the soft path instead, so ``MenuCancelled``
+    is caught regardless of its ``hard`` flag.
     """
+    from code_helper.cli.menu import MenuCancelled, read_line
+
     try:
-        return input(prompt).strip()
-    except KeyboardInterrupt:
-        print()
+        return read_line(prompt)
+    except MenuCancelled:
         return None
 
 

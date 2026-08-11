@@ -76,9 +76,10 @@ class TuiSession:
     implicit channels: the ``args`` Namespace (mutated 21 times before
     dispatch), the ``_tab_provider_cache`` dict, and Python closures. This
     class makes those channels EXPLICIT as ``self.args`` and
-    ``self._tab_cache``, so the coupling is visible and the methods are
-    individually testable. ``run`` is the main loop; every ``_run_*`` is a
-    screen; the ``_``-prefixed helpers are UI primitives shared across screens.
+    ``self._tab_provider``/``self._tab_label``, so the coupling is visible and
+    the methods are individually testable. ``run`` is the main loop; every
+    ``_run_*`` is a screen; the ``_``-prefixed helpers are UI primitives
+    shared across screens.
 
     The dispatch contract is unchanged: ``_run(handler)`` still calls
     ``handler(self.args)``, so the CLI handlers (``_handle_add`` etc.) see
@@ -88,7 +89,7 @@ class TuiSession:
     view the handlers themselves consume.
     """
 
-    __slots__ = ("args", "_tab_cache")
+    __slots__ = ("args", "_tab_provider", "_tab_label")
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -97,7 +98,8 @@ class TuiSession:
         # re-evaluated every redraw frame — so they read this cache instead
         # of re-deriving per frame. Refreshed once per main-loop iteration
         # and again by `_on_tab` the moment Tab changes the selection.
-        self._tab_cache: dict[str, str | None] = {"value": None, "label": ""}
+        self._tab_provider: str | None = None
+        self._tab_label: str = ""
 
     # --- UI primitives ---------------------------------------------------
 
@@ -698,7 +700,7 @@ class TuiSession:
         from code_helper.services.state import set_active_selection
 
         paths = Paths.default()
-        provider = self._tab_cache["value"]
+        provider = self._tab_provider
         if not provider:
             return
         names = list(profile_names(paths, provider))
@@ -711,18 +713,15 @@ class TuiSession:
 
     def _refresh_active_label(self) -> None:
         """Resolve the active provider and its rendered label, once."""
-        value = self._resolve_tab_provider()
-        self._tab_cache["value"] = value
-        self._tab_cache["label"] = self._active_label(value)
+        self._tab_provider = self._resolve_tab_provider()
+        self._tab_label = self._active_label(self._tab_provider)
 
     def _main_prompt(self) -> str:
         """Live main-menu header, showing the active provider/profile."""
-        label = self._tab_cache["label"]
-        return f"code-helper — {label}" if label else "code-helper"
+        return f"code-helper — {self._tab_label}" if self._tab_label else "code-helper"
 
     def _profile_row_label(self) -> str:
-        label = self._tab_cache["label"]
-        return f"Profile: {label}" if label else "Profile"
+        return f"Profile: {self._tab_label}" if self._tab_label else "Profile"
 
     # --- main loop -------------------------------------------------------
 
@@ -735,7 +734,7 @@ class TuiSession:
         try:
             while True:
                 self._refresh_active_label()
-                tab_provider = self._tab_cache["value"]
+                tab_provider = self._tab_provider
                 paths = Paths.default()
                 # The wrapper list IS the main screen (issue #29): grouped by
                 # agent via `Section`, with `●` on the default wrapper and `t`

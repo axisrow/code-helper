@@ -70,7 +70,7 @@ def classify_new_profile(
     # current_name == existing[0] is the benign "renaming the sole profile to
     # itself" case (existing[0] IS the profile we are renaming FROM); only a
     # DIFFERENT existing entry constitutes a collision.
-    if current_name in existing and (not existing or current_name != existing[0]):
+    if current_name in existing and current_name != existing[0]:
         return NewProfileOutcome.COLLISION_RENAMED
     if new_name in existing:
         return NewProfileOutcome.COLLISION_NEW

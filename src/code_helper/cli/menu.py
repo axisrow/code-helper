@@ -204,18 +204,6 @@ def _translate(
     return "OTHER"
 
 
-#: One-byte pushback slot, spanning :func:`_read_key_raw` calls.
-#:
-#: Kept as a module-level alias for backwards compatibility —
-#: :class:`KeyReader` now owns the real slot as an instance attribute, and
-#: :func:`_read_key_raw` delegates to a shared default instance. Tests that
-#: drove the pushback behaviour through ``menu._pending_byte`` are updated to
-#: use :class:`KeyReader` directly; this attribute remains so any external
-#: caller reading the old name still sees a value (``None`` — the default
-#: instance is fresh each call, so nothing is ever parked here anymore).
-_pending_byte: str | None = None
-
-
 class KeyReader:
     """Reads one raw keypress at a time from a real TTY, owning its pushback slot.
 
