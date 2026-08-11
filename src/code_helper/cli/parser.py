@@ -160,195 +160,185 @@ def _parse_shape(raw: str | None):
         raise CodeHelperError(f"unknown shape: {raw} (valid: {valid})") from None
 
 
-def _handle_add(args: argparse.Namespace) -> int:
-    """Install (or update) a wrapper — from a preset, or from the three axes.
+def _add_resolve_provider(req, paths):
+    """Resolve the constructor-form provider (axes branch only).
 
-    Disambiguation rule (deterministic, so it survives future name overlaps):
+    The ONE substitution point: every downstream reader of ``base_url``
+    (``list_models``, ``resolve_shape``/``build_spec``, the eventual renderer)
+    reads it off the returned provider object, so subbing it in here — before
+    ``--list-models``, before ``build_spec`` — is enough for all of them to
+    see the right value. ``with_auth`` is the matching substitution for auth
+    (``--auth secret``), same reasoning, same call order.
 
-    1. ``--agent``/``--provider`` given -> constructor; ``name`` must be absent.
-    2. otherwise ``name`` is a PRESET, even if an agent happens to share
-       the name.
-    3. a bare ``name`` that is not a preset but IS an agent gets a message
-       showing the constructor form rather than a plain "unknown".
+    Raises:
+        CodeHelperError: ``--agent``/``--provider`` not given together.
     """
-    from code_helper.cli.requests import AddRequest
     from code_helper.errors import CodeHelperError
     from code_helper.services.model import (
         get_agent,
         get_provider,
-        resolve_shape,
         with_auth,
         with_base_url,
     )
+
+    if not req.agent or not req.provider:
+        raise CodeHelperError("--agent and --provider must be given together")
+    agent = get_agent(req.agent)
+    provider = with_base_url(get_provider(req.provider), req.base_url)
+    provider = with_auth(provider, want_secret=req.auth == "secret")
+    return agent, provider
+
+
+def _add_list_models_or_none(req, paths, agent, provider, profile_name):
+    """Run ``--list-models`` if requested, printing models and returning 0.
+
+    Returns ``None`` when ``--list-models`` was not requested, so the caller
+    falls through to spec construction. The token for discovery follows the
+    env → cache (FIXED provider only) → unauthenticated fallback — never a
+    prompt, so an optional listing never blocks a script on stdin.
+    """
+    from code_helper.errors import CodeHelperError
     from code_helper.services.models_api import list_models
-    from code_helper.services.paths import Paths
+    from code_helper.services.secrets import token_for_discovery
+
+    if not req.list_models:
+        return None
+    result = list_models(
+        provider,
+        token=token_for_discovery(paths, provider, profile_name=profile_name),
+    )
+    if not result.ok:
+        raise CodeHelperError(result.error)
+    for available in result.models:
+        print(available)
+    return 0
+
+
+def _add_resolve_spec(req, paths, agent, provider, profile_name):
+    """Build the ``WrapperSpec`` — constructor path.
+
+    Resolves compatibility BEFORE anything interactive: a bad pairing must
+    never reach a secret prompt for a wrapper that will not be written.
+    """
+    from code_helper.errors import CodeHelperError
+    from code_helper.services.model import resolve_shape
+    from code_helper.services.spec import build_spec, suggest_alias
+
+    if not req.model:
+        raise CodeHelperError(
+            f"--model is required (try: code-helper add --agent {agent.name} "
+            f"--provider {provider.name} --list-models)"
+        )
+    shape = _parse_shape(req.shape)
+    resolve_shape(agent, provider, preferred=shape)
+    return build_spec(
+        agent=agent,
+        provider=provider,
+        model=req.model,
+        alias=req.alias or suggest_alias(req.model, agent.name, profile_name),
+        shape=shape,
+        profile_name=profile_name,
+    )
+
+
+def _add_spec_from_preset(req, paths, profile_name):
+    """Build the ``WrapperSpec`` — preset path.
+
+    Disambiguation: ``name`` that is not a preset but IS an agent gets a
+    teaching message showing the constructor form rather than a plain
+    "unknown". Issue #23 preset-branch fallback: pick up the stored active
+    profile for the preset's own provider when ``--profile`` is absent.
+
+    Raises:
+        CodeHelperError: unknown preset/agent name.
+    """
+    from code_helper.errors import CodeHelperError
+    from code_helper.services.model import get_agent
+    from code_helper.services.secrets import valid_active_profile
+    from code_helper.services.spec import get_preset, spec_from_preset
+
+    if not req.name:
+        raise CodeHelperError("give a preset name, or --agent with --provider")
+    try:
+        preset = get_preset(req.name)
+    except CodeHelperError as unknown_preset:
+        # A bare agent name is a likely mistake worth teaching, not just
+        # rejecting.
+        try:
+            get_agent(req.name)
+        except CodeHelperError:
+            # Re-raise get_preset's own message: it names the known presets,
+            # and that hint matters most in exactly this case.
+            raise unknown_preset from None
+        raise CodeHelperError(
+            f"unknown wrapper name: {req.name} — {req.name} is an agent; "
+            f"try: code-helper add --agent {req.name} --provider ollama "
+            f"--model <model>"
+        ) from None
+    if profile_name is None:
+        profile_name = valid_active_profile(paths, preset.provider)
+    return spec_from_preset(
+        preset,
+        model_override=req.model,
+        alias_override=req.alias,
+        profile_name=profile_name,
+    )
+
+
+def _add_resolve_token(spec, req, paths, profile_name):
+    """Resolve the token for ``spec``: pre-typed → env/cache/prompt → literal.
+
+    Returns ``(token, resolved)`` where ``resolved`` is the
+    :class:`ResolvedToken` for a secret spec (or ``None`` for literal/none
+    auth), so the caller can decide whether to cache it.
+    """
+    from code_helper.errors import CodeHelperError
+    from code_helper.services.secrets import (
+        SOURCE_PROMPT,
+        ResolvedToken,
+        resolve_token,
+    )
+
+    if spec.auth != "secret":
+        return spec.auth_value, None
+    if req.profile_token is not None:
+        if not req.profile_token:
+            raise CodeHelperError("no token entered — aborting")
+        resolved = ResolvedToken(req.profile_token, SOURCE_PROMPT)
+    else:
+        resolved = resolve_token(
+            env_var=spec.token_env_var,
+            prompt=f"{spec.name} token ({spec.token_env_var}): ",
+            paths=paths,
+            provider_name=spec.provider.name,
+            profile_name=profile_name,
+            base_url_policy=spec.provider.base_url_policy,
+        )
+    return resolved.value, resolved
+
+
+def _add_install_and_cache(spec, req, paths, token, resolved, profile_name):
+    """Install the wrapper, then keep the credential cache in step.
+
+    Caches only once ``install_wrapper`` has returned WITHOUT raising: a
+    refusal (foreign-file guard, discard-only-secret guard) raises
+    :class:`CodeHelperError` earlier and skips this entirely. See the inline
+    comments for the staleness-invalidation rule (env-sourced token that
+    disagrees with the cache → invalidate, not overwrite).
+
+    Returns ``True`` iff anything was written.
+    """
     from code_helper.services.secrets import (
         DEFAULT_PROFILE,
         SOURCE_ENV,
-        SOURCE_PROMPT,
-        ResolvedToken,
         cache_freshly_typed_token,
         credential_for,
         invalidate_cached_credential,
         rename_profile,
-        resolve_token,
-        token_for_discovery,
-        valid_active_profile,
-    )
-    from code_helper.services.spec import (
-        build_spec,
-        get_preset,
-        spec_from_preset,
-        suggest_alias,
     )
     from code_helper.services.wrappers import install_wrapper
 
-    paths = Paths.default()
-    # Build the typed request once: every downstream read goes through these
-    # fields instead of 15 separate ``getattr(args, ...)`` calls. The TUI
-    # fills only the fields its flow uses, so ``from_namespace`` defaults
-    # absent attributes to ``None``/``False`` — the same contract the old
-    # ``getattr`` reads encoded.
-    req = AddRequest.from_namespace(args)
     dry_run = req.dry_run
-    agent_name = req.agent
-    provider_name = req.provider
-    name = req.name
-    model = req.model
-    alias = req.alias
-    base_url = req.base_url
-    auth = req.auth
-    profile_name = req.profile
-    profile_token = req.profile_token
-    profile_rename_from = req.profile_rename_from
-    profile_rename_to = req.profile_rename_to
-    using_axes = agent_name is not None or provider_name is not None
-
-    # Issue #23: an explicit --profile always wins; otherwise the CLI picks up
-    # the TUI's stored active profile for this provider as a default, if it
-    # still exists (valid_active_profile cross-checks against profile_names).
-    # The implicit injection applies ONLY to the provider's own default
-    # endpoint: a caller-supplied --base-url names a host the stored active
-    # profile was never authorized for, so the caller must opt in explicitly
-    # with --profile (or an env token) there — never a silent persisted
-    # pointer. The constructor branch knows the provider immediately; the
-    # preset branch (no custom base-url possible) falls back right after
-    # get_preset, below.
-    if profile_name is None and provider_name and base_url is None:
-        profile_name = valid_active_profile(paths, provider_name)
-
-    if using_axes and name:
-        raise CodeHelperError(
-            "give either a preset name or --agent/--provider, not both"
-        )
-
-    if not using_axes and base_url:
-        # Checked before get_preset so the message is about the flag, not
-        # about an unrecognised preset name.
-        raise CodeHelperError(
-            "--base-url applies to the constructor form only "
-            "(--agent/--provider) — a preset carries its own provider"
-        )
-
-    if not using_axes and auth:
-        raise CodeHelperError(
-            "--auth applies to the constructor form only "
-            "(--agent/--provider) — a preset carries its own provider"
-        )
-
-    if using_axes:
-        if not agent_name or not provider_name:
-            raise CodeHelperError("--agent and --provider must be given together")
-        agent = get_agent(agent_name)
-        # The ONE substitution point: every downstream reader of base_url
-        # (list_models below, resolve_shape/build_spec, the eventual
-        # renderer) reads it off this provider object, so subbing it in here
-        # — before --list-models, before build_spec — is enough for all of
-        # them to see the right value. with_auth is the matching substitution
-        # for auth (--auth secret), same reasoning, same call order.
-        provider = with_base_url(get_provider(provider_name), base_url)
-        provider = with_auth(provider, want_secret=auth == "secret")
-
-        if req.list_models:
-            result = list_models(
-                provider,
-                token=token_for_discovery(paths, provider, profile_name=profile_name),
-            )
-            if not result.ok:
-                raise CodeHelperError(result.error)
-            for available in result.models:
-                print(available)
-            return 0
-
-        if not model:
-            raise CodeHelperError(
-                f"--model is required (try: code-helper add --agent {agent.name} "
-                f"--provider {provider.name} --list-models)"
-            )
-
-        shape = _parse_shape(req.shape)
-        # Resolve compatibility BEFORE anything interactive: a bad pairing must
-        # never reach a secret prompt for a wrapper that will not be written.
-        resolve_shape(agent, provider, preferred=shape)
-        spec = build_spec(
-            agent=agent,
-            provider=provider,
-            model=model,
-            alias=alias or suggest_alias(model, agent.name, profile_name),
-            shape=shape,
-            profile_name=profile_name,
-        )
-    else:
-        if not name:
-            raise CodeHelperError("give a preset name, or --agent with --provider")
-        try:
-            preset = get_preset(name)
-        except CodeHelperError as unknown_preset:
-            # A bare agent name is a likely mistake worth teaching, not just
-            # rejecting.
-            try:
-                agent = get_agent(name)
-            except CodeHelperError:
-                # Re-raise get_preset's own message: it names the known
-                # presets, and that hint matters most in exactly this case.
-                raise unknown_preset from None
-            raise CodeHelperError(
-                f"unknown wrapper name: {name} — {name} is an agent; "
-                f"try: code-helper add --agent {name} --provider ollama "
-                f"--model <model>"
-            ) from None
-        # Issue #23 preset-branch fallback (the constructor branch handled the
-        # axes case above): pick up the stored active profile for the preset's
-        # own provider when --profile is absent, before profile_name feeds
-        # spec_from_preset / suggest_alias.
-        if profile_name is None:
-            profile_name = valid_active_profile(paths, preset.provider)
-        spec = spec_from_preset(
-            preset,
-            model_override=model,
-            alias_override=alias,
-            profile_name=profile_name,
-        )
-
-    if spec.auth == "secret":
-        if profile_token is not None:
-            if not profile_token:
-                raise CodeHelperError("no token entered — aborting")
-            resolved = ResolvedToken(profile_token, SOURCE_PROMPT)
-        else:
-            resolved = resolve_token(
-                env_var=spec.token_env_var,
-                prompt=f"{spec.name} token ({spec.token_env_var}): ",
-                paths=paths,
-                provider_name=spec.provider.name,
-                profile_name=profile_name,
-                base_url_policy=spec.provider.base_url_policy,
-            )
-        token = resolved.value
-    else:
-        resolved = None
-        token = spec.auth_value
-
     wrote = install_wrapper(
         paths,
         spec,
@@ -357,14 +347,6 @@ def _handle_add(args: argparse.Namespace) -> int:
         force=req.force,
         confirm=_confirm_overwrite,
     )
-    # Cache only once install_wrapper has returned WITHOUT raising: a refusal
-    # (foreign-file guard, discard-only-secret guard) raises CodeHelperError
-    # and skips this line entirely, so a token typed for an install that never
-    # happened is never persisted. ``wrote`` itself is deliberately NOT part
-    # of the gate — ``wrote=False`` means "install_wrapper no-opped because
-    # the content was already byte-identical", not a refusal, and the token
-    # that produced that byte-identical content is exactly the one worth
-    # having cached.
     if resolved is not None:
         cache_profile = profile_name or DEFAULT_PROFILE
         cache_freshly_typed_token(
@@ -375,43 +357,103 @@ def _handle_add(args: argparse.Namespace) -> int:
             source=resolved.source,
             dry_run=dry_run,
         )
-        # A non-prompt source (env/cache) is never itself written to the
-        # cache — see cache_freshly_typed_token's docstring, an env value
-        # already outlives this process. But an env-sourced token that
-        # disagrees with what's cached for this provider means the cache is
-        # stale relative to what's actually installed: an env-free run later
-        # would resolve that stale cache value and silently revert the
-        # wrapper to it (a rotated/revoked credential resurrected with no
-        # confirmation). Invalidate rather than "helpfully" overwrite it with
-        # the env value — env values aren't meant to be cached, and dropping
-        # the stale entry is enough to make the next env-free run fall
-        # through to a fresh prompt instead of reusing either value.
-        #
-        # Deliberately NOT gated on ``wrote``: staleness is a fact about
-        # whether the cache disagrees with the token just resolved, not about
-        # whether THIS call happened to change any bytes. A byte-identical
-        # reinstall (``wrote=False`` — the wrapper already has this exact env
-        # token) with a stale, DIFFERENT cache entry is just as much a
-        # staleness hazard as a real write: the entry is still there, still
-        # wrong, and still waiting for an env-free run to resurrect it. Only
-        # ``dry_run`` is excluded — a dry run changes nothing on disk, so
-        # there is nothing yet to reconcile the cache against.
+        # A non-prompt source (env/cache) is never itself written to the cache
+        # — see cache_freshly_typed_token's docstring. But an env-sourced
+        # token that disagrees with what's cached means the cache is stale
+        # relative to what's installed: invalidate rather than overwrite.
+        # Deliberately NOT gated on ``wrote`` — staleness is about whether the
+        # cache disagrees with the resolved token, not whether this call
+        # changed bytes. Only ``dry_run`` is excluded.
         if resolved.source == SOURCE_ENV and not dry_run:
             cached = credential_for(paths, spec.provider.name, cache_profile)
             if cached and cached != token:
                 invalidate_cached_credential(paths, spec.provider.name, cache_profile)
     if (
         resolved is not None
-        and profile_rename_from
-        and profile_rename_to
+        and req.profile_rename_from
+        and req.profile_rename_to
         and not dry_run
     ):
         rename_profile(
             paths,
             spec.provider.name,
-            profile_rename_from,
-            profile_rename_to,
+            req.profile_rename_from,
+            req.profile_rename_to,
         )
+    return wrote
+
+
+def _handle_add(args: argparse.Namespace) -> int:
+    """Install (or update) a wrapper — from a preset, or from the three axes.
+
+    Disambiguation rule (deterministic, so it survives future name overlaps):
+
+    1. ``--agent``/``--provider`` given -> constructor; ``name`` must be absent.
+    2. otherwise ``name`` is a PRESET, even if an agent happens to share
+       the name.
+    3. a bare ``name`` that is not a preset but IS an agent gets a message
+       showing the constructor form rather than a plain "unknown".
+
+    Thin orchestrator over the ``_add_*`` pipeline: validate flags → resolve
+    provider (axes) → early ``--list-models`` return → build spec → resolve
+    token → install + cache. Each stage lives in its own function so the
+    branching surface stays readable; see the individual docstrings for the
+    invariants each carries.
+    """
+    from code_helper.cli.requests import AddRequest
+    from code_helper.errors import CodeHelperError
+    from code_helper.services.paths import Paths
+    from code_helper.services.secrets import valid_active_profile
+
+    paths = Paths.default()
+    req = AddRequest.from_namespace(args)
+    using_axes = req.agent is not None or req.provider is not None
+
+    # Issue #23: an explicit --profile always wins; otherwise the CLI picks up
+    # the TUI's stored active profile for this provider as a default, if it
+    # still exists (valid_active_profile cross-checks against profile_names).
+    # The implicit injection applies ONLY to the provider's own default
+    # endpoint: a caller-supplied --base-url names a host the stored active
+    # profile was never authorized for, so the caller must opt in explicitly
+    # with --profile (or an env token) there — never a silent persisted
+    # pointer. The constructor branch knows the provider immediately; the
+    # preset branch (no custom base-url possible) falls back inside
+    # _add_spec_from_preset.
+    profile_name = req.profile
+    if profile_name is None and req.provider and req.base_url is None:
+        profile_name = valid_active_profile(paths, req.provider)
+
+    if using_axes and req.name:
+        raise CodeHelperError(
+            "give either a preset name or --agent/--provider, not both"
+        )
+    if not using_axes and req.base_url:
+        # Checked before get_preset so the message is about the flag, not
+        # about an unrecognised preset name.
+        raise CodeHelperError(
+            "--base-url applies to the constructor form only "
+            "(--agent/--provider) — a preset carries its own provider"
+        )
+    if not using_axes and req.auth:
+        raise CodeHelperError(
+            "--auth applies to the constructor form only "
+            "(--agent/--provider) — a preset carries its own provider"
+        )
+
+    if using_axes:
+        agent, provider = _add_resolve_provider(req, paths)
+        early = _add_list_models_or_none(req, paths, agent, provider, profile_name)
+        if early is not None:
+            return early
+        spec = _add_resolve_spec(req, paths, agent, provider, profile_name)
+    else:
+        spec = _add_spec_from_preset(req, paths, profile_name)
+        # _add_spec_from_preset may have filled profile_name via its own
+        # active-profile fallback; re-read it off the built spec.
+        profile_name = spec.profile_name
+
+    token, resolved = _add_resolve_token(spec, req, paths, profile_name)
+    wrote = _add_install_and_cache(spec, req, paths, token, resolved, profile_name)
     if not wrote:
         print("no changes")
     return 0
