@@ -206,74 +206,91 @@ def _translate(
 
 #: One-byte pushback slot, spanning :func:`_read_key_raw` calls.
 #:
-#: :func:`_translate` peeks one byte past a keypress to detect the LF half of
-#: a CRLF Enter. When that byte turns out to be a real next keypress instead,
-#: it cannot be un-read from the fd — so it is parked here and the NEXT call
-#: consumes it before touching the fd again. Module-level (not a local) for
-#: exactly that reason: the byte has to outlive the call that read it.
-#:
-#: Single-byte is sufficient because only the Enter branch ever pushes back,
-#: and it pushes at most one byte per keypress — which the next call drains
-#: before it can read (and therefore push back) anything else.
+#: Kept as a module-level alias for backwards compatibility —
+#: :class:`KeyReader` now owns the real slot as an instance attribute, and
+#: :func:`_read_key_raw` delegates to a shared default instance. Tests that
+#: drove the pushback behaviour through ``menu._pending_byte`` are updated to
+#: use :class:`KeyReader` directly; this attribute remains so any external
+#: caller reading the old name still sees a value (``None`` — the default
+#: instance is fresh each call, so nothing is ever parked here anymore).
 _pending_byte: str | None = None
 
 
-def _read_key_raw(stream=sys.stdin) -> str:
-    """Read one raw keypress from a real TTY, fully parsed via :func:`_translate`.
+class KeyReader:
+    """Reads one raw keypress at a time from a real TTY, owning its pushback slot.
 
-    Reads via ``os.read(fd, 1)``, NOT ``stream.read(1)``. ``stream`` is a
-    buffered ``TextIOWrapper``: a single ``.read(1)`` call is free to pull
-    more than one byte off the underlying fd into its own internal buffer
-    before decoding and returning the first character. ``select.select``
-    only ever sees the fd itself — it has no visibility into that internal
-    buffer, so a byte already sitting in the wrapper's buffer never shows up
-    as "ready" again. Reading raw bytes straight from the fd sidesteps this:
-    every byte ``select`` reports ready is read immediately, never parked in
-    a layer ``select`` can't see.
+    Replaces the former module-level ``_pending_byte`` global + ``_read_key_raw``
+    function pair. The one-byte pushback slot is per-instance state so two
+    readers (e.g. a real TTY reader and a test fake) cannot leak bytes into
+    each other — the module global they replaced was a single shared slot,
+    which worked only because exactly one reader was ever active.
+
+    Reads via ``os.read(fd, 1)``, NOT ``stream.read(1)``: ``stream`` is a
+    buffered ``TextIOWrapper`` whose internal buffer ``select.select`` cannot
+    see, so a byte already sitting in that buffer never shows up as "ready"
+    again. Reading raw bytes straight from the fd sidesteps this.
 
     A byte :func:`_translate` peeked but did not consume is parked in
-    :data:`_pending_byte` and drained by the next call — see there.
+    ``self._pending`` and drained by the next call. Single-byte is sufficient
+    because only the Enter branch ever pushes back, and it pushes at most one
+    byte per keypress — which the next call drains before it can read (and
+    therefore push back) anything else.
 
-    .. note::
-       Bytes are decoded ONE AT A TIME with ``errors="replace"``, so a
-       multi-byte UTF-8 character (e.g. a Cyrillic letter) decodes to U+FFFD
-       per byte and translates to several ``"OTHER"`` keys. That is harmless
-       here — the menu only acts on ASCII keys and ignores ``"OTHER"`` — but
-       this function is NOT usable as-is for reading text; that would need
-       accumulating continuation bytes into a full character first.
+    Bytes are decoded ONE AT A TIME with ``errors="replace"``, so a multi-byte
+    UTF-8 character decodes to U+FFFD per byte and translates to several
+    ``"OTHER"`` keys. That is harmless here — the menu only acts on ASCII keys
+    and ignores ``"OTHER"`` — but this reader is NOT usable for reading text.
     """
-    global _pending_byte
 
-    import select
-    import termios
-    import tty
+    __slots__ = ("_stream", "_pending")
 
-    fd = stream.fileno()
-    old = termios.tcgetattr(fd)
+    def __init__(self, stream=sys.stdin) -> None:
+        self._stream = stream
+        self._pending: str | None = None
 
-    def _read_more(timeout: float) -> str | None:
-        global _pending_byte
-        if _pending_byte is not None:
-            b, _pending_byte = _pending_byte, None
-            return b
-        ready, _, _ = select.select([fd], [], [], timeout)
-        if not ready:
-            return None
-        return os.read(fd, 1).decode("utf-8", errors="replace")
+    def read(self) -> str:
+        """Read one fully-parsed keypress via :func:`_translate`."""
+        import select
+        import termios
+        import tty
 
-    def _push_back(b: str) -> None:
-        global _pending_byte
-        _pending_byte = b
+        stream = self._stream
+        fd = stream.fileno()
+        old = termios.tcgetattr(fd)
 
-    try:
-        tty.setraw(fd)
-        if _pending_byte is not None:
-            first, _pending_byte = _pending_byte, None
-        else:
-            first = os.read(fd, 1).decode("utf-8", errors="replace")
-        return _translate(first, _read_more, _push_back)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        def _read_more(timeout: float) -> str | None:
+            if self._pending is not None:
+                b, self._pending = self._pending, None
+                return b
+            ready, _, _ = select.select([fd], [], [], timeout)
+            if not ready:
+                return None
+            return os.read(fd, 1).decode("utf-8", errors="replace")
+
+        def _push_back(b: str) -> None:
+            self._pending = b
+
+        try:
+            tty.setraw(fd)
+            if self._pending is not None:
+                first, self._pending = self._pending, None
+            else:
+                first = os.read(fd, 1).decode("utf-8", errors="replace")
+            return _translate(first, _read_more, _push_back)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _read_key_raw(stream=sys.stdin) -> str:
+    """Back-compat wrapper: one keypress via a fresh :class:`KeyReader`.
+
+    Kept so existing callers (and ``select_from_menu``'s default ``read_key``
+    parameter) keep working unchanged. Each call constructs its own reader, so
+    the pushback slot does not span calls — that matches the pre-refactor
+    behaviour for every caller except the pushback test, which now drives
+    :class:`KeyReader` directly.
+    """
+    return KeyReader(stream).read()
 
 
 def _normalize(

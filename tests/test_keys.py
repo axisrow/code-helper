@@ -263,18 +263,18 @@ def test_read_key_raw_pushback_survives_into_the_next_call(monkeypatch):
 
     This is the half of the Enter fix that ``_translate`` alone cannot prove:
     a byte peeked past a keypress cannot be un-read from the fd, so it is
-    parked in the module-level pending slot and drained by the following
-    call. Without that slot, "Enter then Down" typed fast loses the Down.
+    parked in the reader's pending slot and drained by the following call.
+    Without that slot, "Enter then Down" typed fast loses the Down.
 
-    Drives the real ``_read_key_raw`` over a fake fd (a pipe) with the
-    ``termios``/``tty`` calls stubbed out, since there is no TTY under pytest.
+    Drives a single :class:`KeyReader` (whose pushback slot spans calls)
+    over a fake fd (a pipe) with the ``termios``/``tty`` calls stubbed out,
+    since there is no TTY under pytest.
     """
-    import code_helper.cli.menu as menu
+    from code_helper.cli.menu import KeyReader
 
     read_fd, write_fd = os.pipe()
     os.write(write_fd, b"\r\x1b[B")  # Enter, immediately followed by Down
 
-    monkeypatch.setattr(menu, "_pending_byte", None)
     monkeypatch.setitem(sys.modules, "termios", _StubTermios())
     monkeypatch.setitem(sys.modules, "tty", _StubTty())
 
@@ -282,13 +282,13 @@ def test_read_key_raw_pushback_survives_into_the_next_call(monkeypatch):
         def fileno(self):
             return read_fd
 
+    reader = KeyReader(_FakeStream())
     try:
-        assert menu._read_key_raw(_FakeStream()) == "ENTER"
+        assert reader.read() == "ENTER"
         # The ESC that began the Down sequence was pushed back, not eaten.
-        assert menu._pending_byte == "\x1b"
-        assert menu._read_key_raw(_FakeStream()) == "DOWN"
-        assert menu._pending_byte is None
+        assert reader._pending == "\x1b"
+        assert reader.read() == "DOWN"
+        assert reader._pending is None
     finally:
         os.close(read_fd)
         os.close(write_fd)
-        menu._pending_byte = None
