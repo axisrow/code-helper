@@ -599,6 +599,25 @@ def test_select_from_menu_section_header_is_rendered_without_digit():
 
 
 @pytest.mark.unit
+def test_select_from_menu_numbering_continues_across_sections():
+    # Numbering is continuous across section headers: an item in the second
+    # section gets the next digit, not a restart at 1. A header is not an item,
+    # so it must not reset the digit counter.
+    lines = []
+    select_from_menu(
+        [Section("g1"), "a", "b", Section("g2"), "c"],
+        read_key=_fake_keys(["ENTER"]),
+        print_fn=lines.append,
+    )
+    a_line = next(line for line in lines if line.lstrip().startswith("1"))
+    b_line = next(line for line in lines if line.lstrip().startswith("2"))
+    c_line = next(line for line in lines if line.lstrip().startswith("3"))
+    assert "a" in a_line
+    assert "b" in b_line
+    assert "c" in c_line
+
+
+@pytest.mark.unit
 def test_select_from_menu_navigation_skips_section_headers():
     # Two sections, two items. The cursor moves over the SELECTABLE items only
     # — ENTER (no nav) picks the first selectable, UP wraps to the last
