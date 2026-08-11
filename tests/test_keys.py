@@ -258,7 +258,7 @@ def test_unrelated_key_is_other():
 
 
 @pytest.mark.unit
-def test_read_key_raw_pushback_survives_into_the_next_call(monkeypatch):
+def test_key_reader_pushback_survives_into_the_next_call(monkeypatch):
     """The byte pushed back by one keypress is returned by the NEXT one.
 
     This is the half of the Enter fix that ``_translate`` alone cannot prove:
@@ -292,3 +292,57 @@ def test_read_key_raw_pushback_survives_into_the_next_call(monkeypatch):
     finally:
         os.close(read_fd)
         os.close(write_fd)
+
+
+@pytest.mark.unit
+def test_select_from_menu_default_reader_preserves_pushback_across_calls(monkeypatch):
+    """``select_from_menu``'s DEFAULT ``read_key`` must share one reader.
+
+    Regression test for the production TUI shape: the user hits Enter on one
+    menu, then IMMEDIATELY types Down intending it for whichever menu opens
+    next (``TuiSession._pick`` calls ``select_from_menu`` fresh each time a
+    new screen is shown). Enter's CRLF-pair peek parks that Down's leading
+    ESC byte in the reader's pushback slot; the byte must be drained by the
+    FIRST read of the NEXT ``select_from_menu`` call, not discarded.
+
+    Before the fix, ``read_key=None`` defaulted to ``_read_key_raw``, which
+    builds a brand-new, throwaway :class:`KeyReader` on every call — so this
+    pushback byte was silently dropped at exactly this boundary, exactly
+    where the pre-refactor module-level ``_pending_byte`` global did not
+    drop it. Every other test in this suite injects ``read_key`` directly
+    and would never catch a regression at this specific boundary.
+    """
+    import code_helper.cli.menu as menu_module
+    from code_helper.cli.menu import select_from_menu
+
+    monkeypatch.setattr(menu_module, "_default_key_reader", None)
+
+    read_fd, write_fd = os.pipe()
+    # First menu: Enter selects "only" immediately, but the immediately
+    # following Down (intended for the SECOND menu) rides along on the same
+    # write and gets peeked-and-parked by Enter's CRLF check.
+    # Second menu: that parked Down must be seen as this call's first key.
+    os.write(write_fd, b"\r\x1b[B\r")
+
+    monkeypatch.setitem(sys.modules, "termios", _StubTermios())
+    monkeypatch.setitem(sys.modules, "tty", _StubTty())
+
+    class _FakeStream:
+        def fileno(self):
+            return read_fd
+
+    monkeypatch.setattr(sys, "stdin", _FakeStream())
+    try:
+        first_result = select_from_menu(
+            ["only"], read_key=None, print_fn=lambda _: None
+        )
+        second_result = select_from_menu(
+            ["first", "second"], read_key=None, print_fn=lambda _: None
+        )
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+    assert first_result == "only"
+    # If the parked Down was dropped, the immediate Enter selects "first".
+    assert second_result == "second"

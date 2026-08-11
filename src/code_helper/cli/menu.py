@@ -270,15 +270,44 @@ class KeyReader:
 
 
 def _read_key_raw(stream=sys.stdin) -> str:
-    """Back-compat wrapper: one keypress via a fresh :class:`KeyReader`.
+    """One keypress via a fresh, throwaway :class:`KeyReader`.
 
-    Kept so existing callers (and ``select_from_menu``'s default ``read_key``
-    parameter) keep working unchanged. Each call constructs its own reader, so
-    the pushback slot does not span calls — that matches the pre-refactor
-    behaviour for every caller except the pushback test, which now drives
-    :class:`KeyReader` directly.
+    NOT used as ``select_from_menu``'s default ``read_key`` (that would drop
+    a pushed-back byte across keypresses — see :data:`_default_key_reader`
+    below). This wrapper constructs its own one-shot reader instead, so it is
+    only safe for a single isolated read with no pushback expected — see
+    :func:`press_any_key`, its only caller.
     """
     return KeyReader(stream).read()
+
+
+_default_key_reader: KeyReader | None = None
+
+
+def _default_read_key() -> str:
+    """Default ``read_key`` for :func:`select_from_menu` — one shared reader.
+
+    A single module-level :class:`KeyReader` bound to real stdin, reused
+    across EVERY call to :func:`select_from_menu` for the life of the
+    process — not just within one call. This mirrors the pre-refactor
+    module-level ``_pending_byte`` global it replaces: the TUI opens many
+    menus in sequence (main menu -> sub-menu -> ...), each via its own
+    ``select_from_menu`` call, and a byte parked by Enter's CRLF-pair peek
+    (e.g. the user types Enter then immediately Down, intending the Down for
+    whichever menu opens next) must survive into the NEXT call's first read,
+    not just the next keypress within the same call. A fresh ``KeyReader``
+    per call (or per keypress, as ``_read_key_raw`` builds) would drop that
+    byte on the floor exactly where the old global didn't.
+
+    Lazily constructed on first use (not at import time) so ``sys.stdin`` is
+    read at call time, matching whatever stream is current when the TUI
+    actually starts reading keys — tests never hit this path since they
+    always inject ``read_key`` explicitly.
+    """
+    global _default_key_reader
+    if _default_key_reader is None:
+        _default_key_reader = KeyReader(sys.stdin)
+    return _default_key_reader.read()
 
 
 def _normalize(
@@ -509,7 +538,7 @@ def select_from_menu(
     on_tab: Callable[[], None] | None = None,
     on_token: Callable[[str], None] | None = None,
     unnumbered: frozenset[str] = frozenset(),
-    read_key: Callable[[], str] = _read_key_raw,
+    read_key: Callable[[], str] | None = None,
     print_fn: Callable[[str], None] = print,
     clear: bool = False,
 ) -> str:
@@ -566,8 +595,12 @@ def select_from_menu(
             it can never drift apart (the failure mode a caller-side
             ``str.startswith`` on the label used to cause — see
             ``cli/tui.py`` history).
-        read_key: Source of translated keypresses. Defaults to reading a real
-            TTY; tests inject a fake sequence instead.
+        read_key: Source of translated keypresses. Defaults to a single
+            :class:`KeyReader` shared across the whole process (see
+            :func:`_default_read_key`) — NOT :func:`_read_key_raw` (which
+            builds a fresh reader per keypress and would drop a byte parked
+            in its pushback slot by the previous keypress, or by the
+            previous menu); tests inject a fake sequence instead.
         print_fn: Injectable output sink for the rendered menu.
         clear: On a TTY, clear the *whole* screen before the first frame
             instead of leaving prior content above it. Ignored when
@@ -592,6 +625,11 @@ def select_from_menu(
             ``hard=False`` for Esc/``q``.
     """
     state = _build_menu_state(items, hint=hint, unnumbered=unnumbered)
+    if read_key is None:
+        # One reader shared across the whole process, NOT `_read_key_raw` —
+        # see `_default_read_key`'s docstring for why a fresh reader (per
+        # keypress OR per `select_from_menu` call) drops a pushed-back byte.
+        read_key = _default_read_key
 
     clear_seq = f"\033[{state.frame_lines}A\033[J"
     clear_screen = "\033[2J\033[H"
