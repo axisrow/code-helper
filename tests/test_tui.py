@@ -992,3 +992,92 @@ def test_main_screen_hint_advertises_token_key(monkeypatch):
     monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
     assert "t: token" in captured["hint"]
+
+
+# --- apply codex default into ~/.codex/config.toml (issue #30) --------------
+
+
+@pytest.mark.integration
+def test_main_screen_has_apply_codex_default_row(monkeypatch):
+    """Issue #30: an explicit 'Apply codex default' row sits in the service
+    block, separate from the Enter-on-wrapper action (#29) — applying the
+    agent's native config is an intentional step, not a side effect."""
+    from code_helper.cli.menu import Section
+
+    captured: list[list] = []
+
+    def _select(items, **_kwargs):
+        captured.append(list(items))
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+
+    main_items = captured[0]
+    rows = {
+        e[0]: (e[1]() if callable(e[1]) else e[1])
+        for e in main_items
+        if not isinstance(e, Section)
+    }
+    assert "set-default" in rows
+    assert "codex" in rows["set-default"].lower()
+
+
+@pytest.mark.integration
+def test_apply_codex_default_dispatches_into_apply_set_default(monkeypatch):
+    """Selecting the row calls ``apply_set_default`` with the codex default
+    wrapper's ``(agent, provider, model)`` and ``force=True`` (the menu item IS
+    the confirmation, so the CLI's ``[y/N]`` prompt is skipped — issue #30)."""
+    import code_helper.services.codex_default as codex_default
+    from code_helper.services.spec import build_spec
+    from code_helper.services.state import set_default_wrapper
+    from code_helper.services.wrappers import install_wrapper
+
+    paths = Paths.default()
+    # Install a real codex wrapper so valid_default_wrapper can resolve it.
+    install_wrapper(
+        paths, build_spec(agent="codex", provider="ollama", model="qwen3.5:9b")
+    )
+    set_default_wrapper(paths, "codex", "qwen3.5-codex")
+
+    calls: list[dict] = []
+
+    def _fake_apply(paths_arg, *, agent, provider, model, **_kw):
+        calls.append(
+            {
+                "agent": agent.name,
+                "provider": provider.name,
+                "model": model,
+                "force": _kw.get("force", False),
+            }
+        )
+        return True
+
+    monkeypatch.setattr(codex_default, "apply_set_default", _fake_apply)
+    _menu_sequence(monkeypatch, ["set-default", "quit"])
+
+    assert main(["tui"]) == 0
+    assert len(calls) == 1
+    assert calls[0]["agent"] == "codex"
+    assert calls[0]["provider"] == "ollama"
+    assert calls[0]["model"] == "qwen3.5:9b"
+    assert calls[0]["force"] is True
+
+
+@pytest.mark.integration
+def test_apply_codex_default_errors_when_no_codex_default_set(monkeypatch, capsys):
+    """Without a codex default wrapper, the action reports a clear error
+    naming the prerequisite (Enter on a codex wrapper row) rather than
+    silently doing nothing or crashing."""
+    import code_helper.services.codex_default as codex_default
+
+    monkeypatch.setattr(
+        codex_default,
+        "apply_set_default",
+        lambda *a, **kw: pytest.fail("must not be called without a codex default"),
+    )
+    _menu_sequence(monkeypatch, ["set-default", "quit"])
+
+    assert main(["tui"]) == 0
+    err = capsys.readouterr().err
+    assert "no default wrapper set for codex" in err.lower()
