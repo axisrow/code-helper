@@ -1304,7 +1304,11 @@ def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
         return None
     if alias in preset_names():
         return alias
-    if is_installed(paths, alias) and is_managed(paths, alias) and _is_usable_alias(alias):
+    if (
+        is_installed(paths, alias)
+        and is_managed(paths, alias)
+        and _is_usable_alias(alias)
+    ):
         return alias
     return None
 
