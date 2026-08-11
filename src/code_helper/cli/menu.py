@@ -244,7 +244,9 @@ def _read_key_raw(stream=sys.stdin) -> str:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
-def _normalize(items: Sequence[str | tuple[str, str]]) -> list[tuple[str, str]]:
+def _normalize(
+    items: Sequence[str | tuple[str, str | Callable[[], str]]],
+) -> list[tuple[str, str | Callable[[], str]]]:
     """Normalize ``items`` to ``(value, label)`` pairs.
 
     A plain ``str`` item is both its own value and label — this is what keeps
@@ -273,7 +275,7 @@ def _fit(line: str, width: int) -> str:
 
 
 def select_from_menu(
-    items: Sequence[str | tuple[str, str]],
+    items: Sequence[str | tuple[str, str | Callable[[], str]]],
     *,
     prompt: str | Callable[[], str] = "select:",
     hint: str | None | Callable[[], str] = None,
@@ -292,7 +294,13 @@ def select_from_menu(
             returned and is what callers compare against. This lets a menu
             show a human description without control flow depending on
             display text (formerly a ``str.startswith`` on the rendered
-            label — see ``cli/tui.py`` history).
+            label — see ``cli/tui.py`` history). The ``label`` in a pair may
+            itself be a callable — it is evaluated FRESH each frame, exactly
+            like a callable ``prompt``, so a row that must reflect state an
+            ``on_tab`` handler mutated (e.g. the active-profile row) tracks
+            the change instead of freezing at the value it had when the menu
+            opened. A callable label must return a single logical line with
+            no ``\\n`` (same ``frame_lines`` constraint as ``prompt``).
         prompt: Heading line printed above the list. May be a callable
             evaluated FRESH each frame — a menu whose header must reflect state
             an ``on_tab`` handler mutated (e.g. the active profile) can pass
@@ -399,9 +407,10 @@ def select_from_menu(
             else:
                 print_fn(f"\n{heading}")
             for i, (value, label) in enumerate(pairs):
+                label_text = label() if callable(label) else label
                 marker = ">" if i == index else " "
                 digit = str(digit_of[value]) if value in digit_of else "·"
-                row = f"{digit} {marker} {label}"
+                row = f"{digit} {marker} {label_text}"
                 print_fn(f" {_fit(row, width - 1) if redraw else row}")
             if hint_text:
                 fitted_hint = _fit(hint_text, width) if redraw else hint_text

@@ -521,6 +521,31 @@ def test_select_from_menu_callable_prompt_is_re_evaluated_each_frame():
 
 
 @pytest.mark.unit
+def test_select_from_menu_callable_label_reflects_state_change():
+    # A callable label that returns different text per call must render the
+    # updated text on the redraw frame — the desync symptom from issue #26
+    # (a header that updates while the row stays stale).
+    state = {"v": "before"}
+
+    def label():
+        return f"value={state['v']}"
+
+    lines = []
+    select_from_menu(
+        [("a", label)],
+        prompt=lambda: f"header={state['v']}",
+        on_tab=lambda: state.update(v="after"),
+        read_key=_fake_keys(["TAB", "ENTER"]),
+        print_fn=lines.append,
+    )
+    joined = "\n".join(lines)
+    # Both the header and the row show "after" on the post-Tab redraw —
+    # neither is frozen at the pre-Tab "before" value.
+    assert "value=after" in joined
+    assert "header=after" in joined
+
+
+@pytest.mark.unit
 def test_select_from_menu_callable_hint_is_rendered():
     lines = []
     select_from_menu(

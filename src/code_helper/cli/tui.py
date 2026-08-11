@@ -557,42 +557,57 @@ def run_tui(args: argparse.Namespace) -> int:
         stored = valid_active_profile(paths, provider)
         idx = names.index(stored) if stored in names else -1
         set_active_selection(paths, provider, names[(idx + 1) % len(names)])
-        # The selection just changed — invalidate so the header/row/hint
+        # The selection just changed — refresh so the header/row/hint
         # reflect it on the next read instead of the pre-Tab provider.
-        _tab_provider_cache["value"] = _resolve_tab_provider()
+        _refresh_active_label()
 
     # `_resolve_tab_provider()` does real I/O (a `state.json` read and,
     # on its fallback path, a `profile_names` scan of every secret
-    # provider) — too expensive to re-run on every menu redraw frame.
-    # `_main_prompt`, a callable, IS re-evaluated every frame (see
-    # CLAUDE.md's callable-prompt contract), so it reads this cache
-    # instead of calling `_resolve_tab_provider()` itself; the cache is
-    # refreshed once per main-loop iteration and again by `_on_tab` the
-    # moment Tab actually changes the selection.
-    _tab_provider_cache: dict[str, str | None] = {"value": None}
+    # provider), and `_tab_profile` beneath `_active_label` reads the
+    # profile cache too — too expensive to re-run on every menu redraw
+    # frame. `_main_prompt` and the Profile row label are BOTH callables
+    # re-evaluated every frame (see CLAUDE.md's callable-prompt contract),
+    # so they read this cache instead of re-deriving the label themselves;
+    # the cache is refreshed once per main-loop iteration and again by
+    # `_on_tab` the moment Tab actually changes the selection. Storing the
+    # fully-rendered label (not just the provider) lets header and row share
+    # ONE I/O pass per refresh instead of each doing its own
+    # `valid_active_profile`/`profile_names` read on every frame.
+    _tab_provider_cache: dict[str, str | None] = {"value": None, "label": ""}
+
+    def _refresh_active_label() -> None:
+        """Resolve the active provider and its rendered label, once.
+
+        Called once per main-loop iteration and by `_on_tab` after it
+        changes the selection; both the header and the Profile row read the
+        cached ``label`` from then on instead of re-deriving it per frame.
+        """
+        value = _resolve_tab_provider()
+        _tab_provider_cache["value"] = value
+        _tab_provider_cache["label"] = _active_label(value)
 
     def _main_prompt() -> str:
         """Live main-menu header, showing the active provider/profile."""
-        label = _active_label(_tab_provider_cache["value"])
+        label = _tab_provider_cache["label"]
         return f"code-helper — {label}" if label else "code-helper"
 
-    def _profile_row_label(tab_provider: str | None) -> str:
-        label = _active_label(tab_provider)
+    def _profile_row_label() -> str:
+        label = _tab_provider_cache["label"]
         return f"Profile: {label}" if label else "Profile"
 
     try:
         while True:
-            # Resolved ONCE per loop iteration and reused for the row
-            # label, the hint gate, and (via the cache) the live header —
-            # see the comments on `_active_label`/`_main_prompt` above for
-            # why re-deriving it per reader would multiply the I/O.
-            tab_provider = _resolve_tab_provider()
-            _tab_provider_cache["value"] = tab_provider
+            # Resolved ONCE per loop iteration and reused for the row label,
+            # the hint gate, and (via the cached label) the live header and
+            # Profile row — see `_refresh_active_label`/`_main_prompt` above
+            # for why re-deriving it per reader would multiply the I/O.
+            _refresh_active_label()
+            tab_provider = _tab_provider_cache["value"]
             choice = _pick(
                 [
                     (_LIST, "List"),
                     (_ADD, "Add"),
-                    (_PROFILE, _profile_row_label(tab_provider)),
+                    (_PROFILE, _profile_row_label),
                     (_SETTINGS, "Settings"),
                     (_QUIT, "Quit"),
                 ],
