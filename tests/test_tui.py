@@ -1080,9 +1080,7 @@ def test_apply_codex_default_forwards_runtime_base_url(monkeypatch):
 
     paths = Paths.default()
     litellm = with_base_url(get_provider("litellm"), "http://h:4000/v1")
-    install_wrapper(
-        paths, build_spec(agent="codex", provider=litellm, model="gpt-4o")
-    )
+    install_wrapper(paths, build_spec(agent="codex", provider=litellm, model="gpt-4o"))
     set_default_wrapper(paths, "codex", "gpt-4o-codex")
 
     calls: list[dict] = []
