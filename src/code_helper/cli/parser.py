@@ -171,6 +171,7 @@ def _handle_add(args: argparse.Namespace) -> int:
     3. a bare ``name`` that is not a preset but IS an agent gets a message
        showing the constructor form rather than a plain "unknown".
     """
+    from code_helper.cli.requests import AddRequest
     from code_helper.errors import CodeHelperError
     from code_helper.services.model import (
         get_agent,
@@ -203,21 +204,24 @@ def _handle_add(args: argparse.Namespace) -> int:
     from code_helper.services.wrappers import install_wrapper
 
     paths = Paths.default()
-    dry_run = getattr(args, "dry_run", False)
-    agent_name = getattr(args, "agent", None)
-    provider_name = getattr(args, "provider", None)
-    # Read through getattr throughout: the TUI builds this Namespace itself and
-    # only fills the fields its flow uses, so an absent attribute is normal
-    # here, not a bug.
-    name = getattr(args, "name", None)
-    model = getattr(args, "model", None)
-    alias = getattr(args, "alias", None)
-    base_url = getattr(args, "base_url", None)
-    auth = getattr(args, "auth", None)
-    profile_name = getattr(args, "profile", None)
-    profile_token = getattr(args, "profile_token", None)
-    profile_rename_from = getattr(args, "profile_rename_from", None)
-    profile_rename_to = getattr(args, "profile_rename_to", None)
+    # Build the typed request once: every downstream read goes through these
+    # fields instead of 15 separate ``getattr(args, ...)`` calls. The TUI
+    # fills only the fields its flow uses, so ``from_namespace`` defaults
+    # absent attributes to ``None``/``False`` — the same contract the old
+    # ``getattr`` reads encoded.
+    req = AddRequest.from_namespace(args)
+    dry_run = req.dry_run
+    agent_name = req.agent
+    provider_name = req.provider
+    name = req.name
+    model = req.model
+    alias = req.alias
+    base_url = req.base_url
+    auth = req.auth
+    profile_name = req.profile
+    profile_token = req.profile_token
+    profile_rename_from = req.profile_rename_from
+    profile_rename_to = req.profile_rename_to
     using_axes = agent_name is not None or provider_name is not None
 
     # Issue #23: an explicit --profile always wins; otherwise the CLI picks up
@@ -265,7 +269,7 @@ def _handle_add(args: argparse.Namespace) -> int:
         provider = with_base_url(get_provider(provider_name), base_url)
         provider = with_auth(provider, want_secret=auth == "secret")
 
-        if getattr(args, "list_models", False):
+        if req.list_models:
             result = list_models(
                 provider,
                 token=token_for_discovery(paths, provider, profile_name=profile_name),
@@ -282,7 +286,7 @@ def _handle_add(args: argparse.Namespace) -> int:
                 f"--provider {provider.name} --list-models)"
             )
 
-        shape = _parse_shape(getattr(args, "shape", None))
+        shape = _parse_shape(req.shape)
         # Resolve compatibility BEFORE anything interactive: a bad pairing must
         # never reach a secret prompt for a wrapper that will not be written.
         resolve_shape(agent, provider, preferred=shape)
@@ -350,7 +354,7 @@ def _handle_add(args: argparse.Namespace) -> int:
         spec,
         token=token,
         dry_run=dry_run,
-        force=getattr(args, "force", False),
+        force=req.force,
         confirm=_confirm_overwrite,
     )
     # Cache only once install_wrapper has returned WITHOUT raising: a refusal
@@ -426,6 +430,7 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     import getpass
 
     from code_helper.cli.menu import MenuCancelled, select_from_menu
+    from code_helper.cli.requests import EditTokenRequest
     from code_helper.errors import CodeHelperError
     from code_helper.services.paths import Paths
     from code_helper.services.secrets import (
@@ -445,8 +450,13 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
         spec_from_installed,
     )
 
+    req = EditTokenRequest.from_namespace(args)
+
     paths = Paths.default()
-    dry_run = getattr(args, "dry_run", False)
+    dry_run = req.dry_run
+    profile_token = req.profile_token
+    profile_rename_from = req.profile_rename_from
+    profile_rename_to = req.profile_rename_to
 
     def _resolve(name: str):
         """The INSTALLED wrapper's spec, falling back to the preset registry.
@@ -458,8 +468,8 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
         """
         return spec_from_installed(paths, name) or get_spec(name)
 
-    if args.name:
-        spec = _resolve(args.name)
+    if req.name:
+        spec = _resolve(req.name)
     else:
         # Presets plus anything the constructor installed — the latter are
         # first-class wrappers and were previously unreachable from here.
@@ -497,10 +507,7 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     if spec.auth != "secret":
         raise CodeHelperError(f"{spec.name} has no editable token (auth={spec.auth})")
 
-    profile_name = getattr(args, "profile", None)
-    profile_token = getattr(args, "profile_token", None)
-    profile_rename_from = getattr(args, "profile_rename_from", None)
-    profile_rename_to = getattr(args, "profile_rename_to", None)
+    profile_name = req.profile
     if profile_name is None:
         names = list(profile_names(paths, spec.provider.name))
         if names:
@@ -642,47 +649,43 @@ def _handle_set_default(args: argparse.Namespace) -> int:
     agent's own configuration file — see ``services/codex_default.py`` for
     why that is safe (patch, never replace; always backed up first).
     """
+    from code_helper.cli.requests import SetDefaultRequest
     from code_helper.errors import CodeHelperError
     from code_helper.services.codex_default import apply_set_default, restore_default
     from code_helper.services.model import get_agent, get_provider, with_base_url
     from code_helper.services.paths import Paths
 
-    paths = Paths.default()
-    dry_run = getattr(args, "dry_run", False)
-    force = getattr(args, "force", False)
-    restore = getattr(args, "restore", False)
-    agent_name = getattr(args, "agent", None)
-    provider_name = getattr(args, "provider", None)
-    model = getattr(args, "model", None)
-    base_url = getattr(args, "base_url", None)
+    req = SetDefaultRequest.from_namespace(args)
 
-    if restore and (agent_name or provider_name or model or base_url):
+    paths = Paths.default()
+
+    if req.restore and (req.agent or req.provider or req.model or req.base_url):
         raise CodeHelperError(
             "--restore cannot be combined with --agent/--provider/--model/--base-url"
         )
-    if getattr(args, "slot", None) is not None and not restore:
+    if req.slot is not None and not req.restore:
         raise CodeHelperError("--slot only applies together with --restore")
 
-    if restore:
-        slot = getattr(args, "slot", None) or 1
+    if req.restore:
+        slot = req.slot or 1
         wrote = restore_default(
             paths,
             slot=slot,
-            catalog_json=getattr(args, "catalog_json", None),
-            dry_run=dry_run,
-            force=force,
+            catalog_json=req.catalog_json,
+            dry_run=req.dry_run,
+            force=req.force,
             confirm=_confirm_set_default,
         )
         if not wrote:
             print("no changes")
         return 0
 
-    if not agent_name or not provider_name:
+    if not req.agent or not req.provider:
         raise CodeHelperError("--agent and --provider must be given together")
-    if not model:
+    if not req.model:
         raise CodeHelperError("--model is required")
 
-    agent = get_agent(agent_name)
+    agent = get_agent(req.agent)
     # Same substitution point as _handle_add's — and here it is not merely
     # convenient but load-bearing: without it, a runtime-base_url provider
     # with an empty registry base_url would make openai_base_url("") return
@@ -691,16 +694,16 @@ def _handle_set_default(args: argparse.Namespace) -> int:
     # a successful set-default that silently breaks codex, with the
     # verification net unable to catch it because both sides of the check
     # are wrong in the same way.
-    provider = with_base_url(get_provider(provider_name), base_url)
+    provider = with_base_url(get_provider(req.provider), req.base_url)
 
     wrote = apply_set_default(
         paths,
         agent=agent,
         provider=provider,
-        model=model,
-        catalog_json=getattr(args, "catalog_json", None),
-        dry_run=dry_run,
-        force=force,
+        model=req.model,
+        catalog_json=req.catalog_json,
+        dry_run=req.dry_run,
+        force=req.force,
         confirm=_confirm_set_default,
     )
     if not wrote:
