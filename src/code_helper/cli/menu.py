@@ -107,6 +107,8 @@ class Section:
     __slots__ = ("text",)
 
     def __init__(self, text: str) -> None:
+        if "\n" in text or "\r" in text:
+            raise ValueError("Section text must be a single line")
         self.text = text
 
 

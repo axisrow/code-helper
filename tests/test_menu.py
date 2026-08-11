@@ -712,3 +712,15 @@ def test_select_from_menu_section_only_items_raises():
         select_from_menu(
             [Section("only")], read_key=_fake_keys(["ENTER"]), print_fn=lambda _: None
         )
+
+
+@pytest.mark.unit
+def test_section_rejects_multiline_text():
+    # A Section must occupy exactly one rendered row (frame_lines counts it
+    # as one), so a header containing a newline would desynchronize the
+    # in-place redraw. Reject it at construction rather than corrupting the
+    # terminal on the first frame.
+    with pytest.raises(ValueError, match="single line"):
+        Section("group\nsecret")
+    with pytest.raises(ValueError, match="single line"):
+        Section("group\rsecret")
