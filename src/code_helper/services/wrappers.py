@@ -1185,6 +1185,7 @@ def describe_wrapper(
     installed_word: str,
     not_installed_word: str,
     profile_name: str | None = None,
+    default: bool = False,
 ) -> str:
     """Format one ``name / install-state / description`` row.
 
@@ -1196,10 +1197,21 @@ def describe_wrapper(
     ``not_installed_word`` are caller-supplied because callers render in
     different languages (``list_wrappers`` in English, the TUI in Russian) —
     only the format itself is shared.
+
+    ``default=True`` prefixes the row with ``● `` — the marker the TUI's main
+    screen (issue #29) draws on the one wrapper that is the
+    ``default_wrapper`` for its agent, so the eye lands on it without scanning
+    the column. It is a PREFIX to ``spec.name`` (not a new column), so the
+    name field shrinks by the marker's width and the ``:12``/``:13`` column
+    alignment every other caller depends on is unchanged.
+    ``list_wrappers`` passes ``default=False`` (the default) — the CLI list is
+    a flat registry dump and the marker belongs only to the interactive
+    screen that can CHANGE which wrapper is default.
     """
     state = installed_word if installed else not_installed_word
     profile = f" [profile: {profile_name}]" if profile_name else ""
-    return f"{spec.name:12} {state:13} {spec.description}{profile}"
+    mark = "● " if default else ""
+    return f"{mark}{spec.name:{12 - len(mark)}} {state:13} {spec.description}{profile}"
 
 
 def describe_all(
@@ -1208,6 +1220,7 @@ def describe_all(
     *,
     installed_word: str,
     not_installed_word: str,
+    defaults: dict[str, str | None] | None = None,
 ) -> list[tuple[str, str]]:
     """``(name, describe_wrapper(...))`` pairs for a menu built over ``specs``.
 
@@ -1218,6 +1231,17 @@ def describe_all(
     which language's install-state words they pass. Sharing the loop here
     means that wiring (not just the row's column widths) can't drift between
     the two menus.
+
+    ``defaults`` is an optional ``{agent_name: alias}`` map (the TUI's main
+    screen passes the live ``valid_default_wrapper`` result per agent). When
+    given, the row whose ``spec`` matches ``defaults[spec.agent.name]`` is
+    rendered with ``default=True`` (the ``●`` marker). ``None`` (the default)
+    renders no marker at all — ``list_wrappers`` and ``edit-token``'s picker
+    are flat dumps that have no notion of "the default for this agent", so
+    they pass nothing and stay marker-free. The map is the CALLER's
+    responsibility (it must already have resolved staleness via
+    :func:`valid_default_wrapper`) so this function stays a pure function of
+    its arguments and does not read ``state.json``.
     """
     return [
         (
@@ -1228,6 +1252,9 @@ def describe_all(
                 installed_word=installed_word,
                 not_installed_word=not_installed_word,
                 profile_name=profile_from_installed(paths, spec.name),
+                default=(
+                    defaults is not None and defaults.get(spec.agent.name) == spec.name
+                ),
             ),
         )
         for spec in specs

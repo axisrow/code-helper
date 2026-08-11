@@ -1767,3 +1767,27 @@ def test_all_has_no_duplicate_entries():
     import code_helper.services.wrappers as wrappers_mod
 
     assert len(wrappers_mod.__all__) == len(set(wrappers_mod.__all__))
+
+
+@pytest.mark.unit
+def test_describe_wrapper_marker_preserves_state_column_alignment():
+    """The ``● `` default marker is a PREFIX to ``spec.name``, so the name
+    field must shrink by the marker's width — otherwise the install-state
+    column shifts right by two on the marked row and the three menus that
+    share this format string drift apart on layout."""
+    from code_helper.services.wrappers import describe_wrapper
+
+    spec = build_spec(
+        agent="claude", provider="ollama", model="qwen3.5:9b", alias="glm"
+    )
+    unmarked = describe_wrapper(
+        spec, installed=True, installed_word="installed", not_installed_word="missing"
+    )
+    marked = describe_wrapper(
+        spec,
+        installed=True,
+        installed_word="installed",
+        not_installed_word="missing",
+        default=True,
+    )
+    assert unmarked.index("installed") == marked.index("installed")

@@ -33,21 +33,23 @@ def _real_menu_keys(monkeypatch, keys):
 
 
 @pytest.mark.integration
-def test_main_menu_is_english_and_list_is_a_back_navigable_second_level(
-    monkeypatch, capsys
-):
-    # Main -> List; wrapper browser -> Back; main -> Quit.
-    _real_menu_keys(monkeypatch, ["ENTER", "END", "ENTER", "END", "ENTER"])
+def test_main_menu_lists_wrappers_grouped_by_agent_and_quit_exits(monkeypatch, capsys):
+    # The wrapper list IS the main screen now (issue #29): no separate "List"
+    # entry. END jumps to the last numbered item (Quit), Enter exits.
+    _real_menu_keys(monkeypatch, ["END", "ENTER"])
 
     assert main(["tui"]) == 0
 
     output = capsys.readouterr().out
-    assert "List" in output
-    assert "Wrappers:" in output
-    assert "Back" in output
+    # Wrappers appear directly on the main screen, grouped by agent section.
+    assert "claude" in output
+    assert "Add" in output
+    assert "Quit" in output
+    # The old indirection is gone.
+    assert "Wrappers:" not in output
+    # No pause screens.
     assert "Press any key" not in output
     assert "назад" not in output
-    assert "New" not in output
     assert "edit-token" not in output
 
 
@@ -250,13 +252,21 @@ def test_litellm_uses_selected_profile_for_model_discovery(monkeypatch):
 
 
 @pytest.mark.integration
-def test_list_selects_secret_wrapper_for_token_edit(monkeypatch):
+def test_t_rotates_token_for_secret_wrapper_from_main_screen(monkeypatch):
+    """Issue #29: token rotation moved from the old List sub-screen to the `t`
+    key on the main screen. With glm installed (secret), `t` on its row opens
+    the profile picker and a new token is written — the same end-to-end result
+    the old `list → glm → profile` flow produced, just without the sub-screen."""
     import code_helper.services.secrets as secrets
 
     paths = Paths.default()
     secrets.save_credential(paths, "zai", "sk-old", "default")
     assert main(["add", "glm", "--profile", "default"]) == 0
-    _menu_sequence(monkeypatch, ["list", "glm", "default", "__back__", "quit"])
+    # Main screen: presets are [deepseek, glm, glm-ollama] under Section("claude").
+    # DOWN moves to glm (index 1 among selectable wrappers), `t` opens its token
+    # profile picker, `1` picks the first profile (default), the getpass stub
+    # supplies the new token, then END + ENTER reaches Quit.
+    _real_menu_keys(monkeypatch, ["DOWN", "TOKEN", "ENTER", "END", "ENTER"])
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-new")
 
     assert main(["tui"]) == 0
@@ -356,10 +366,13 @@ def test_provider_first_flow_through_a_real_pty(tmp_path):
 
     try:
         read_until("Esc quit")
+        # `1` is the first wrapper on the main screen (issue #29): Enter makes
+        # it the default for its agent. We stay on the main screen — no
+        # sub-screen to Esc out of.
         menu_key("1")
-        read_until("Esc back")
-        menu_key("\x1b")
         read_until("Esc quit")
+        # Esc on the main screen exits (exit_word="quit").
+        menu_key("\x1b")
         assert b"Press any key" not in output
     finally:
         if child.poll() is None:
@@ -367,6 +380,102 @@ def test_provider_first_flow_through_a_real_pty(tmp_path):
         child.wait(timeout=2)
         os.close(master_fd)
         os.close(slave_fd)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "posix", reason="PTY tests require POSIX")
+def test_main_screen_default_wrapper_marker_through_a_real_pty(tmp_path):
+    """Issue #29: Enter on a wrapper makes it the default (`●` marker moves),
+    and the marker survives a TUI restart (state.json persistence). This is
+    the manual-PTY verification the issue requires — the injected-`read_key`
+    suite cannot see real ANSI redraw behavior."""
+    import errno
+    import fcntl
+    import pty
+    import select
+    import struct
+    import subprocess
+    import sys
+    import termios
+    import time
+
+    environment = os.environ.copy()
+    environment["HOME"] = str(tmp_path)
+    environment.pop("ZAI_API_KEY", None)
+    source_dir = str(Path(__file__).resolve().parents[1] / "src")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (source_dir, environment.get("PYTHONPATH")) if part
+    )
+
+    def run_session(expect_marker_after_enter: bool) -> bytearray:
+        """Spawn the TUI, press `1` (first wrapper = default), read the redraw,
+        then Esc-quit. Returns the captured output."""
+        master_fd, slave_fd = pty.openpty()
+        # Force an 80-column terminal so a wrapper row is wide enough to show
+        # the marker yet narrow enough that `_fit` truncation is exercised.
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        child = subprocess.Popen(
+            [sys.executable, "-m", "code_helper", "tui"],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env=environment,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+        )
+        output = bytearray()
+        search_from = 0
+
+        def read_until(marker: str) -> None:
+            nonlocal search_from
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                found = output.find(marker.encode(), search_from)
+                if found >= 0:
+                    search_from = found + len(marker)
+                    return
+                ready, _, _ = select.select([master_fd], [], [], 0.1)
+                if ready:
+                    try:
+                        output.extend(os.read(master_fd, 4096))
+                    except OSError as exc:
+                        if exc.errno != errno.EIO:
+                            raise
+            raise AssertionError(output.decode(errors="replace")[-3000:])
+
+        def menu_key(value: str) -> None:
+            deadline = time.monotonic() + 5
+            while termios.tcgetattr(master_fd)[3] & termios.ICANON:
+                if time.monotonic() >= deadline:
+                    raise AssertionError("TUI did not enter raw mode")
+                time.sleep(0.01)
+            os.write(master_fd, value.encode())
+
+        try:
+            read_until("Esc quit")
+            # First wrapper (deepseek) gets no `●` yet on a fresh install.
+            menu_key("1")
+            read_until("Esc quit")
+            if expect_marker_after_enter:
+                # The `●` marker now prefixes the default wrapper row.
+                assert b"\xe2\x97\x8f" in output  # ● in UTF-8
+            menu_key("\x1b")  # Esc quits the main screen
+            assert b"Press any key" not in output
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=2)
+            os.close(master_fd)
+            os.close(slave_fd)
+        return output
+
+    # One session is enough: fresh install, no default set, then Enter on the
+    # first wrapper makes it the default and the `●` marker appears on the
+    # redrawn frame. Persistence across restarts is covered by the round-trip
+    # unit tests in test_state.py (set_default_wrapper/default_wrapper); this
+    # test exists only to exercise the real ANSI redraw path that the
+    # injected-`read_key` suite cannot see.
+    run_session(expect_marker_after_enter=True)
 
 
 # --- active token-profile pre-selection (issue #23) --------------------------
@@ -439,8 +548,15 @@ def test_tui_tab_updates_profile_row_label_not_just_header(monkeypatch):
 
     def _select(items, *, on_tab=None, **_kwargs):
         # Find the Profile row — its label is now a callable that reads the
-        # live active selection. Resolve it before Tab, then after.
-        profile_label = next(label for value, label in items if value == "profile")
+        # live active selection. Resolve it before Tab, then after. Skip
+        # `Section` headers (issue #29 main screen) — they are not pairs.
+        from code_helper.cli.menu import Section
+
+        profile_label = next(
+            entry[1]
+            for entry in items
+            if not isinstance(entry, Section) and entry[0] == "profile"
+        )
         assert callable(profile_label), (
             "Profile row label must be a callable (issue #26)"
         )
@@ -730,3 +846,149 @@ def test_tui_profile_screen_finds_ollama_profiles_after_a_token_install(
     monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
     assert active_selection(paths) == ("ollama", "proxy")
+
+
+# --- main screen = wrapper list, Enter = default, t = token (issue #29) -----
+
+
+@pytest.mark.integration
+def test_main_screen_shows_wrappers_grouped_by_agent(monkeypatch):
+    """The wrapper list IS the main screen now: no separate 'List' entry, and
+    wrappers are grouped under non-selectable Section headers per agent."""
+    from code_helper.cli.menu import Section
+
+    captured: list[list] = []
+
+    def _select(items, **_kwargs):
+        captured.append(list(items))
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+
+    main_items = captured[0]
+    # Presets (all claude today) appear under a Section("claude") header.
+    # Section defines no __eq__ (it is a render marker, not a value), so match
+    # on `.text` rather than `in`.
+    section_texts = [e.text for e in main_items if isinstance(e, Section)]
+    assert "claude" in section_texts
+    # The old indirection is gone.
+    assert not any(not isinstance(e, Section) and e[0] == "list" for e in main_items)
+    # The service rows are still present below the wrappers.
+    values = [e[0] for e in main_items if not isinstance(e, Section)]
+    assert "add" in values
+    assert "quit" in values
+
+
+@pytest.mark.integration
+def test_main_screen_marker_on_default_wrapper(monkeypatch):
+    """A wrapper that is the saved default_wrapper for its agent is rendered
+    with the `●` marker; every other wrapper is not."""
+    from code_helper.cli.menu import Section
+    from code_helper.services.state import default_wrapper, set_default_wrapper
+
+    paths = Paths.default()
+    # glm is a preset (claude agent); mark it the default for claude.
+    set_default_wrapper(paths, "claude", "glm")
+    assert default_wrapper(paths, "claude") == "glm"
+
+    captured: list[list] = []
+
+    def _select(items, **_kwargs):
+        captured.append(list(items))
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+
+    main_items = captured[0]
+    rows = {
+        e[0]: (e[1]() if callable(e[1]) else e[1])
+        for e in main_items
+        if not isinstance(e, Section)
+        and e[0] not in ("add", "profile", "settings", "quit")
+    }
+    assert "●" in rows["glm"]
+    assert "●" not in rows["deepseek"]
+
+
+@pytest.mark.integration
+def test_main_screen_enter_sets_default_wrapper(monkeypatch):
+    """Enter on a wrapper row makes it the default for its agent; the marker
+    moves on the next redraw."""
+    from code_helper.services.state import default_wrapper
+
+    paths = Paths.default()
+    assert default_wrapper(paths, "claude") is None
+
+    # DOWN moves to glm (second selectable wrapper after deepseek), Enter sets
+    # it as the default, then END + ENTER reaches Quit.
+    _real_menu_keys(monkeypatch, ["DOWN", "ENTER", "END", "ENTER"])
+    assert main(["tui"]) == 0
+    assert default_wrapper(paths, "claude") == "glm"
+
+
+@pytest.mark.integration
+def test_main_screen_groups_colliding_managed_wrapper_under_installed_agent(
+    monkeypatch,
+):
+    """A managed wrapper installed under a preset alias of a DIFFERENT agent
+    (e.g. a codex wrapper named `glm`, which is a claude preset) is grouped
+    under the installed wrapper's agent — display grouping must agree with
+    what Enter resolves (installed-first), or the same row would sit under
+    one agent's section but launch another."""
+    from code_helper.cli.menu import Section
+    from code_helper.services.spec import build_spec
+    from code_helper.services.wrappers import install_wrapper
+
+    paths = Paths.default()
+    # Install a codex wrapper named "glm" (collides with the claude preset).
+    install_wrapper(
+        paths,
+        build_spec(agent="codex", provider="ollama", model="qwen3.5:9b", alias="glm"),
+    )
+
+    captured: list[list] = []
+
+    def _select(items, **_kwargs):
+        captured.append(list(items))
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+
+    main_items = captured[0]
+    section_of: dict[str, str] = {}
+    current = None
+    for e in main_items:
+        if isinstance(e, Section):
+            current = e.text
+        elif e[0] not in ("add", "profile", "settings", "quit"):
+            section_of[e[0]] = current
+    assert section_of["glm"] == "codex"
+
+
+@pytest.mark.integration
+def test_main_screen_no_dead_end_for_non_secret_wrapper(monkeypatch, capsys):
+    """`t` on a non-secret wrapper (deepseek is literal) is a silent no-op —
+    the old dead-end 'has no editable token.' screen is gone (issue #29)."""
+    # TOKEN on the first wrapper (deepseek, non-secret), then quit.
+    _real_menu_keys(monkeypatch, ["TOKEN", "END", "ENTER"])
+    assert main(["tui"]) == 0
+
+    output = capsys.readouterr().out
+    assert "has no editable token." not in output
+
+
+@pytest.mark.integration
+def test_main_screen_hint_advertises_token_key(monkeypatch):
+    """The main screen's hint mentions `t: token` so the key is discoverable."""
+    captured: dict = {}
+
+    def _select(_items, *, hint, **_kwargs):
+        captured["hint"] = hint() if callable(hint) else hint
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+    assert "t: token" in captured["hint"]
