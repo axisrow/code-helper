@@ -1100,6 +1100,39 @@ def test_apply_codex_default_forwards_runtime_base_url(monkeypatch):
 
 
 @pytest.mark.integration
+def test_apply_codex_default_respects_global_dry_run(monkeypatch):
+    """``code-helper --dry-run tui`` selecting the row must not write
+    ``~/.codex/config.toml`` — the row hardcoded ``args.dry_run = False``,
+    overriding the already-parsed global ``--dry-run`` flag and breaking the
+    CLAUDE.md invariant '--dry-run never writes any file' (issue #30
+    follow-up)."""
+    import code_helper.services.codex_default as codex_default
+    from code_helper.services.spec import build_spec
+    from code_helper.services.state import set_default_wrapper
+    from code_helper.services.wrappers import install_wrapper
+
+    paths = Paths.default()
+    install_wrapper(
+        paths, build_spec(agent="codex", provider="ollama", model="qwen3.5:9b")
+    )
+    set_default_wrapper(paths, "codex", "qwen3.5-codex")
+
+    calls: list[dict] = []
+    real_apply = codex_default.apply_set_default
+
+    def _spy_apply(paths_arg, *, dry_run, **kw):
+        calls.append({"dry_run": dry_run})
+        return real_apply(paths_arg, dry_run=dry_run, **kw)
+
+    monkeypatch.setattr(codex_default, "apply_set_default", _spy_apply)
+    _menu_sequence(monkeypatch, ["set-default", "quit"])
+
+    assert main(["--dry-run", "tui"]) == 0
+    assert len(calls) == 1
+    assert calls[0]["dry_run"] is True
+
+
+@pytest.mark.integration
 def test_apply_codex_default_errors_when_no_codex_default_set(monkeypatch, capsys):
     """Without a codex default wrapper, the action reports a clear error
     naming the prerequisite (Enter on a codex wrapper row) rather than

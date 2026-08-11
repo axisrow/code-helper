@@ -424,7 +424,6 @@ def run_tui(args: argparse.Namespace) -> int:
         args.restore = False
         args.slot = None
         args.catalog_json = None
-        args.dry_run = False
         args.force = True
         _run(_handle_set_default)
 
