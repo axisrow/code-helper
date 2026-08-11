@@ -36,7 +36,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from code_helper.backends._atomic import atomic_write
+from code_helper.backends._atomic import atomic_write, read_text_or_none
 from code_helper.errors import CodeHelperError
 from code_helper.services.model import (
     Agent,
@@ -340,22 +340,6 @@ def diff_preview(original: str, patched: str, *, label: str = "config.toml") -> 
     )
 
 
-def _read_text_or_none(path: Path) -> str | None:
-    """``path``'s text, or ``None`` if it does not exist or is not UTF-8.
-
-    Never raises — matches the safe-refuse posture ``wrappers.py`` uses
-    throughout: an undecodable file is not this module's problem to diagnose,
-    it is the pre-check's ("does this parse as TOML at all?") problem to
-    refuse.
-    """
-    try:
-        return path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
 def _require_tomllib():
     """Import and return ``tomllib``, or refuse with a clear message.
 
@@ -516,10 +500,10 @@ def _rotate_backups(slots: tuple[Path, Path, Path], *, current: str) -> None:
     ORIGINAL read) would silently discard whatever changed in between.
     """
     slot3, slot2, slot1 = slots
-    body2 = _read_text_or_none(slot2)
+    body2 = read_text_or_none(slot2)
     if body2 is not None:
         atomic_write(slot3, body2, mode=None)
-    body1 = _read_text_or_none(slot1)
+    body1 = read_text_or_none(slot1)
     if body1 is not None:
         atomic_write(slot2, body1, mode=None)
 
@@ -619,7 +603,7 @@ def _gate_catalog_write(
     )
     body = openai_catalog_body(spec)
 
-    existing = _read_text_or_none(catalog_path)
+    existing = read_text_or_none(catalog_path)
     if existing == body:
         return _CatalogPlan(catalog_path, body, existing, False, no_op=True)
 
@@ -713,7 +697,7 @@ def apply_set_default(
     patch = resolve_default_patch(agent, provider, model, str(catalog_path))
 
     config_path = paths.codex_main_config()
-    original = _read_text_or_none(config_path) or ""
+    original = read_text_or_none(config_path) or ""
     _verify_toml_or_refuse(original, context=str(config_path))
 
     patched = patch_config_toml(original, patch)
@@ -809,18 +793,18 @@ def restore_default(
             edited (by hand, or via another tool) since the backup was taken.
     """
     backup_path = paths.codex_main_config_backup(slot)
-    backup_body = _read_text_or_none(backup_path)
+    backup_body = read_text_or_none(backup_path)
     if backup_body is None:
         raise CodeHelperError(f"no backup found at {backup_path}; nothing to restore")
 
     config_path = paths.codex_main_config()
-    current = _read_text_or_none(config_path) or ""
+    current = read_text_or_none(config_path) or ""
 
     catalog_path = _resolve_catalog_path(paths, catalog_json)
     catalog_backup_slots = _catalog_backup_slots(catalog_path)
     catalog_backup_path = catalog_backup_slots[3 - slot]
-    catalog_backup_body = _read_text_or_none(catalog_backup_path)
-    catalog_current = _read_text_or_none(catalog_path)
+    catalog_backup_body = read_text_or_none(catalog_backup_path)
+    catalog_current = read_text_or_none(catalog_path)
     catalog_changed = (
         catalog_backup_body is not None and catalog_current != catalog_backup_body
     )

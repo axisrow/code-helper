@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import unquote
 
-from code_helper.backends._atomic import atomic_write
+from code_helper.backends._atomic import atomic_write, read_text_or_none
 from code_helper.errors import CodeHelperError
 from code_helper.services.model import (
     Agent,
@@ -189,7 +189,7 @@ def _installed_marker_provider_is_secret(paths: Paths, name: str) -> bool:
     the same fail-open-to-"not secret" default the guard already had, just no
     longer reachable via a corrupt profile specifically.
     """
-    body = _read_text_or_none(paths.script_for(name))
+    body = read_text_or_none(paths.script_for(name))
     if body is None:
         return False
     marker = next(
@@ -221,7 +221,7 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     something this version does not recognise: every caller must be able to
     fall back to the preset path, so this never raises.
     """
-    body = _read_text_or_none(paths.script_for(name))
+    body = read_text_or_none(paths.script_for(name))
     if body is None:
         return None
 
@@ -350,7 +350,7 @@ def token_from_installed(paths: Paths, name: str, provider_name: str) -> str | N
     if spec is None or spec.auth != "secret" or spec.provider.name != provider_name:
         return None
 
-    body = _read_text_or_none(paths.script_for(name))
+    body = read_text_or_none(paths.script_for(name))
     if body is None:
         return None
     if spec.shape is ConfigShape.ANTHROPIC_ENV:
@@ -516,7 +516,7 @@ def _toml_profile_data(paths: Paths, alias: str) -> dict | None:
     guard whose entire job is to handle a bad file in the way (and which
     ``--force`` could otherwise rescue).
     """
-    profile = _read_text_or_none(paths.codex_config_for(alias))
+    profile = read_text_or_none(paths.codex_config_for(alias))
     if profile is None:
         return None
     try:
@@ -610,21 +610,6 @@ def _base_url_from_toml_data(data: dict | None, provider_name: str) -> str | Non
     return base_url if isinstance(base_url, str) and base_url else None
 
 
-def _read_text_or_none(script: Path) -> str | None:
-    """``script``'s text, or None if it is not decodable as UTF-8.
-
-    The idempotence check runs BEFORE the ownership guard, so an undecodable
-    file here must not raise — otherwise the guard it feeds never runs and a
-    binary in the way aborts with a traceback instead of the guard's message
-    (or its ``--force`` override). ``is_managed`` already treats unreadable as
-    "not ours"; this keeps the earlier read consistent with it.
-    """
-    try:
-        return script.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
-
-
 def _is_ours(paths: Paths, spec: WrapperSpec, token: str) -> bool:
     """True iff the file at ``spec.alias`` is one we may replace unasked.
 
@@ -661,7 +646,7 @@ def _is_ours(paths: Paths, spec: WrapperSpec, token: str) -> bool:
     """
     if is_managed(paths, spec.alias):
         return True
-    existing = _read_text_or_none(paths.script_for(spec.alias))
+    existing = read_text_or_none(paths.script_for(spec.alias))
     if existing is None:
         return False
 
@@ -775,7 +760,7 @@ def _catalog_self_marked(path: Path) -> bool:
     that. Unreadable/non-JSON/missing key → False, the same safe-refuse answer
     every other ownership check in this module gives.
     """
-    body = _read_text_or_none(path)
+    body = read_text_or_none(path)
     if body is None:
         return False
     try:
@@ -885,7 +870,7 @@ def _decide(paths: Paths, spec: WrapperSpec, f: _FilePlan) -> _Action:
     """
     if not f.path.exists():
         return _Action.WRITE
-    if _read_text_or_none(f.path) == f.body:
+    if read_text_or_none(f.path) == f.body:
         return _Action.SKIP
     if not f.managed_check(f.path):
         return _Action.OVERWRITE_FOREIGN

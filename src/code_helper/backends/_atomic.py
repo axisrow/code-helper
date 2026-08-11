@@ -30,7 +30,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-__all__ = ["atomic_write"]
+__all__ = ["atomic_write", "read_text_or_none"]
 
 
 def atomic_write(path: str | Path, data: bytes | str, mode: int | None = None) -> None:
@@ -142,3 +142,25 @@ def atomic_write(path: str | Path, data: bytes | str, mode: int | None = None) -
         # mode=None over an existing file → restore its prior mode (the temp's
         # mode would otherwise stick).
         os.chmod(str(dest), prior_mode)
+
+
+def read_text_or_none(path: str | Path) -> str | None:
+    """Read ``path`` as UTF-8 text, returning ``None`` on any read failure.
+
+    The read-side companion to :func:`atomic_write`: the same modules that
+    route every write through one primitive used to each carry their own copy
+    of this "never raises" read (``wrappers._read_text_or_none`` and
+    ``codex_default._read_text_or_none``), differing only in whether
+    ``FileNotFoundError`` was listed separately — even though it is already an
+    ``OSError`` subclass. One function here closes that drift.
+
+    ``None`` covers: the file does not exist, is unreadable (permissions), is
+    a dangling symlink, or is not decodable as UTF-8 (a binary, a truncated
+    UTF-8 sequence). Callers (the idempotence check, the ownership guard, the
+    TOML pre-check) all treat ``None`` as "safe-refuse / not ours" — the same
+    posture :func:`is_managed` already uses for unreadable files.
+    """
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
