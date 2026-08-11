@@ -505,6 +505,29 @@ def test_valid_default_wrapper_none_for_an_unmanaged_file(tmp_path):
 
 
 @pytest.mark.integration
+def test_valid_default_wrapper_rejects_a_wrong_agent_preset(tmp_path):
+    """A preset alias belongs to a specific agent — ``valid_default_wrapper``
+    for a different agent must not return it, or a per-agent consumer would
+    apply a wrapper that launches the wrong agent/config shape."""
+    from code_helper.services.state import set_default_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    set_default_wrapper(paths, "codex", "glm")  # glm is a claude preset
+    assert valid_default_wrapper(paths, "codex") is None
+
+
+@pytest.mark.integration
+def test_valid_default_wrapper_none_for_a_malformed_alias(tmp_path):
+    """A hand-edited/corrupt state entry with a path separator must degrade to
+    None, never raise — the read path is contractually non-raising."""
+    from code_helper.services.state import set_default_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    set_default_wrapper(paths, "claude", "../x")
+    assert valid_default_wrapper(paths, "claude") is None
+
+
+@pytest.mark.integration
 def test_install_wrapper_updates_after_token_rotation(tmp_path):
     """Re-installing with a new token rewrites the script."""
     paths = Paths.from_home(tmp_path)

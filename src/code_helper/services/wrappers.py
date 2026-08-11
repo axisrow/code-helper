@@ -1296,20 +1296,27 @@ def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
     ``secrets.valid_active_profile`` relies on. Checks the single alias
     directly (``is_installed``/``is_managed``) rather than scanning the whole
     ``bin_dir``, since this runs on the TUI's hot render path.
+
+    The alias must also belong to ``agent_name`` — a per-agent consumer must
+    never be handed a wrapper that launches a different agent. And the read
+    never raises: a malformed alias (path separator, ``.``/``..``) degrades to
+    ``None`` before any path arithmetic.
     """
     from code_helper.services.state import default_wrapper
 
     alias = default_wrapper(paths, agent_name)
     if alias is None:
         return None
+    if not _is_usable_alias(alias):
+        return None
     if alias in preset_names():
-        return alias
-    if (
-        is_installed(paths, alias)
-        and is_managed(paths, alias)
-        and _is_usable_alias(alias)
-    ):
-        return alias
+        if get_preset(alias).agent == agent_name:
+            return alias
+        return None
+    if is_installed(paths, alias) and is_managed(paths, alias):
+        spec = spec_from_installed(paths, alias)
+        if spec is not None and spec.agent.name == agent_name:
+            return alias
     return None
 
 
