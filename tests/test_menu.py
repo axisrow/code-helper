@@ -765,3 +765,28 @@ def test_section_rejects_multiline_text():
         Section("group\nsecret")
     with pytest.raises(ValueError, match="single line"):
         Section("group\rsecret")
+
+
+@pytest.mark.unit
+def test_on_key_returns_action_after_menu_has_closed():
+    seen = []
+    result = select_from_menu(
+        ["wrapper"],
+        on_key={"a": lambda value: seen.append(value) or "add"},
+        read_key=_fake_keys(["a"]),
+        print_fn=lambda _: None,
+    )
+    assert result == "add"
+    assert seen == ["wrapper"]
+
+
+@pytest.mark.unit
+def test_numbered_false_hides_digit_column():
+    lines = []
+    select_from_menu(
+        ["wrapper"],
+        numbered=False,
+        read_key=_fake_keys(["ENTER"]),
+        print_fn=lines.append,
+    )
+    assert not any("·" in line for line in lines)

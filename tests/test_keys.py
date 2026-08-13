@@ -346,3 +346,10 @@ def test_select_from_menu_default_reader_preserves_pushback_across_calls(monkeyp
     assert first_result == "only"
     # If the parked Down was dropped, the immediate Enter selects "first".
     assert second_result == "second"
+
+
+@pytest.mark.unit
+def test_utf8_layout_key_is_decoded_before_translation():
+    """A Cyrillic keypress is one key, not replacement bytes."""
+    assert _translate("ф", _fake_read_more([])) == _translate("a", _fake_read_more([]))
+    assert _translate("\xd1", _fake_read_more(["\x84"])) == "a"

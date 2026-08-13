@@ -30,7 +30,12 @@ import stat
 import tempfile
 from pathlib import Path
 
-__all__ = ["atomic_write", "read_text_or_none"]
+__all__ = ["atomic_write", "read_text_or_none", "remove_file"]
+
+
+def remove_file(path: str | Path) -> None:
+    """Remove one path without following it or recursively deleting anything."""
+    Path(path).unlink()
 
 
 def atomic_write(path: str | Path, data: bytes | str, mode: int | None = None) -> None:

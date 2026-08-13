@@ -14,7 +14,24 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-__all__ = ["NewProfileOutcome", "classify_new_profile", "validate_new_profile_name"]
+__all__ = [
+    "NewProfileOutcome",
+    "classify_new_profile",
+    "validate_new_profile_name",
+    "profile_slots",
+]
+
+
+def profile_slots(paths) -> list[tuple[str, str]]:
+    """Return up to ten stable ``(provider, profile)`` shortcut slots."""
+    from code_helper.services.model import PROVIDERS
+    from code_helper.services.secrets import profile_names
+
+    slots: list[tuple[str, str]] = []
+    for provider in PROVIDERS:
+        for profile in profile_names(paths, provider.name):
+            slots.append((provider.name, profile))
+    return slots[:10]
 
 
 class NewProfileOutcome(StrEnum):

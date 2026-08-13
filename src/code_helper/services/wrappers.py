@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import unquote
 
-from code_helper.backends._atomic import atomic_write, read_text_or_none
+from code_helper.backends._atomic import atomic_write, read_text_or_none, remove_file
 from code_helper.errors import CodeHelperError
 from code_helper.services.model import (
     Agent,
@@ -1104,7 +1104,7 @@ def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) ->
             changed = True
             continue
         try:
-            path.unlink()
+            remove_file(path)
         except OSError as exc:
             print(
                 f"warning: failed to remove orphaned sibling {path}: {exc}",
@@ -1188,13 +1188,24 @@ def install_wrapper(
 
 
 def remove_wrapper(
-    paths: Paths, name: str, *, dry_run: bool = False, force: bool = False
+    paths: Paths,
+    name: str,
+    *,
+    dry_run: bool = False,
+    force: bool = False,
+    confirm: Callable[[list[Path]], bool] | None = None,
 ) -> bool:
     """Remove a wrapper and its managed OPENAI_TOML siblings safely.
 
     Refuses to delete an unmanaged executable unless the caller explicitly
     passes ``force``. Only siblings carrying their own ownership proof are
     removed, so a wrapper removal cannot silently delete user configuration.
+
+    ``confirm`` is asked once, with the full list of files about to be
+    unlinked, before anything is touched — mirroring ``install_wrapper``'s
+    per-file ``confirm`` gate on an overwrite. ``force`` bypasses it (it
+    already means "I know what I'm removing"); dry-run never calls it, since
+    dry-run never mutates anything to confirm.
     """
     if not _is_usable_alias(name):
         raise CodeHelperError(f"invalid wrapper name: {name}")
@@ -1232,9 +1243,12 @@ def remove_wrapper(
             print(f"would remove {path}")
         return True
 
+    if not force and confirm is not None and not confirm(targets):
+        raise CodeHelperError(f"removal of {wrapper} was not confirmed")
+
     for path in targets:
         try:
-            path.unlink()
+            remove_file(path)
         except OSError as exc:
             # Every file is untouched or gone at this point — the default
             # pointer has NOT been cleared yet, so a still-installed wrapper
@@ -1340,6 +1354,37 @@ def describe_all(
             ),
         )
         for spec in specs
+    ]
+
+
+def describe_wrapper_columns(
+    spec: WrapperSpec, *, installed: bool, default: bool = False
+) -> tuple[str, str, str]:
+    """TUI-only name/provider/model columns, independent of prose descriptions."""
+    name = f"● {spec.name}" if default else f"  {spec.name}"
+    model = spec.model + (" (not installed)" if not installed else "")
+    return name, spec.provider.name, model
+
+
+def describe_all_columns(
+    paths: Paths, specs: Sequence[WrapperSpec], *, defaults: dict[str, str | None]
+) -> list[tuple[str, tuple[str, str, str]]]:
+    """Return aligned semantic columns for the interactive main screen."""
+    raw = [
+        (
+            spec.name,
+            describe_wrapper_columns(
+                spec,
+                installed=is_installed(paths, spec.name),
+                default=defaults.get(spec.agent.name) == spec.name,
+            ),
+        )
+        for spec in specs
+    ]
+    widths = [max((len(columns[i]) for _, columns in raw), default=0) for i in range(2)]
+    return [
+        (name, (columns[0].ljust(widths[0]), columns[1].ljust(widths[1]), columns[2]))
+        for name, columns in raw
     ]
 
 
