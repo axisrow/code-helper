@@ -1069,6 +1069,72 @@ def test_apply_codex_default_dispatches_into_apply_set_default(monkeypatch):
     assert calls[0]["force"] is False
 
 
+@pytest.mark.unit
+def test_run_shows_output_live_before_a_blocking_input_call(monkeypatch):
+    """``_run`` must not hide a handler's output behind a confirmation prompt.
+
+    ``_confirm_set_default`` prints a preview and then calls ``input()`` —
+    exactly the shape reproduced here. Redirecting stdout for the whole
+    handler (as ``_run`` used to) buffers the preview into a ``StringIO``:
+    the preview is invisible on the real terminal at the moment ``input()``
+    blocks, so the user answers blind and only sees the preview afterwards,
+    too late to inform the decision.
+    """
+    import argparse
+    import io
+
+    from code_helper.cli.tui import TuiSession
+
+    session = TuiSession(argparse.Namespace(debug=False))
+    monkeypatch.setattr("code_helper.cli.menu.press_any_key", lambda *_a, **_kw: None)
+
+    # A stand-in for the real terminal, so writes to it can be inspected
+    # precisely at the moment input() blocks.
+    real_terminal = io.StringIO()
+    monkeypatch.setattr("sys.stdout", real_terminal)
+
+    seen_before_input = {}
+
+    def fake_input(prompt=""):
+        # At the moment input() blocks, the preview line must already have
+        # reached the real terminal — not be trapped in a redirect buffer
+        # that is only replayed after the handler returns.
+        seen_before_input["preview_visible"] = (
+            "About to write /some/path" in real_terminal.getvalue()
+        )
+        return "y"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    def handler(_args):
+        print("About to write /some/path. Continue? [y/N]")
+        input()
+
+    session._run(handler)
+
+    assert seen_before_input.get("preview_visible") is True
+
+
+@pytest.mark.unit
+def test_run_reraises_under_debug():
+    """``_run`` must honor ``--debug`` like every other dispatch site
+    (``emit_error``'s contract): re-raise ``CodeHelperError`` instead of
+    swallowing it into a one-line buffered message, so ``--debug`` still
+    surfaces the full traceback from the TUI."""
+    import argparse
+
+    from code_helper.cli.tui import TuiSession
+    from code_helper.errors import CodeHelperError
+
+    session = TuiSession(argparse.Namespace(debug=True))
+
+    def handler(_args):
+        raise CodeHelperError("boom")
+
+    with pytest.raises(CodeHelperError, match="boom"):
+        session._run(handler)
+
+
 @pytest.mark.integration
 def test_apply_codex_default_forwards_runtime_base_url(monkeypatch):
     """A codex default wrapper on a REQUIRED-base_url provider (e.g. litellm)

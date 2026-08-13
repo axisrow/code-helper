@@ -1220,7 +1220,13 @@ def remove_wrapper(
         )
         if path.exists() and ours
     ]
-    targets = [wrapper, *siblings]
+    # Siblings first, the wrapper executable last: `is_managed`/`is_installed`
+    # both key off the executable's presence, so keeping it around until
+    # every sibling is confirmed gone means a failed unlink partway through
+    # (permissions, a transient filesystem error) leaves a wrapper that is
+    # still recognized and retryable — not a dangling alias a retry can no
+    # longer find (`wrapper not found`) with orphaned siblings behind it.
+    targets = [*siblings, wrapper]
     if dry_run:
         for path in targets:
             print(f"would remove {path}")

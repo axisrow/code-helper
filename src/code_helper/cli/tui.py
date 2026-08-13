@@ -150,19 +150,50 @@ class TuiSession:
         press_any_key("Press any key to continue...")
 
     def _run(self, handler) -> None:
-        """Dispatch a CLI handler and preserve its user-facing output."""
-        import contextlib
-        import io
+        """Dispatch a CLI handler and preserve its user-facing output.
+
+        Tees stdout instead of fully redirecting it: some handlers (e.g.
+        ``set-default``'s ``_confirm_set_default``) print a preview and then
+        block on ``input()`` for a yes/no confirmation. A full
+        ``redirect_stdout`` buffers that preview into the capture and never
+        shows it before ``input()`` blocks, so the user would confirm a
+        destructive config write blind. Writing to both the real stdout and
+        the buffer keeps that output live while still letting ``_notify``
+        replay the full transcript afterwards so it survives the next
+        redraw.
+        """
+        import sys
 
         from code_helper.errors import CodeHelperError
 
-        output = io.StringIO()
+        class _Tee:
+            def __init__(self, *streams) -> None:
+                self._streams = streams
+
+            def write(self, text: str) -> int:
+                for stream in self._streams:
+                    stream.write(text)
+                return len(text)
+
+            def flush(self) -> None:
+                for stream in self._streams:
+                    stream.flush()
+
+        import io
+
+        buffer = io.StringIO()
+        real_stdout = sys.stdout
+        sys.stdout = _Tee(real_stdout, buffer)
         try:
-            with contextlib.redirect_stdout(output):
-                handler(self.args)
+            handler(self.args)
         except CodeHelperError as exc:
-            output.write(f"error: {exc}\n")
-        self._notify(output.getvalue().rstrip())
+            if getattr(self.args, "debug", False):
+                sys.stdout = real_stdout
+                raise
+            print(f"error: {exc}")
+        finally:
+            sys.stdout = real_stdout
+        self._notify(buffer.getvalue().rstrip())
 
     def _read_text(self, prompt: str) -> str | None:
         from code_helper.cli.menu import MenuCancelled, read_line

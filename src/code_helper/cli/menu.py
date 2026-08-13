@@ -451,7 +451,6 @@ def _render_frame(
     *,
     prompt: str | Callable[[], str],
     clear: bool,
-    clear_seq: str,
     clear_screen: str,
     print_fn: Callable[[str], None],
 ) -> None:
@@ -667,7 +666,6 @@ def select_from_menu(
         # keypress OR per `select_from_menu` call) drops a pushed-back byte.
         read_key = _default_read_key
 
-    clear_seq = f"\033[{state.frame_lines}A\033[J"
     clear_screen = "\033[2J\033[H"
     hide_cursor = "\033[?25l"
     show_cursor = "\033[?25h"
@@ -679,7 +677,6 @@ def select_from_menu(
                 state,
                 prompt=prompt,
                 clear=clear,
-                clear_seq=clear_seq,
                 clear_screen=clear_screen,
                 print_fn=print_fn,
             )

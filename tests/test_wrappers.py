@@ -1819,3 +1819,50 @@ def test_remove_wrapper_refuses_foreign_file_without_force(tmp_path):
     with pytest.raises(CodeHelperError, match="use --force"):
         remove_wrapper(paths, "foreign")
     assert remove_wrapper(paths, "foreign", force=True) is True
+
+
+@pytest.mark.integration
+def test_remove_wrapper_survives_a_failed_sibling_unlink(tmp_path, monkeypatch):
+    """A mid-sequence unlink failure must not strand the wrapper's default
+    pointer or make the wrapper itself unrecoverable: the executable is the
+    ownership proof retried removals need, so it must be the LAST thing
+    unlinked — and the default pointer must only clear once every target is
+    actually gone."""
+    from pathlib import Path
+
+    from code_helper.services.state import default_wrapper, set_default_wrapper
+    from code_helper.services.wrappers import remove_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    install_wrapper(paths, spec)
+    set_default_wrapper(paths, "codex", spec.alias)
+
+    catalog = paths.codex_catalog_for(spec.alias)
+    real_unlink = Path.unlink
+
+    def flaky_unlink(self, *a, **kw):
+        if self == catalog:
+            raise OSError("simulated transient failure")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+
+    with pytest.raises(CodeHelperError, match="failed to remove"):
+        remove_wrapper(paths, spec.alias)
+
+    # The wrapper itself must still be present — it is the ownership proof a
+    # retry needs — and the default pointer must not have been cleared for a
+    # removal that didn't fully succeed.
+    assert paths.script_for(spec.alias).exists()
+    assert default_wrapper(paths, "codex") == spec.alias
+
+    monkeypatch.undo()
+
+    # A retry now succeeds and cleans up everything, including the sibling
+    # that failed the first time.
+    assert remove_wrapper(paths, spec.alias) is True
+    assert not paths.script_for(spec.alias).exists()
+    assert not paths.codex_config_for(spec.alias).exists()
+    assert not catalog.exists()
+    assert default_wrapper(paths, "codex") is None
