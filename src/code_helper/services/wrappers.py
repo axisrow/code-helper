@@ -80,6 +80,7 @@ __all__ = [
     "render_script",
     # lifecycle
     "install_wrapper",
+    "remove_wrapper",
     "is_installed",
     "is_managed",
     "spec_from_installed",
@@ -1186,6 +1187,56 @@ def install_wrapper(
     return wrote
 
 
+def remove_wrapper(
+    paths: Paths, name: str, *, dry_run: bool = False, force: bool = False
+) -> bool:
+    """Remove a wrapper and its managed OPENAI_TOML siblings safely.
+
+    Refuses to delete an unmanaged executable unless the caller explicitly
+    passes ``force``. Only siblings carrying their own ownership proof are
+    removed, so a wrapper removal cannot silently delete user configuration.
+    """
+    if not _is_usable_alias(name):
+        raise CodeHelperError(f"invalid wrapper name: {name}")
+    wrapper = paths.script_for(name)
+    if not wrapper.exists():
+        raise CodeHelperError(f"wrapper not found: {wrapper}")
+    if not is_managed(paths, name) and not force:
+        raise CodeHelperError(
+            f"refusing to remove unmanaged file {wrapper} (use --force)"
+        )
+
+    siblings = [
+        path
+        for path, ours in (
+            (
+                paths.codex_config_for(name),
+                _ownership_marker_only(paths.codex_config_for(name)),
+            ),
+            (
+                paths.codex_catalog_for(name),
+                _catalog_self_marked(paths.codex_catalog_for(name)),
+            ),
+        )
+        if path.exists() and ours
+    ]
+    targets = [wrapper, *siblings]
+    if dry_run:
+        for path in targets:
+            print(f"would remove {path}")
+        return True
+    for path in targets:
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise CodeHelperError(f"failed to remove {path}: {exc}") from exc
+        print(f"removed {path}")
+    from code_helper.services.state import clear_default_wrapper
+
+    clear_default_wrapper(paths, name)
+    return True
+
+
 def describe_wrapper(
     spec: WrapperSpec,
     *,
@@ -1351,10 +1402,6 @@ def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
     if is_installed(paths, alias) and is_managed(paths, alias):
         spec = spec_from_installed(paths, alias)
         if spec is not None and spec.agent.name == agent_name:
-            return alias
-        return None
-    if alias in preset_names():
-        if get_preset(alias).agent == agent_name:
             return alias
         return None
     return None

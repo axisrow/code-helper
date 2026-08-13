@@ -63,6 +63,7 @@ __all__ = [
     "set_active_selection",
     "default_wrapper",
     "set_default_wrapper",
+    "clear_default_wrapper",
 ]
 
 
@@ -158,6 +159,22 @@ def default_wrapper(paths: Paths, agent_name: str) -> str | None:
     if not isinstance(wrappers, dict):
         return None
     return _string_or_none(wrappers.get(agent_name))
+
+
+def clear_default_wrapper(paths: Paths, alias: str) -> None:
+    """Remove any default pointers to a deleted wrapper alias."""
+    state = load_state(paths)
+    wrappers = state.get("default_wrapper")
+    if not isinstance(wrappers, dict):
+        return
+    remaining = {agent: value for agent, value in wrappers.items() if value != alias}
+    if remaining == wrappers:
+        return
+    if remaining:
+        state["default_wrapper"] = remaining
+    else:
+        state.pop("default_wrapper", None)
+    _write_state(paths, state)
 
 
 def set_default_wrapper(paths: Paths, agent_name: str, alias: str) -> None:

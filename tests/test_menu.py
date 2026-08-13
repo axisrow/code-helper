@@ -306,14 +306,14 @@ def test_select_from_menu_end_jumps_to_last():
 
 
 @pytest.mark.unit
-def test_select_from_menu_page_up_down_behave_like_home_end():
+def test_select_from_menu_page_up_down_move_by_a_viewport():
     assert (
         select_from_menu(
             ["a", "b", "c"],
             read_key=_fake_keys(["PAGE_DOWN", "ENTER"]),
             print_fn=lambda _: None,
         )
-        == "c"
+        == "b"
     )
     assert (
         select_from_menu(

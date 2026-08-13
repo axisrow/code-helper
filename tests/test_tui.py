@@ -302,7 +302,7 @@ def test_list_handles_a_managed_wrapper_whose_marker_names_an_unknown_provider(
     _menu_sequence(monkeypatch, ["list", "orphaned-wrapper", "__back__", "quit"])
 
     assert main(["tui"]) == 0
-    assert "error" in capsys.readouterr().err.lower()
+    assert "error" in capsys.readouterr().out.lower()
 
 
 @pytest.mark.integration
@@ -367,13 +367,13 @@ def test_provider_first_flow_through_a_real_pty(tmp_path):
     try:
         read_until("Esc quit")
         # `1` is the first wrapper on the main screen (issue #29): Enter makes
-        # it the default for its agent. We stay on the main screen — no
-        # sub-screen to Esc out of.
+        # it the default for its agent. Uninstalled wrappers now give a
+        # visible instruction rather than creating a ghost default.
         menu_key("1")
+        read_until("Wrapper not installed")
+        menu_key(" ")
         read_until("Esc quit")
-        # Esc on the main screen exits (exit_word="quit").
-        menu_key("\x1b")
-        assert b"Press any key" not in output
+        assert b"Press any key" in output
     finally:
         if child.poll() is None:
             child.kill()
@@ -453,14 +453,15 @@ def test_main_screen_default_wrapper_marker_through_a_real_pty(tmp_path):
 
         try:
             read_until("Esc quit")
-            # First wrapper (deepseek) gets no `●` yet on a fresh install.
+            # Uninstalled wrappers cannot become defaults: the guidance stays
+            # visible until acknowledged, then the menu redraws unchanged.
             menu_key("1")
+            read_until("Wrapper not installed")
+            menu_key(" ")
             read_until("Esc quit")
             if expect_marker_after_enter:
-                # The `●` marker now prefixes the default wrapper row.
-                assert b"\xe2\x97\x8f" in output  # ● in UTF-8
-            menu_key("\x1b")  # Esc quits the main screen
-            assert b"Press any key" not in output
+                assert b"\xe2\x97\x8f" not in output
+            assert b"Press any key" in output
         finally:
             if child.poll() is None:
                 child.kill()
@@ -886,9 +887,11 @@ def test_main_screen_marker_on_default_wrapper(monkeypatch):
     with the `●` marker; every other wrapper is not."""
     from code_helper.cli.menu import Section
     from code_helper.services.state import default_wrapper, set_default_wrapper
+    from code_helper.services.wrappers import install_wrapper
 
     paths = Paths.default()
-    # glm is a preset (claude agent); mark it the default for claude.
+    # A default must point to a real installed wrapper, not just a preset name.
+    install_wrapper(paths, "glm", token="test-token")
     set_default_wrapper(paths, "claude", "glm")
     assert default_wrapper(paths, "claude") == "glm"
 
@@ -917,9 +920,11 @@ def test_main_screen_enter_sets_default_wrapper(monkeypatch):
     """Enter on a wrapper row makes it the default for its agent; the marker
     moves on the next redraw."""
     from code_helper.services.state import default_wrapper
+    from code_helper.services.wrappers import install_wrapper
 
     paths = Paths.default()
     assert default_wrapper(paths, "claude") is None
+    install_wrapper(paths, "glm", token="test-token")
 
     # DOWN moves to glm (second selectable wrapper after deepseek), Enter sets
     # it as the default, then END + ENTER reaches Quit.
@@ -977,7 +982,7 @@ def test_main_screen_no_dead_end_for_non_secret_wrapper(monkeypatch, capsys):
     assert main(["tui"]) == 0
 
     output = capsys.readouterr().out
-    assert "has no editable token." not in output
+    assert "deepseek has no editable token." in output
 
 
 @pytest.mark.integration
@@ -1026,8 +1031,8 @@ def test_main_screen_has_apply_codex_default_row(monkeypatch):
 @pytest.mark.integration
 def test_apply_codex_default_dispatches_into_apply_set_default(monkeypatch):
     """Selecting the row calls ``apply_set_default`` with the codex default
-    wrapper's ``(agent, provider, model)`` and ``force=True`` (the menu item IS
-    the confirmation, so the CLI's ``[y/N]`` prompt is skipped — issue #30)."""
+    wrapper's ``(agent, provider, model)`` and preserves ``force=False`` so the
+    CLI confirmation preview is shown before Codex configuration changes."""
     import code_helper.services.codex_default as codex_default
     from code_helper.services.spec import build_spec
     from code_helper.services.state import set_default_wrapper
@@ -1061,7 +1066,7 @@ def test_apply_codex_default_dispatches_into_apply_set_default(monkeypatch):
     assert calls[0]["agent"] == "codex"
     assert calls[0]["provider"] == "ollama"
     assert calls[0]["model"] == "qwen3.5:9b"
-    assert calls[0]["force"] is True
+    assert calls[0]["force"] is False
 
 
 @pytest.mark.integration
@@ -1145,5 +1150,5 @@ def test_apply_codex_default_errors_when_no_codex_default_set(monkeypatch, capsy
     _menu_sequence(monkeypatch, ["set-default", "quit"])
 
     assert main(["tui"]) == 0
-    err = capsys.readouterr().err
-    assert "no default wrapper set for codex" in err.lower()
+    output = capsys.readouterr().out
+    assert "no default wrapper set for codex" in output.lower()

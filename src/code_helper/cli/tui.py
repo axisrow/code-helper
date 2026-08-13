@@ -4,9 +4,10 @@ The TUI is deliberately a thin English-only front end over the CLI handlers.
 It owns navigation and collects interactive values; ``parser.py`` remains the
 single place that installs wrappers and updates the credential cache.
 
-There are no pause screens.  Every selection enters another menu and every
-submenu has an explicit ``Back`` entry (Esc/q has the same meaning).  Ctrl-C
-leaves the TUI from any depth.
+Navigation has no pause screens: every selection enters another menu and every
+submenu has an explicit ``Back`` entry (Esc/q has the same meaning). Results and
+validation errors are acknowledged so they remain visible. Ctrl-C leaves the TUI
+from any depth.
 """
 
 from __future__ import annotations
@@ -140,13 +141,28 @@ class TuiSession:
                 raise
             return _BACK
 
-    def _run(self, handler) -> None:
-        from code_helper.errors import CodeHelperError, emit_error
+    def _notify(self, text: str) -> None:
+        """Show a result until it is acknowledged instead of clearing it."""
+        from code_helper.cli.menu import press_any_key
 
+        if text:
+            print(text)
+        press_any_key("Press any key to continue...")
+
+    def _run(self, handler) -> None:
+        """Dispatch a CLI handler and preserve its user-facing output."""
+        import contextlib
+        import io
+
+        from code_helper.errors import CodeHelperError
+
+        output = io.StringIO()
         try:
-            handler(self.args)
+            with contextlib.redirect_stdout(output):
+                handler(self.args)
         except CodeHelperError as exc:
-            emit_error(exc, getattr(self.args, "debug", False))
+            output.write(f"error: {exc}\n")
+        self._notify(output.getvalue().rstrip())
 
     def _read_text(self, prompt: str) -> str | None:
         from code_helper.cli.menu import MenuCancelled, read_line
@@ -169,10 +185,10 @@ class TuiSession:
                     raise
                 return None
             except ValueError as exc:
-                print(f"Invalid token: {exc}")
+                self._notify(f"Invalid token: {exc}")
                 continue
             if not token:
-                print("No token entered.")
+                self._notify("No token entered.")
                 return None
             return token
 
@@ -228,16 +244,16 @@ class TuiSession:
             # messages — word-for-word unchanged.
             outcome = classify_new_profile(names, renamed_old, new_name)
             if outcome is NewProfileOutcome.EMPTY:
-                print("Profile names cannot be empty.")
+                self._notify("Profile names cannot be empty.")
                 return None
             if outcome is NewProfileOutcome.SAME:
-                print("Profile names must be different.")
+                self._notify("Profile names must be different.")
                 return None
             if outcome is NewProfileOutcome.COLLISION_RENAMED:
-                print(f"Profile {renamed_old!r} already exists.")
+                self._notify(f"Profile {renamed_old!r} already exists.")
                 return None
             if outcome is NewProfileOutcome.COLLISION_NEW:
-                print(f"Profile {new_name!r} already exists.")
+                self._notify(f"Profile {new_name!r} already exists.")
                 return None
             token = self._read_token(f"Token for {provider_name} ({new_name}): ")
             return (new_name, token, old_name, renamed_old) if token else _BACK
@@ -247,10 +263,10 @@ class TuiSession:
             return _BACK
         outcome = validate_new_profile_name(new_name, names)
         if outcome is NewProfileOutcome.EMPTY:
-            print("Profile name cannot be empty.")
+            self._notify("Profile name cannot be empty.")
             return None
         if outcome is NewProfileOutcome.COLLISION_NEW:
-            print(f"Profile {new_name!r} already exists.")
+            self._notify(f"Profile {new_name!r} already exists.")
             return None
         token = self._read_token(f"Token for {provider_name} ({new_name}): ")
         return (new_name, token, None, None) if token else _BACK
@@ -372,14 +388,14 @@ class TuiSession:
 
     def _resolve_spec(self, alias: str) -> object | None:
         """Resolve ``alias`` to a spec — installed wrapper first, else preset."""
-        from code_helper.errors import CodeHelperError, emit_error
+        from code_helper.errors import CodeHelperError
         from code_helper.services.paths import Paths
         from code_helper.services.wrappers import get_spec, spec_from_installed
 
         try:
             return spec_from_installed(Paths.default(), alias) or get_spec(alias)
         except CodeHelperError as exc:
-            emit_error(exc, getattr(self.args, "debug", False))
+            self._notify(f"error: {exc}")
             return None
 
     # --- actions ---------------------------------------------------------
@@ -392,7 +408,8 @@ class TuiSession:
         if spec is None:
             return
         if spec.auth != "secret":
-            return  # silent no-op — no dead-end screen (issue #29)
+            self._notify(f"{alias} has no editable token.")
+            return
         profile = self._select_profile(spec.provider.name, editing=True)
         if profile is None:
             return
@@ -408,18 +425,14 @@ class TuiSession:
     def _run_set_default(self, paths) -> None:
         """Patch ``~/.codex/config.toml`` with codex's default wrapper."""
         from code_helper.cli.parser import _handle_set_default
-        from code_helper.errors import CodeHelperError, emit_error
         from code_helper.services.model import BaseUrlPolicy
         from code_helper.services.wrappers import valid_default_wrapper
 
         alias = valid_default_wrapper(paths, "codex")
         if alias is None:
-            emit_error(
-                CodeHelperError(
-                    "no default wrapper set for codex — pick a codex wrapper "
-                    "(Enter on its row) first"
-                ),
-                getattr(self.args, "debug", False),
+            self._notify(
+                "error: no default wrapper set for codex — pick an installed "
+                "codex wrapper (Enter on its row) first"
             )
             return
         spec = self._resolve_spec(alias)
@@ -439,13 +452,13 @@ class TuiSession:
         self.args.restore = False
         self.args.slot = None
         self.args.catalog_json = None
-        self.args.force = True
+        self.args.force = False
         self._run(_handle_set_default)
 
     def _run_add(self) -> None:
         """Create a wrapper through provider → profile → model → agent → name."""
         from code_helper.cli.parser import _handle_add
-        from code_helper.errors import CodeHelperError, emit_error
+        from code_helper.errors import CodeHelperError
         from code_helper.services.model import (
             AGENTS,
             PROVIDERS,
@@ -503,7 +516,7 @@ class TuiSession:
                 try:
                     provider = with_base_url(provider, typed_url or None)
                 except CodeHelperError as exc:
-                    emit_error(exc, getattr(self.args, "debug", False))
+                    self._notify(f"error: {exc}")
                     continue
 
             # Profile is the previous level for model selection.
@@ -564,13 +577,14 @@ class TuiSession:
                                 model, agent_name, profile_name or None
                             )
                         except CodeHelperError as exc:
-                            emit_error(exc, getattr(self.args, "debug", False))
+                            self._notify(f"error: {exc}")
                             break
                         alias = self._read_text(f"Command name [{default_alias}]: ")
                         if alias is None:
                             continue
 
                         self.args.name = None
+                        self.args.force = False
                         self.args.agent = agent_name
                         self.args.provider = provider.name
                         self.args.model = model
@@ -591,13 +605,20 @@ class TuiSession:
             choice = self._pick(
                 [
                     ("debug", f"Debug: {'on' if debug else 'off'}"),
+                    (
+                        "dry-run",
+                        f"Dry-run: {'on' if getattr(self.args, 'dry_run', False) else 'off'}",
+                    ),
                     (_BACK, "Back"),
                 ],
                 "Settings:",
             )
             if choice == _BACK:
                 return
-            self.args.debug = not debug
+            if choice == "debug":
+                self.args.debug = not debug
+            else:
+                self.args.dry_run = not getattr(self.args, "dry_run", False)
 
     def _run_profile_screen(self) -> None:
         """Choose the active provider and its active profile (the Tab cycle)."""
@@ -620,7 +641,7 @@ class TuiSession:
             return
         names = list(profile_names(paths, provider))
         if not names:
-            print(f"No profiles for {provider}.")
+            self._notify(f"No profiles for {provider}.")
             return
         current = valid_active_profile(paths, provider)
         items = [
@@ -770,10 +791,16 @@ class TuiSession:
                     # agent. `set_default_wrapper` is the raw store (#28);
                     # `choice` came from `_wrapper_rows`, which only yields
                     # real aliases, so the write is always of a real alias.
+                    from code_helper.services.wrappers import is_installed
+
                     spec = self._resolve_spec(choice)
                     if spec is None:
                         continue
+                    if not is_installed(paths, choice):
+                        self._notify("Wrapper not installed — use Add first.")
+                        continue
                     set_default_wrapper(paths, spec.agent.name, choice)
+                    self._notify(f"Default wrapper set to {choice}.")
         except MenuCancelled as exc:
             if exc.hard:
                 raise

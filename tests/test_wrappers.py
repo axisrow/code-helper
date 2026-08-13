@@ -456,14 +456,13 @@ def test_valid_default_wrapper_none_when_unset(tmp_path):
 
 
 @pytest.mark.integration
-def test_valid_default_wrapper_returns_a_preset_alias(tmp_path):
-    """A preset alias is live even with nothing on disk — ``preset_names``
-    is the static half of the live set, independent of ``bin_dir``."""
+def test_valid_default_wrapper_none_for_uninstalled_preset(tmp_path):
+    """A preset name alone must not create a selectable default ghost."""
     from code_helper.services.state import set_default_wrapper
 
     paths = Paths.from_home(tmp_path)
     set_default_wrapper(paths, "claude", "glm")
-    assert valid_default_wrapper(paths, "claude") == "glm"
+    assert valid_default_wrapper(paths, "claude") is None
 
 
 @pytest.mark.integration
@@ -1791,3 +1790,32 @@ def test_describe_wrapper_marker_preserves_state_column_alignment():
         default=True,
     )
     assert unmarked.index("installed") == marked.index("installed")
+
+
+@pytest.mark.integration
+def test_remove_wrapper_removes_owned_siblings_and_clears_default(tmp_path):
+    from code_helper.services.state import default_wrapper, set_default_wrapper
+    from code_helper.services.wrappers import remove_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    install_wrapper(paths, spec)
+    set_default_wrapper(paths, "codex", spec.alias)
+
+    assert remove_wrapper(paths, spec.alias) is True
+    assert not paths.script_for(spec.alias).exists()
+    assert not paths.codex_config_for(spec.alias).exists()
+    assert not paths.codex_catalog_for(spec.alias).exists()
+    assert default_wrapper(paths, "codex") is None
+
+
+@pytest.mark.integration
+def test_remove_wrapper_refuses_foreign_file_without_force(tmp_path):
+    from code_helper.services.wrappers import remove_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    paths.bin_dir.mkdir(parents=True)
+    paths.script_for("foreign").write_text("#!/bin/sh\n", encoding="utf-8")
+    with pytest.raises(CodeHelperError, match="use --force"):
+        remove_wrapper(paths, "foreign")
+    assert remove_wrapper(paths, "foreign", force=True) is True
