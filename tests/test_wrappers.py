@@ -1810,6 +1810,67 @@ def test_remove_wrapper_removes_owned_siblings_and_clears_default(tmp_path):
 
 
 @pytest.mark.integration
+def test_remove_wrapper_asks_confirm_before_unlinking(tmp_path):
+    """``confirm`` is called with the full target list before anything is
+    touched; declining leaves every file in place."""
+    from code_helper.services.wrappers import remove_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    install_wrapper(paths, spec)
+
+    seen = []
+
+    def decline(targets):
+        seen.extend(targets)
+        return False
+
+    with pytest.raises(CodeHelperError, match="not confirmed"):
+        remove_wrapper(paths, spec.alias, confirm=decline)
+    assert paths.script_for(spec.alias) in seen
+    assert paths.script_for(spec.alias).exists()
+
+    def accept(targets):
+        return True
+
+    assert remove_wrapper(paths, spec.alias, confirm=accept) is True
+    assert not paths.script_for(spec.alias).exists()
+
+
+@pytest.mark.integration
+def test_remove_wrapper_force_bypasses_confirm(tmp_path):
+    """``force`` is "I already know what I'm removing" — it skips the
+    prompt entirely, same contract as ``install_wrapper``'s ``force``."""
+    from code_helper.services.wrappers import remove_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    install_wrapper(paths, spec)
+
+    def explode(_targets):
+        raise AssertionError("confirm must not be called when force=True")
+
+    assert remove_wrapper(paths, spec.alias, force=True, confirm=explode) is True
+    assert not paths.script_for(spec.alias).exists()
+
+
+@pytest.mark.integration
+def test_remove_wrapper_dry_run_never_asks_confirm(tmp_path):
+    """Dry-run never mutates anything, so there is nothing to confirm."""
+    from code_helper.services.wrappers import remove_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    install_wrapper(paths, spec)
+
+    def explode(_targets):
+        raise AssertionError("confirm must not be called under dry_run")
+
+    assert remove_wrapper(paths, spec.alias, dry_run=True, confirm=explode) is True
+    assert paths.script_for(spec.alias).exists()
+
+
+@pytest.mark.integration
 def test_remove_wrapper_refuses_foreign_file_without_force(tmp_path):
     from code_helper.services.wrappers import remove_wrapper
 
@@ -1898,3 +1959,43 @@ def test_remove_wrapper_reports_but_does_not_undo_a_failed_default_clear(
     assert not paths.script_for(spec.alias).exists()
     assert not paths.codex_config_for(spec.alias).exists()
     assert not paths.codex_catalog_for(spec.alias).exists()
+
+
+# --------------------------------------------------------------------------- #
+# CLI: `remove` through main([...]) — confirm gate.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_cli_remove_refuses_off_a_tty_without_force(tmp_path, monkeypatch):
+    """``confirm=None`` means "no way to ask" — must error, never read stdin,
+    same off-a-TTY fail-fast contract as ``add``'s foreign-file guard."""
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    install_wrapper(paths, spec)
+
+    assert main(["remove", spec.alias]) == 1
+    assert paths.script_for(spec.alias).exists()
+
+
+@pytest.mark.integration
+def test_cli_remove_force_bypasses_confirm_off_a_tty(tmp_path, monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    install_wrapper(paths, spec)
+
+    assert main(["remove", spec.alias, "--force"]) == 0
+    assert not paths.script_for(spec.alias).exists()
+
+
+@pytest.mark.integration
+def test_cli_remove_dry_run_never_prompts_and_never_writes(tmp_path, monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    install_wrapper(paths, spec)
+
+    assert main(["--dry-run", "remove", spec.alias]) == 0
+    assert paths.script_for(spec.alias).exists()

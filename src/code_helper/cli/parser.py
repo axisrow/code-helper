@@ -710,6 +710,26 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def _confirm_remove(paths: list) -> bool:
+    """Ask before ``remove`` deletes real files — TTY-gated, same contract as
+    :func:`_confirm_set_default` (no stdin read off a TTY, so a scripted run
+    without ``--force`` fails fast instead of hanging on input that will
+    never arrive).
+
+    Lists every file about to be unlinked (the wrapper plus any owned
+    Codex config/catalog siblings) so the user sees the full blast radius —
+    a single ``y`` answer, unlike ``set-default``'s config patch, can never
+    be undone.
+    """
+    if not sys.stdin.isatty():
+        return False
+    print("About to remove:")
+    for path in paths:
+        print(f"  {path}")
+    answer = input("Continue? [y/N] ")
+    return answer.strip().lower() in ("y", "yes")
+
+
 def _handle_remove(args: argparse.Namespace) -> int:
     """Remove one managed wrapper and its owned companion files."""
     from code_helper.services.paths import Paths
@@ -720,6 +740,7 @@ def _handle_remove(args: argparse.Namespace) -> int:
         args.name,
         dry_run=getattr(args, "dry_run", False),
         force=getattr(args, "force", False),
+        confirm=_confirm_remove,
     )
     return 0
 
