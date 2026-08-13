@@ -822,13 +822,25 @@ class TuiSession:
                     # agent. `set_default_wrapper` is the raw store (#28);
                     # `choice` came from `_wrapper_rows`, which only yields
                     # real aliases, so the write is always of a real alias.
-                    from code_helper.services.wrappers import is_installed
+                    from code_helper.services.wrappers import is_installed, is_managed
 
                     spec = self._resolve_spec(choice)
                     if spec is None:
                         continue
                     if not is_installed(paths, choice):
                         self._notify("Wrapper not installed — use Add first.")
+                        continue
+                    if not is_managed(paths, choice):
+                        # valid_default_wrapper (the only reader that
+                        # matters — the `●` marker and set-default both go
+                        # through it) requires is_installed AND is_managed.
+                        # Writing a default for an unmanaged file would
+                        # "succeed" here and silently vanish on the very
+                        # next read.
+                        self._notify(
+                            f"{choice} is not a code-helper-managed wrapper "
+                            "— cannot set it as default."
+                        )
                         continue
                     set_default_wrapper(paths, spec.agent.name, choice)
                     self._notify(f"Default wrapper set to {choice}.")

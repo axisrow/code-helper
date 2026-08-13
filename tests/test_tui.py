@@ -549,7 +549,7 @@ def test_set_default_confirmation_preview_is_visible_before_the_prompt(tmp_path)
         raise AssertionError(output.decode(errors="replace")[-3000:])
 
     def menu_key(value: str) -> None:
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + 5
         while termios.tcgetattr(master_fd)[3] & termios.ICANON:
             if time.monotonic() >= deadline:
                 raise AssertionError("TUI did not enter raw mode")
@@ -1035,6 +1035,33 @@ def test_main_screen_enter_sets_default_wrapper(monkeypatch):
     _real_menu_keys(monkeypatch, ["DOWN", "ENTER", "END", "ENTER"])
     assert main(["tui"]) == 0
     assert default_wrapper(paths, "claude") == "glm"
+
+
+@pytest.mark.integration
+def test_main_screen_enter_on_an_unmanaged_foreign_file_does_not_set_a_ghost_default(
+    monkeypatch,
+):
+    """Enter's guard checked `is_installed` (existence only), but
+    `valid_default_wrapper` — the ONLY reader that matters, used by both the
+    `●` marker and `set-default` — requires `is_installed` AND `is_managed`.
+    A foreign (unmanaged) file sitting at a preset's alias path would let
+    Enter write a default that the very next read silently rejects: a
+    default that "sets" but never sticks, with no error shown either time."""
+    from code_helper.services.state import default_wrapper
+
+    paths = Paths.default()
+    # A foreign executable at the "deepseek" preset's path — no ownership
+    # marker, so `is_installed` is True but `is_managed` is False.
+    paths.bin_dir.mkdir(parents=True, exist_ok=True)
+    foreign = paths.script_for("deepseek")
+    foreign.write_text("#!/bin/sh\necho not ours\n", encoding="utf-8")
+    foreign.chmod(0o755)
+
+    # `deepseek` is the first selectable wrapper row on a fresh menu.
+    _real_menu_keys(monkeypatch, ["ENTER", "END", "ENTER"])
+    assert main(["tui"]) == 0
+
+    assert default_wrapper(paths, "claude") is None
 
 
 @pytest.mark.integration
