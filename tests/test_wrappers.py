@@ -1482,7 +1482,7 @@ def test_shape_switch_cleanup_leaves_a_legacy_catalog_with_no_self_marker(tmp_pa
     a shape switch, rather than deleted on the strength of the sibling
     profile's marker alone.
 
-    Cleanup deliberately does NOT use ``_is_our_catalog``'s sibling-marker
+    Cleanup deliberately does NOT use ``_ownership_catalog``'s sibling-marker
     fallback (unlike the install-time overwrite guard, which does, and which
     a user can override with ``--force``): a delete has no such escape hatch,
     and "the profile next to this catalog is ours" cannot distinguish a
@@ -1635,12 +1635,12 @@ def test_install_openai_toml_refuses_foreign_catalog_next_to_our_profile(tmp_pat
     both ours), hand-edit the catalog to a researched ``context_window`` (no
     ``managed_by`` field — indistinguishable from a legacy pre-migration
     catalog we wrote), then re-run the SAME install. Before this fix,
-    ``_is_our_catalog``'s sibling-profile fallback classified the catalog as
+    ``_ownership_catalog``'s sibling-profile fallback classified the catalog as
     "ours" purely because the neighbouring profile carried our marker, so
     ``_decide`` routed straight to WRITE — no ``OVERWRITE_FOREIGN``, no
     ``--force`` prompt, no confirm — and the researched value was flattened
     back to :data:`_DEFAULT_CONTEXT_WINDOW`. The catalog's ownership must now
-    be provable on its OWN (:func:`_catalog_self_marked`), matching the
+    be provable on its OWN (:func:`_ownership_catalog_marker`), matching the
     guarantee :func:`_cleanup_openai_toml_siblings` already gives on delete
     (see ``test_shape_switch_cleanup_leaves_a_legacy_catalog_with_no_self_marker``).
     """

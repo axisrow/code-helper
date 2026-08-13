@@ -8,10 +8,10 @@ handlers — a contract described only in comments, invisible to the type checke
 and requiring every new flag to be added symmetrically in three places
 (``build_parser``, the TUI assignment, the handler ``getattr``).
 
-This module replaces that with one frozen dataclass per command. Each handler
-builds its request from the parsed ``Namespace`` via ``from_namespace`` (the
-single bridge), then works off typed fields. The TUI will (in P1.1) construct a
-request directly, dropping the ``args.X = ...`` mutation entirely.
+This module replaces that with one frozen dataclass per command. Each CLI
+handler builds its request from the parsed ``Namespace`` via ``from_namespace``
+(the single bridge), then works off typed fields. The TUI constructs these
+requests directly, so its dispatch does not mutate the parser Namespace.
 
 The dataclasses are ``frozen=True`` for the same reason ``Paths`` is: a request
 handed to a handler is a snapshot of the user's intent, not something the

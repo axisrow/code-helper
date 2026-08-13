@@ -18,6 +18,21 @@ subcommand remains fully scriptable on its own.
 
 Root flags (``--debug`` / ``--dry-run``) attach via a single shared parent
 parser so they parse BOTH before and after the subcommand.
+
+Imports: every ``services.*`` dependency is a top-level import — the layering
+is a DAG (``cli`` → ``services`` → ``backends``), so nothing here needs to be
+deferred to break a cycle. Two deliberate exceptions remain, both about
+LATE BINDING rather than cycles:
+
+* :mod:`code_helper.cli.menu` is imported inside the handlers that use it,
+  because the test suite patches ``menu.select_from_menu`` / ``menu.read_line``
+  by name;
+* ``models_api``, ``codex_default`` and ``secrets`` are imported as MODULES and
+  called through the module, for the same reason.
+
+A ``from … import name`` in either case would bind the original function at
+import time and no patch would ever be seen. :mod:`code_helper.cli.tui` stays
+local as well — it imports this module back, so that one IS a cycle.
 """
 
 import argparse
@@ -25,7 +40,59 @@ import os
 import sys
 from dataclasses import replace
 
+from code_helper.cli.requests import AddRequest, EditTokenRequest, SetDefaultRequest
 from code_helper.errors import CodeHelperError
+
+# Modules, not names — see this module's docstring on late binding.
+from code_helper.services import codex_default, models_api, secrets
+from code_helper.services.codex_default import restore_default
+from code_helper.services.model import (
+    AGENTS,
+    PROVIDERS,
+    ConfigShape,
+    get_agent,
+    get_provider,
+    resolve_shape,
+    with_auth,
+    with_base_url,
+)
+from code_helper.services.paths import Paths
+from code_helper.services.profiles import (
+    NewProfileOutcome,
+    classify_new_profile,
+    validate_new_profile_name,
+)
+from code_helper.services.secrets import (
+    DEFAULT_PROFILE,
+    SOURCE_ENV,
+    SOURCE_PROMPT,
+    ResolvedToken,
+    cache_freshly_typed_token,
+    credential_for,
+    invalidate_cached_credential,
+    profile_names,
+    rename_profile,
+    token_for_discovery,
+    valid_active_profile,
+)
+from code_helper.services.spec import (
+    build_spec,
+    get_preset,
+    spec_from_preset,
+    suggest_alias,
+)
+from code_helper.services.state import active_selection
+from code_helper.services.wrappers import (
+    WRAPPERS,
+    describe_all,
+    discover_managed,
+    get_spec,
+    install_wrapper,
+    is_installed,
+    list_wrappers,
+    remove_wrapper,
+    spec_from_installed,
+)
 
 
 def _handle_list_axes(what: str) -> int:
@@ -35,7 +102,6 @@ def _handle_list_axes(what: str) -> int:
     ``resolve_shape`` itself, so what it shows and what ``add`` accepts cannot
     disagree. It is where a user sees that some pairings are simply blank.
     """
-    from code_helper.services.model import AGENTS, PROVIDERS, resolve_shape
 
     if what == "agents":
         for agent in AGENTS:
@@ -79,8 +145,6 @@ def _handle_list_axes(what: str) -> int:
 
 def _handle_list(args: argparse.Namespace) -> int:
     """Show installed wrappers, or one of the registries behind them."""
-    from code_helper.services.paths import Paths
-    from code_helper.services.wrappers import list_wrappers
 
     what = getattr(args, "what", "wrappers")
     if what != "wrappers":
@@ -90,8 +154,6 @@ def _handle_list(args: argparse.Namespace) -> int:
     # one-line header naming the active provider/profile, when one is set and
     # still valid. Kept in the parser (not wrappers.describe_all, which three
     # call sites share) because this is CLI presentation, not a wrapper row.
-    from code_helper.services.secrets import valid_active_profile
-    from code_helper.services.state import active_selection
 
     paths = Paths.default()
     selection = active_selection(paths)
@@ -167,7 +229,6 @@ def _parse_shape(raw: str | None):
     escaped as a raw ``ValueError`` traceback — and, because ``main`` only
     catches ``CodeHelperError``, still exited 0.
     """
-    from code_helper.services.model import ConfigShape
 
     if not raw:
         return None
@@ -191,12 +252,6 @@ def _add_resolve_provider(req, paths):
     Raises:
         CodeHelperError: ``--agent``/``--provider`` not given together.
     """
-    from code_helper.services.model import (
-        get_agent,
-        get_provider,
-        with_auth,
-        with_base_url,
-    )
 
     if not req.agent or not req.provider:
         raise CodeHelperError("--agent and --provider must be given together")
@@ -214,12 +269,10 @@ def _add_list_models_or_none(req, paths, agent, provider, profile_name):
     env → cache (FIXED provider only) → unauthenticated fallback — never a
     prompt, so an optional listing never blocks a script on stdin.
     """
-    from code_helper.services.models_api import list_models
-    from code_helper.services.secrets import token_for_discovery
 
     if not req.list_models:
         return None
-    result = list_models(
+    result = models_api.list_models(
         provider,
         token=token_for_discovery(paths, provider, profile_name=profile_name),
     )
@@ -236,8 +289,6 @@ def _add_resolve_spec(req, paths, agent, provider, profile_name):
     Resolves compatibility BEFORE anything interactive: a bad pairing must
     never reach a secret prompt for a wrapper that will not be written.
     """
-    from code_helper.services.model import resolve_shape
-    from code_helper.services.spec import build_spec, suggest_alias
 
     if not req.model:
         raise CodeHelperError(
@@ -267,9 +318,6 @@ def _add_spec_from_preset(req, paths, profile_name):
     Raises:
         CodeHelperError: unknown preset/agent name.
     """
-    from code_helper.services.model import get_agent
-    from code_helper.services.secrets import valid_active_profile
-    from code_helper.services.spec import get_preset, spec_from_preset
 
     if not req.name:
         raise CodeHelperError("give a preset name, or --agent with --provider")
@@ -306,11 +354,6 @@ def _add_resolve_token(spec, req, paths, profile_name):
     :class:`ResolvedToken` for a secret spec (or ``None`` for literal/none
     auth), so the caller can decide whether to cache it.
     """
-    from code_helper.services.secrets import (
-        SOURCE_PROMPT,
-        ResolvedToken,
-        resolve_token,
-    )
 
     if spec.auth != "secret":
         return spec.auth_value, None
@@ -319,7 +362,7 @@ def _add_resolve_token(spec, req, paths, profile_name):
             raise CodeHelperError("no token entered — aborting")
         resolved = ResolvedToken(req.profile_token, SOURCE_PROMPT)
     else:
-        resolved = resolve_token(
+        resolved = secrets.resolve_token(
             env_var=spec.token_env_var,
             prompt=f"{spec.name} token ({spec.token_env_var}): ",
             paths=paths,
@@ -341,15 +384,6 @@ def _add_install_and_cache(spec, req, paths, token, resolved, profile_name):
 
     Returns ``True`` iff anything was written.
     """
-    from code_helper.services.secrets import (
-        DEFAULT_PROFILE,
-        SOURCE_ENV,
-        cache_freshly_typed_token,
-        credential_for,
-        invalidate_cached_credential,
-        rename_profile,
-    )
-    from code_helper.services.wrappers import install_wrapper
 
     dry_run = req.dry_run
     wrote = install_wrapper(
@@ -396,7 +430,7 @@ def _add_install_and_cache(spec, req, paths, token, resolved, profile_name):
     return wrote
 
 
-def _handle_add(args: argparse.Namespace) -> int:
+def _handle_add(args: argparse.Namespace | AddRequest) -> int:
     """Install (or update) a wrapper — from a preset, or from the three axes.
 
     Disambiguation rule (deterministic, so it survives future name overlaps):
@@ -413,12 +447,9 @@ def _handle_add(args: argparse.Namespace) -> int:
     branching surface stays readable; see the individual docstrings for the
     invariants each carries.
     """
-    from code_helper.cli.requests import AddRequest
-    from code_helper.services.paths import Paths
-    from code_helper.services.secrets import valid_active_profile
 
     paths = Paths.default()
-    req = AddRequest.from_namespace(args)
+    req = args if isinstance(args, AddRequest) else AddRequest.from_namespace(args)
     using_axes = req.agent is not None or req.provider is not None
 
     # Issue #23: an explicit --profile always wins; otherwise the CLI picks up
@@ -499,12 +530,6 @@ def _edit_token_resolve_profile(
     ``_new_profile`` in ``cli/tui.py`` for the TUI's own mapping.
     """
     from code_helper.cli.menu import MenuCancelled, select_from_menu
-    from code_helper.services.profiles import (
-        NewProfileOutcome,
-        classify_new_profile,
-        validate_new_profile_name,
-    )
-    from code_helper.services.secrets import DEFAULT_PROFILE, profile_names
 
     names = list(profile_names(paths, provider_name))
     if not names:
@@ -557,7 +582,81 @@ def _edit_token_resolve_profile(
     return new_name, None, None
 
 
-def _handle_edit_token(args: argparse.Namespace) -> int:
+def _edit_token_spec(paths, name: str | None):
+    """The spec whose token ``edit-token`` will rotate.
+
+    Reading the INSTALLED script first is what makes rotation faithful: it
+    preserves a model the user chose with ``--model`` (re-expanding the preset
+    would silently revert it) and it reaches wrappers built from the axes,
+    which have no preset to look up at all.
+
+    With no ``name``, an arrow-key menu picks among every secret-auth wrapper
+    (presets plus anything the constructor installed). Returns ``None`` on a
+    soft cancel at that menu, signalling the caller to print "cancelled" and
+    exit 0; a hard cancel (Ctrl-C) propagates.
+    """
+    from code_helper.cli.menu import MenuCancelled, select_from_menu
+
+    def _resolve(alias: str):
+        return spec_from_installed(paths, alias) or get_spec(alias)
+
+    if name:
+        return _resolve(name)
+
+    # Presets plus anything the constructor installed — the latter are
+    # first-class wrappers and were previously unreachable from here.
+    secret_specs = [w for w in WRAPPERS if w.auth == "secret"]
+    for found in discover_managed(paths):
+        installed = spec_from_installed(paths, found)
+        if installed is not None and installed.auth == "secret":
+            secret_specs.append(installed)
+    if not secret_specs:
+        raise CodeHelperError("no wrapper has an editable (secret) token")
+    items = describe_all(
+        paths,
+        secret_specs,
+        installed_word="installed",
+        not_installed_word="not installed",
+    )
+    try:
+        chosen = select_from_menu(
+            items,
+            prompt="select a wrapper to edit its token:",
+        )
+    except MenuCancelled as e:
+        if e.hard:
+            # Ctrl-C: let it propagate so a TUI caller can treat this as
+            # "leave the TUI" rather than "command succeeded, pause and
+            # show the menu again" — see cli/tui.py's top-level catch.
+            # The plain CLI path has no such catch either, so Ctrl-C at
+            # `code-helper edit-token`'s picker behaves like Ctrl-C
+            # anywhere else in the CLI: an uncaught KeyboardInterrupt.
+            raise
+        return None
+    return _resolve(chosen)
+
+
+def _edit_token_prompt_token(spec, profile_name: str, given: str | None) -> str:
+    """The token to install — the request's own, else a fresh ``getpass``.
+
+    Validation is deliberately applied to BOTH paths: a caller-supplied token
+    (the TUI's) goes through the same empty/ASCII gate as a typed one.
+    """
+    import getpass
+
+    token = given
+    if token is None:
+        token = getpass.getpass(
+            f"new {spec.name} token ({spec.token_env_var}) for {profile_name}: "
+        )
+    if not token:
+        raise CodeHelperError("no token entered — aborting")
+    if not token.isascii():
+        raise CodeHelperError("token must contain ASCII characters")
+    return token
+
+
+def _handle_edit_token(args: argparse.Namespace | EditTokenRequest) -> int:
     """Interactively rotate the token of a secret-auth wrapper.
 
     Unlike ``add``, this always prompts via ``getpass`` directly — it never
@@ -567,100 +666,40 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     type in. The freshly typed token is cached AFTER the install succeeds, so
     the cache tracks the rotation rather than going stale.
     """
-    import getpass
 
-    from code_helper.cli.menu import MenuCancelled, select_from_menu
-    from code_helper.cli.requests import EditTokenRequest
-    from code_helper.services.paths import Paths
-    from code_helper.services.secrets import (
-        DEFAULT_PROFILE,
-        SOURCE_PROMPT,
-        cache_freshly_typed_token,
-        profile_names,
-        rename_profile,
+    req = (
+        args
+        if isinstance(args, EditTokenRequest)
+        else EditTokenRequest.from_namespace(args)
     )
-    from code_helper.services.wrappers import (
-        WRAPPERS,
-        describe_all,
-        discover_managed,
-        get_spec,
-        install_wrapper,
-        is_installed,
-        spec_from_installed,
-    )
-
-    req = EditTokenRequest.from_namespace(args)
 
     paths = Paths.default()
     dry_run = req.dry_run
-    profile_token = req.profile_token
     profile_rename_from = req.profile_rename_from
     profile_rename_to = req.profile_rename_to
 
-    def _resolve(name: str):
-        """The INSTALLED wrapper's spec, falling back to the preset registry.
-
-        Reading the installed script first is what makes rotation faithful:
-        it preserves a model the user chose with ``--model`` (re-expanding the
-        preset would silently revert it) and it reaches wrappers built from
-        the axes, which have no preset to look up at all.
-        """
-        return spec_from_installed(paths, name) or get_spec(name)
-
-    if req.name:
-        spec = _resolve(req.name)
-    else:
-        # Presets plus anything the constructor installed — the latter are
-        # first-class wrappers and were previously unreachable from here.
-        secret_specs = [w for w in WRAPPERS if w.auth == "secret"]
-        for found in discover_managed(paths):
-            installed = spec_from_installed(paths, found)
-            if installed is not None and installed.auth == "secret":
-                secret_specs.append(installed)
-        if not secret_specs:
-            raise CodeHelperError("no wrapper has an editable (secret) token")
-        items = describe_all(
-            paths,
-            secret_specs,
-            installed_word="installed",
-            not_installed_word="not installed",
-        )
-        try:
-            chosen = select_from_menu(
-                items,
-                prompt="select a wrapper to edit its token:",
-            )
-        except MenuCancelled as e:
-            if e.hard:
-                # Ctrl-C: let it propagate so a TUI caller can treat this as
-                # "leave the TUI" rather than "command succeeded, pause and
-                # show the menu again" — see cli/tui.py's top-level catch.
-                # The plain CLI path has no such catch either, so Ctrl-C at
-                # `code-helper edit-token`'s picker behaves like Ctrl-C
-                # anywhere else in the CLI: an uncaught KeyboardInterrupt.
-                raise
-            print("cancelled")
-            return 0
-        spec = _resolve(chosen)
+    spec = _edit_token_spec(paths, req.name)
+    if spec is None:
+        print("cancelled")
+        return 0
 
     if spec.auth != "secret":
         raise CodeHelperError(f"{spec.name} has no editable token (auth={spec.auth})")
 
     profile_name = req.profile
-    if profile_name is None:
-        # Only offer the profile menu when profiles exist; with none cached
-        # the original code skipped straight to DEFAULT_PROFILE (no menu to
-        # pick from). _edit_token_resolve_profile returns None on a soft
-        # cancel (Esc/Ctrl-C at the menu or a name prompt) — distinct from
-        # the "no profiles" skip, which never calls it.
-        if profile_names(paths, spec.provider.name):
-            resolved = _edit_token_resolve_profile(paths, spec.provider.name)
-            if resolved is None:
-                # Soft cancel → "cancelled" + exit 0, matching the picker's
-                # own soft-cancel behavior.
-                print("cancelled")
-                return 0
-            profile_name, profile_rename_from, profile_rename_to = resolved
+    # Only offer the profile menu when profiles exist; with none cached the
+    # original code skipped straight to DEFAULT_PROFILE (no menu to pick
+    # from). _edit_token_resolve_profile returns None on a soft cancel
+    # (Esc/Ctrl-C at the menu or a name prompt) — distinct from the "no
+    # profiles" skip, which never calls it.
+    if profile_name is None and profile_names(paths, spec.provider.name):
+        resolved = _edit_token_resolve_profile(paths, spec.provider.name)
+        if resolved is None:
+            # Soft cancel → "cancelled" + exit 0, matching the picker's own
+            # soft-cancel behavior.
+            print("cancelled")
+            return 0
+        profile_name, profile_rename_from, profile_rename_to = resolved
     if profile_name is None:
         profile_name = DEFAULT_PROFILE
     spec = replace(spec, profile_name=profile_name)
@@ -668,15 +707,7 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     state = "installed" if is_installed(paths, spec.name) else "not installed"
     print(f"{spec.name}: currently {state}")
 
-    token = profile_token
-    if token is None:
-        token = getpass.getpass(
-            f"new {spec.name} token ({spec.token_env_var}) for {profile_name}: "
-        )
-    if not token:
-        raise CodeHelperError("no token entered — aborting")
-    if not token.isascii():
-        raise CodeHelperError("token must contain ASCII characters")
+    token = _edit_token_prompt_token(spec, profile_name, req.profile_token)
 
     # Pass the resolved spec, never the preset NAME: a name re-expands the
     # preset from scratch and discards whatever model this wrapper was
@@ -732,8 +763,6 @@ def _confirm_remove(paths: list) -> bool:
 
 def _handle_remove(args: argparse.Namespace) -> int:
     """Remove one managed wrapper and its owned companion files."""
-    from code_helper.services.paths import Paths
-    from code_helper.services.wrappers import remove_wrapper
 
     remove_wrapper(
         Paths.default(),
@@ -745,7 +774,7 @@ def _handle_remove(args: argparse.Namespace) -> int:
     return 0
 
 
-def _handle_set_default(args: argparse.Namespace) -> int:
+def _handle_set_default(args: argparse.Namespace | SetDefaultRequest) -> int:
     """Patch (or restore) Codex's OWN ``~/.codex/config.toml`` default.
 
     Thin shell, same contract as every other handler here: resolve
@@ -754,12 +783,12 @@ def _handle_set_default(args: argparse.Namespace) -> int:
     agent's own configuration file — see ``services/codex_default.py`` for
     why that is safe (patch, never replace; always backed up first).
     """
-    from code_helper.cli.requests import SetDefaultRequest
-    from code_helper.services.codex_default import apply_set_default, restore_default
-    from code_helper.services.model import get_agent, get_provider, with_base_url
-    from code_helper.services.paths import Paths
 
-    req = SetDefaultRequest.from_namespace(args)
+    req = (
+        args
+        if isinstance(args, SetDefaultRequest)
+        else SetDefaultRequest.from_namespace(args)
+    )
 
     paths = Paths.default()
 
@@ -800,7 +829,7 @@ def _handle_set_default(args: argparse.Namespace) -> int:
     # are wrong in the same way.
     provider = with_base_url(get_provider(req.provider), req.base_url)
 
-    wrote = apply_set_default(
+    wrote = codex_default.apply_set_default(
         paths,
         agent=agent,
         provider=provider,

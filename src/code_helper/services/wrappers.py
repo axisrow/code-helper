@@ -133,7 +133,7 @@ def is_installed(paths: Paths, name: str) -> bool:
     return paths.script_for(name).exists()
 
 
-def _marker_at(path: Path) -> bool:
+def _ownership_marker_at(path: Path) -> bool:
     """True iff ``path`` carries our marker on its first or second line.
 
     Reads only the first couple of lines. Anything unreadable (a binary, a
@@ -164,10 +164,10 @@ def is_managed(paths: Paths, name: str) -> bool:
     permission error, a dangling symlink) counts as *not* ours — the safe
     answer, since it makes the guard refuse rather than clobber.
     """
-    return _marker_at(paths.script_for(name))
+    return _ownership_marker_at(paths.script_for(name))
 
 
-def _installed_marker_provider_is_secret(paths: Paths, name: str) -> bool:
+def _ownership_marker_provider_is_secret(paths: Paths, name: str) -> bool:
     """True iff the installed wrapper's OWN marker names a secret-auth provider.
 
     A narrower, more failure-tolerant cousin of :func:`spec_from_installed`,
@@ -719,7 +719,7 @@ def _discards_only_secret(paths: Paths, spec: WrapperSpec, script: Path) -> bool
     # the model could not be recovered" (a secret token IS still at stake —
     # the marker alone already proves the provider). Fall back to the
     # narrower, profile-independent check before concluding "not a secret".
-    return _installed_marker_provider_is_secret(paths, script.name)
+    return _ownership_marker_provider_is_secret(paths, script.name)
 
 
 def _respec_from_body(spec: WrapperSpec, body: str) -> WrapperSpec | None:
@@ -768,10 +768,10 @@ def _ownership_marker_only(path: Path) -> bool:
     dangling symlink) counts as not ours, so the guard refuses rather than
     clobbers — the same safe answer :func:`is_managed` gives.
     """
-    return _marker_at(path)
+    return _ownership_marker_at(path)
 
 
-def _catalog_self_marked(path: Path) -> bool:
+def _ownership_catalog_marker(path: Path) -> bool:
     """True iff ``path`` is JSON carrying our own ``managed_by`` field.
 
     The catalog's own proof of authorship (see ``render.CATALOG_MANAGED_BY_KEY``)
@@ -799,11 +799,11 @@ def _catalog_self_marked(path: Path) -> bool:
     )
 
 
-def _is_our_catalog(paths: Paths, alias: str) -> bool:
+def _ownership_catalog(paths: Paths, alias: str) -> bool:
     """True iff the catalog for ``alias`` is one we wrote.
 
     Proven ONLY by the catalog's own ``managed_by`` field
-    (:func:`_catalog_self_marked`) — no sibling-profile fallback. An earlier
+    (:func:`_ownership_catalog_marker`) — no sibling-profile fallback. An earlier
     version also accepted "the sibling ``<alias>.config.toml`` profile carries
     our marker" as a second, migration-path proof (mirroring how
     :func:`_ownership_full_match` accepts a byte-identical legacy render for the wrapper).
@@ -829,7 +829,7 @@ def _is_our_catalog(paths: Paths, alias: str) -> bool:
     is handled earlier in :func:`_decide` (SKIP), so this only gates
     non-identical existing catalogs.
     """
-    return _catalog_self_marked(paths.codex_catalog_for(alias))
+    return _ownership_catalog_marker(paths.codex_catalog_for(alias))
 
 
 class _FilePlan(NamedTuple):
@@ -1005,7 +1005,7 @@ def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_File
     OPENAI_TOML is a new shape with no pre-marker legacy form, so the
     legacy byte-match clause :func:`_ownership_full_match` uses for the other shapes would
     only ever match a third-party hand-written ``exec codex --profile`` script
-    and adopt it as ours), and :func:`_is_our_catalog` for the catalog (JSON
+    and adopt it as ours), and :func:`_ownership_catalog` for the catalog (JSON
     cannot carry a comment marker, so authorship is proven by the sibling
     profile's marker). Modes: the wrapper follows :func:`_mode_for` (``0o700``
     for a secret, else ``0o755``); the profile and catalog are ``0o600``
@@ -1020,7 +1020,7 @@ def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_File
             catalog_path,
             openai_catalog_body(spec),
             0o600,
-            lambda _p: _is_our_catalog(paths, spec.alias),
+            lambda _p: _ownership_catalog(paths, spec.alias),
             False,
         ),
         _FilePlan(
@@ -1050,7 +1050,7 @@ def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) ->
     ever reused for OPENAI_TOML again).
 
     Each sibling is gated by ITS OWN ownership proof, independently —
-    :func:`_ownership_marker_only` for the profile, :func:`_catalog_self_marked`
+    :func:`_ownership_marker_only` for the profile, :func:`_ownership_catalog_marker`
     for the catalog. This is deliberately NOT "the profile's marker decides
     both": an earlier version inferred the catalog's fate from the profile
     alone, which meant a hand-curated catalog sitting next to OUR profile was
@@ -1059,7 +1059,7 @@ def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) ->
     different door. A foreign profile or foreign catalog is left untouched,
     matching what the install guard would have refused to overwrite.
 
-    Note this is stricter than :func:`_is_our_catalog` (the install-time
+    Note this is stricter than :func:`_ownership_catalog` (the install-time
     check, which also accepts the sibling-marker fallback for a catalog
     written before :data:`render.CATALOG_MANAGED_BY_KEY` existed): a DELETE
     has no ``--force`` escape hatch the way an overwrite does, and the
@@ -1091,7 +1091,7 @@ def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) ->
     to_remove = [
         path
         for path, is_ours in (
-            (catalog_path, _catalog_self_marked(catalog_path)),
+            (catalog_path, _ownership_catalog_marker(catalog_path)),
             (config_path, _ownership_marker_only(config_path)),
         )
         if path.exists() and is_ours
@@ -1226,7 +1226,7 @@ def remove_wrapper(
             ),
             (
                 paths.codex_catalog_for(name),
-                _catalog_self_marked(paths.codex_catalog_for(name)),
+                _ownership_catalog_marker(paths.codex_catalog_for(name)),
             ),
         )
         if path.exists() and ours

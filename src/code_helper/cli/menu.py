@@ -112,6 +112,107 @@ class Section:
         self.text = text
 
 
+def _finish_utf8(
+    first: str,
+    read_more: Callable[[float], str | None],
+    push_back: Callable[[str], None],
+) -> str | None:
+    """Complete a multi-byte UTF-8 keypress started by ``first``.
+
+    :class:`KeyReader` feeds raw bytes as latin-1 code points so escape
+    handling can remain byte-oriented. Decoding each byte separately would
+    turn one Cyrillic keypress into two replacement characters, so the
+    continuation bytes are gathered here before the layout map is consulted.
+
+    Returns the decoded character, or ``None`` when the sequence is truncated
+    or malformed — the caller then reports ``"OTHER"``. A byte that turns out
+    not to be a continuation is pushed back rather than dropped: it is a
+    genuine next keypress.
+    """
+    width = 2 if ord(first) < 0xE0 else 3 if ord(first) < 0xF0 else 4
+    raw = [first]
+    for _ in range(width - 1):
+        nxt = read_more(_ESC_TIMEOUT)
+        if nxt is None or not 0x80 <= ord(nxt) <= 0xBF:
+            if nxt is not None:
+                push_back(nxt)
+            return None
+        raw.append(nxt)
+    try:
+        return "".join(raw).encode("latin-1").decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _translate_escape(read_more: Callable[[float], str | None]) -> str:
+    """Translate the bytes that follow a bare Esc into a key name.
+
+    Handles the three shapes a terminal actually emits: a lone Esc (no
+    follow-up byte within the timeout — a soft ``"CANCEL"``), SS3 (``ESC O``
+    plus exactly one final byte), and CSI (``ESC [`` plus parameter and
+    intermediate bytes up to a final byte). Anything malformed or cut off is
+    ``"OTHER"`` — there is nothing sane to do with a half-sequence.
+    """
+    nxt = read_more(_ESC_TIMEOUT)
+    if nxt is None:
+        return "CANCEL"  # lone Esc — no follow-up byte arrived in time
+    if nxt == "O":  # SS3 — exactly one final byte follows
+        final = read_more(_ESC_TIMEOUT) or ""
+        return _ARROW_FINAL.get(final, "OTHER")
+    if nxt != "[":
+        return "OTHER"
+
+    # CSI — consume params/intermediates up to the final byte.
+    params = ""
+    while True:
+        b = read_more(_ESC_TIMEOUT)
+        if b is None:
+            return "OTHER"  # sequence cut off — nothing sane to do
+        code = ord(b)
+        if code in _CSI_FINAL:
+            final = b
+            break
+        if code not in _CSI_PARAM_OR_INTERMEDIATE:
+            return "OTHER"  # not a well-formed CSI sequence
+        params += b
+    if final in _ARROW_FINAL:
+        return _ARROW_FINAL[final]
+    if final == "~":
+        return _TILDE_FINAL.get(params, "OTHER")
+    return "OTHER"
+
+
+# Single-character shortcuts, applied AFTER ``keymap.translate_key`` has folded
+# a non-Latin layout back to its Latin equivalent. A table rather than an if
+# chain so adding a shortcut is a data change; ``_PASSTHROUGH`` are the keys
+# ``select_from_menu``'s ``on_key`` hook receives verbatim.
+_CHAR_KEYS = {
+    "t": "TOKEN",
+    "T": "TOKEN",
+    "q": "CANCEL",
+    "Q": "CANCEL",
+    "k": "UP",
+    "K": "UP",
+    "j": "DOWN",
+    "J": "DOWN",
+    "g": "HOME",
+    "G": "END",
+}
+_PASSTHROUGH = "aedtcs?"
+
+
+def _translate_char(first: str) -> str:
+    """Translate one printable character into a key name."""
+    from code_helper.cli.keymap import translate_key
+
+    first = translate_key(first)
+    if first in _CHAR_KEYS:
+        return _CHAR_KEYS[first]
+    if first in "0123456789":
+        return f"DIGIT_{first}"
+    return first if first in _PASSTHROUGH else "OTHER"
+
+
 def _translate(
     first: str,
     read_more: Callable[[float], str | None],
@@ -126,7 +227,10 @@ def _translate(
     Together these are the only seams this function needs to be fully
     unit-testable without a real TTY: every escape-sequence edge case (lone
     Esc, CSI, SS3, stray trailing bytes) is a pure function of ``first`` plus
-    a fake ``read_more``/``push_back``.
+    a fake ``read_more``/``push_back``. This function is the dispatcher; the
+    three shapes it delegates to are :func:`_finish_utf8` (a multi-byte
+    keypress), :func:`_translate_escape` (anything after a bare Esc) and
+    :func:`_translate_char` (a printable character).
 
     ``push_back`` defaults to a no-op discard, which keeps every caller that
     only cares about key *names* (and every pre-existing test) working
@@ -144,51 +248,13 @@ def _translate(
     see :func:`select_from_menu`'s ``on_token``; without one it is ignored
     just like ``"OTHER"``), ``"DIGIT_1"``..``"DIGIT_9"``, ``"OTHER"``.
     """
-    # KeyReader feeds raw bytes as latin-1 code points so escape handling can
-    # remain byte-oriented.  Finish a UTF-8 sequence before consulting the
-    # layout map; decoding each byte separately turns one Cyrillic keypress
-    # into two replacement characters.
     if 0xC2 <= ord(first) <= 0xFF:
-        width = 2 if ord(first) < 0xE0 else 3 if ord(first) < 0xF0 else 4
-        raw = [first]
-        for _ in range(width - 1):
-            nxt = read_more(_ESC_TIMEOUT)
-            if nxt is None or not 0x80 <= ord(nxt) <= 0xBF:
-                if nxt is not None:
-                    push_back(nxt)
-                return "OTHER"
-            raw.append(nxt)
-        try:
-            first = "".join(raw).encode("latin-1").decode("utf-8")
-        except UnicodeDecodeError:
+        decoded = _finish_utf8(first, read_more, push_back)
+        if decoded is None:
             return "OTHER"
+        first = decoded
     if first == "\x1b":
-        nxt = read_more(_ESC_TIMEOUT)
-        if nxt is None:
-            return "CANCEL"  # lone Esc — no follow-up byte arrived in time
-        if nxt == "O":  # SS3 — exactly one final byte follows
-            final = read_more(_ESC_TIMEOUT) or ""
-            return _ARROW_FINAL.get(final, "OTHER")
-        if nxt == "[":  # CSI — consume params/intermediates up to the final byte
-            params = ""
-            while True:
-                b = read_more(_ESC_TIMEOUT)
-                if b is None:
-                    return "OTHER"  # sequence cut off — nothing sane to do
-                code = ord(b)
-                if code in _CSI_FINAL:
-                    final = b
-                    break
-                if code in _CSI_PARAM_OR_INTERMEDIATE:
-                    params += b
-                    continue
-                return "OTHER"  # not a well-formed CSI sequence
-            if final in _ARROW_FINAL:
-                return _ARROW_FINAL[final]
-            if final == "~":
-                return _TILDE_FINAL.get(params, "OTHER")
-            return "OTHER"
-        return "OTHER"
+        return _translate_escape(read_more)
 
     if first in ("\r", "\n"):
         # CRLF/LFCR: swallow ONLY the actual paired byte, so it doesn't fire a
@@ -205,24 +271,7 @@ def _translate(
         return "HARD_CANCEL"
     if first == "\t":
         return "TAB"
-    from code_helper.cli.keymap import translate_key
-
-    first = translate_key(first)
-    if first in ("t", "T"):
-        return "TOKEN"
-    if first in ("q", "Q"):
-        return "CANCEL"
-    if first in ("k", "K"):
-        return "UP"
-    if first in ("j", "J"):
-        return "DOWN"
-    if first == "g":
-        return "HOME"
-    if first == "G":
-        return "END"
-    if first in "0123456789":
-        return f"DIGIT_{first}"
-    return first if first in "aedtc s?".replace(" ", "") else "OTHER"
+    return _translate_char(first)
 
 
 class KeyReader:
@@ -468,6 +517,48 @@ def _build_menu_state(
     )
 
 
+def _viewport(state: _MenuState) -> tuple[int, list]:
+    """The first visible row index and the rows to render at it.
+
+    Keeps the selected row in a viewport that fits the terminal. The cursor
+    index stays in the FULL selectable list, so navigation and digit keys
+    retain their stable meanings while PageUp/PageDown move through long
+    menus. ``state.frame_lines`` is updated as a side effect — the next
+    redraw needs it to know how far up to move the cursor.
+    """
+    fixed_rows = 2 + (2 if state.hint_text else 0)
+    # Reserve two rows for viewport indicators only when clipping is
+    # necessary, so indicators never push a frame below terminal height.
+    capacity = max(1, state.height - fixed_rows)
+    if len(state.pairs) > capacity:
+        capacity = max(1, capacity - 2)
+    selected_pair = state.selectable[state.index]
+    first = max(0, selected_pair - capacity // 2)
+    first = min(first, max(0, len(state.pairs) - capacity))
+    visible = state.pairs[first : first + capacity]
+    indicators = int(first > 0) + int(first + len(visible) < len(state.pairs))
+    state.frame_lines = len(visible) + fixed_rows + indicators
+    return first, visible
+
+
+def _row_text(entry, index: int, cursor_pair: int, state: _MenuState) -> str:
+    """One menu line, before it is fitted to the terminal width.
+
+    A :class:`Section` renders as its bare text (never selected, never
+    numbered); everything else gets the cursor marker plus, when the menu is
+    numbered at all, its digit or a ``·`` placeholder.
+    """
+    if isinstance(entry, Section):
+        return entry.text() if callable(entry.text) else entry.text
+    value, label = entry
+    label_text = label() if callable(label) else label
+    marker = ">" if index == cursor_pair else " "
+    if not state.digit_of:
+        return f"{marker} {label_text}"
+    digit = str(state.digit_of[value]) if value in state.digit_of else "·"
+    return f"{digit} {marker} {label_text}"
+
+
 def _render_frame(
     state: _MenuState,
     *,
@@ -485,22 +576,8 @@ def _render_frame(
     prompt_text = prompt() if callable(prompt) else prompt
     heading = _fit(prompt_text, width) if state.redraw else prompt_text
 
-    # Keep the selected row in a viewport that fits the terminal.  The cursor
-    # index stays in the full selectable list, so navigation/digits retain
-    # their stable meanings while PageUp/PageDown can move through long menus.
     if state.redraw:
-        fixed_rows = 2 + (2 if state.hint_text else 0)
-        # Reserve two rows for viewport indicators only when clipping is
-        # necessary, so indicators never push a frame below terminal height.
-        capacity = max(1, state.height - fixed_rows)
-        if len(state.pairs) > capacity:
-            capacity = max(1, capacity - 2)
-        selected_pair = state.selectable[state.index]
-        first = max(0, selected_pair - capacity // 2)
-        first = min(first, max(0, len(state.pairs) - capacity))
-        visible = state.pairs[first : first + capacity]
-        indicators = int(first > 0) + int(first + len(visible) < len(state.pairs))
-        state.frame_lines = len(visible) + fixed_rows + indicators
+        first, visible = _viewport(state)
         lead = f"\033[{prior_frame_lines}A\033[J"
         prefix = (
             clear_screen if state.first and clear else ("" if state.first else lead)
@@ -515,20 +592,7 @@ def _render_frame(
     if state.redraw and first:
         print_fn(f" ↑ {first} more")
     for local, entry in enumerate(visible):
-        i = first + local
-        if isinstance(entry, Section):
-            header = entry.text() if callable(entry.text) else entry.text
-            print_fn(f" {_fit(header, width - 1) if state.redraw else header}")
-            continue
-        value, label = entry
-        label_text = label() if callable(label) else label
-        marker = ">" if i == cursor_pair else " "
-        digit = str(state.digit_of[value]) if value in state.digit_of else "·"
-        row = (
-            f"{digit} {marker} {label_text}"
-            if state.digit_of
-            else f"{marker} {label_text}"
-        )
+        row = _row_text(entry, first + local, cursor_pair, state)
         print_fn(f" {_fit(row, width - 1) if state.redraw else row}")
     if state.redraw and first + len(visible) < len(state.pairs):
         print_fn(f" ↓ {len(state.pairs) - first - len(visible)} more")

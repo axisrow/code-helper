@@ -288,7 +288,7 @@ def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
 #: ``render.MARKER_PREFIX``. JSON has no comments, so the bash/TOML marker
 #: comment cannot ride along; this field is what lets the catalog prove its
 #: OWN authorship instead of borrowing the sibling profile's marker (see
-#: ``wrappers._is_our_catalog``). A catalog we wrote before this field existed
+#: ``wrappers._ownership_catalog``). A catalog we wrote before this field existed
 #: has no key at all — treated the same as "not (self-)provably ours", exactly
 #: like a markerless pre-marker wrapper before the byte-match migration path.
 CATALOG_MANAGED_BY_KEY = "managed_by"
