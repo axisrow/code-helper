@@ -1824,11 +1824,10 @@ def test_remove_wrapper_refuses_foreign_file_without_force(tmp_path):
 @pytest.mark.integration
 def test_remove_wrapper_survives_a_failed_sibling_unlink(tmp_path, monkeypatch):
     """A mid-sequence unlink failure must not make the wrapper itself
-    unrecoverable: the executable is the ownership proof retried removals
-    need, so it must be the LAST thing unlinked. The default pointer is
-    cleared up front (before any unlink) rather than after, so a state-write
-    failure can never happen wedged between "files gone" and "pointer
-    cleared" — the one ordering that would leave no retry path at all."""
+    unrecoverable (siblings unlink before the wrapper executable, the
+    ownership proof a retry needs), AND must not clear the default pointer
+    for a wrapper that is still installed and still the user's default —
+    the default is only cleared once every unlink has actually succeeded."""
     from pathlib import Path
 
     from code_helper.services.state import default_wrapper, set_default_wrapper
@@ -1853,13 +1852,16 @@ def test_remove_wrapper_survives_a_failed_sibling_unlink(tmp_path, monkeypatch):
         remove_wrapper(paths, spec.alias)
 
     # The wrapper itself must still be present — it is the ownership proof a
-    # retry needs.
+    # retry needs — and its default must be untouched: the removal did not
+    # actually succeed, so the still-installed wrapper must not lose its
+    # default out from under it.
     assert paths.script_for(spec.alias).exists()
+    assert default_wrapper(paths, "codex") == spec.alias
 
     monkeypatch.undo()
 
     # A retry now succeeds and cleans up everything, including the sibling
-    # that failed the first time.
+    # that failed the first time, and only NOW clears the default.
     assert remove_wrapper(paths, spec.alias) is True
     assert not paths.script_for(spec.alias).exists()
     assert not paths.codex_config_for(spec.alias).exists()
@@ -1868,15 +1870,15 @@ def test_remove_wrapper_survives_a_failed_sibling_unlink(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_remove_wrapper_clears_default_before_unlinking_anything(tmp_path, monkeypatch):
-    """The default pointer must clear BEFORE the first unlink, not after the
-    last one: clearing first makes every possible failure point downstream
-    of "pointer already cleared", so a failure that happens after every file
-    is gone (e.g. a transient ``state.json`` write) can never wedge between
-    "files gone" and "pointer cleared" with no retry path left."""
-    from pathlib import Path
-
-    from code_helper.services.state import default_wrapper, set_default_wrapper
+def test_remove_wrapper_reports_but_does_not_undo_a_failed_default_clear(
+    tmp_path, monkeypatch
+):
+    """If every unlink succeeds but the follow-up state.json write fails, the
+    files are gone regardless — that cannot be undone — so the failure must
+    be reported (not swallowed as success) without claiming the deletion
+    itself didn't happen."""
+    import code_helper.services.state as state
+    from code_helper.services.state import set_default_wrapper
     from code_helper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
@@ -1884,18 +1886,15 @@ def test_remove_wrapper_clears_default_before_unlinking_anything(tmp_path, monke
     install_wrapper(paths, spec)
     set_default_wrapper(paths, "codex", spec.alias)
 
-    real_unlink = Path.unlink
+    def flaky_write_state(paths_arg, state_dict):
+        raise OSError("simulated disk-full failure")
 
-    def unlink_and_check(self, *a, **kw):
-        # At the moment of the FIRST unlink, the default must already read
-        # as cleared.
-        assert default_wrapper(paths, "codex") is None, (
-            "default pointer was still set when the first unlink ran — "
-            "it must clear before any filesystem mutation, not after"
-        )
-        return real_unlink(self, *a, **kw)
+    monkeypatch.setattr(state, "_write_state", flaky_write_state)
 
-    monkeypatch.setattr(Path, "unlink", unlink_and_check)
+    with pytest.raises(CodeHelperError, match="failed to clear its default pointer"):
+        remove_wrapper(paths, spec.alias)
 
-    assert remove_wrapper(paths, spec.alias) is True
-    assert default_wrapper(paths, "codex") is None
+    # The deletion itself is NOT undone — the files are genuinely gone.
+    assert not paths.script_for(spec.alias).exists()
+    assert not paths.codex_config_for(spec.alias).exists()
+    assert not paths.codex_catalog_for(spec.alias).exists()

@@ -1017,6 +1017,69 @@ def test_add_dry_run_never_writes_the_credentials_file(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_add_warns_when_bin_dir_is_not_on_path(tmp_path, monkeypatch, capsys):
+    """A real (non-dry-run) install warns on stderr when ``paths.bin_dir``
+    isn't on ``PATH`` — otherwise the freshly-installed alias just gives
+    ``command not found`` with no clue why."""
+    import code_helper.services.secrets as secrets
+
+    def _fake_resolve_token(**kwargs):
+        return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
+
+    monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token)
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    code = main(
+        [
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://localhost:4000/v1",
+            "--model",
+            "gpt-4o",
+        ]
+    )
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "not on PATH" in err
+    assert "gpt-4o-claude" in err
+
+
+@pytest.mark.integration
+def test_add_dry_run_does_not_print_a_path_warning(tmp_path, monkeypatch, capsys):
+    """``install_wrapper`` returns True under ``dry_run`` too ("would write"),
+    so the PATH check must not fire off that truthy-but-nothing-written
+    signal — a dry run must not warn about a file it never created."""
+    import code_helper.services.secrets as secrets
+
+    def _fake_resolve_token(**kwargs):
+        return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
+
+    monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token)
+    monkeypatch.setenv("PATH", "/usr/bin")  # deliberately excludes bin_dir
+
+    code = main(
+        [
+            "--dry-run",
+            "add",
+            "--agent",
+            "claude",
+            "--provider",
+            "litellm",
+            "--base-url",
+            "http://localhost:4000/v1",
+            "--model",
+            "gpt-4o",
+        ]
+    )
+    assert code == 0
+    assert "not on PATH" not in capsys.readouterr().err
+
+
+@pytest.mark.integration
 def test_add_reuses_a_cached_token_without_prompting(tmp_path, monkeypatch):
     """A token cached by a previous add is picked up silently on the next one
     — for a FIXED-base_url_policy provider (zai), where the address never
