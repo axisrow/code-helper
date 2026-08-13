@@ -1823,11 +1823,12 @@ def test_remove_wrapper_refuses_foreign_file_without_force(tmp_path):
 
 @pytest.mark.integration
 def test_remove_wrapper_survives_a_failed_sibling_unlink(tmp_path, monkeypatch):
-    """A mid-sequence unlink failure must not strand the wrapper's default
-    pointer or make the wrapper itself unrecoverable: the executable is the
-    ownership proof retried removals need, so it must be the LAST thing
-    unlinked — and the default pointer must only clear once every target is
-    actually gone."""
+    """A mid-sequence unlink failure must not make the wrapper itself
+    unrecoverable: the executable is the ownership proof retried removals
+    need, so it must be the LAST thing unlinked. The default pointer is
+    cleared up front (before any unlink) rather than after, so a state-write
+    failure can never happen wedged between "files gone" and "pointer
+    cleared" — the one ordering that would leave no retry path at all."""
     from pathlib import Path
 
     from code_helper.services.state import default_wrapper, set_default_wrapper
@@ -1852,10 +1853,8 @@ def test_remove_wrapper_survives_a_failed_sibling_unlink(tmp_path, monkeypatch):
         remove_wrapper(paths, spec.alias)
 
     # The wrapper itself must still be present — it is the ownership proof a
-    # retry needs — and the default pointer must not have been cleared for a
-    # removal that didn't fully succeed.
+    # retry needs.
     assert paths.script_for(spec.alias).exists()
-    assert default_wrapper(paths, "codex") == spec.alias
 
     monkeypatch.undo()
 
@@ -1865,4 +1864,38 @@ def test_remove_wrapper_survives_a_failed_sibling_unlink(tmp_path, monkeypatch):
     assert not paths.script_for(spec.alias).exists()
     assert not paths.codex_config_for(spec.alias).exists()
     assert not catalog.exists()
+    assert default_wrapper(paths, "codex") is None
+
+
+@pytest.mark.integration
+def test_remove_wrapper_clears_default_before_unlinking_anything(tmp_path, monkeypatch):
+    """The default pointer must clear BEFORE the first unlink, not after the
+    last one: clearing first makes every possible failure point downstream
+    of "pointer already cleared", so a failure that happens after every file
+    is gone (e.g. a transient ``state.json`` write) can never wedge between
+    "files gone" and "pointer cleared" with no retry path left."""
+    from pathlib import Path
+
+    from code_helper.services.state import default_wrapper, set_default_wrapper
+    from code_helper.services.wrappers import remove_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    install_wrapper(paths, spec)
+    set_default_wrapper(paths, "codex", spec.alias)
+
+    real_unlink = Path.unlink
+
+    def unlink_and_check(self, *a, **kw):
+        # At the moment of the FIRST unlink, the default must already read
+        # as cleared.
+        assert default_wrapper(paths, "codex") is None, (
+            "default pointer was still set when the first unlink ran — "
+            "it must clear before any filesystem mutation, not after"
+        )
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", unlink_and_check)
+
+    assert remove_wrapper(paths, spec.alias) is True
     assert default_wrapper(paths, "codex") is None

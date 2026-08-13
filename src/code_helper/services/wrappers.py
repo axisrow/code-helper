@@ -1231,15 +1231,22 @@ def remove_wrapper(
         for path in targets:
             print(f"would remove {path}")
         return True
+
+    # Clear the default pointer BEFORE touching the filesystem, not after:
+    # this alias is about to stop existing either way, so re-pointing early
+    # is always correct, and it means every possible failure below (a flaky
+    # unlink, a state.json write error) happens with the pointer already
+    # cleared — never wedged between "files gone" and "pointer cleared" with
+    # no retry able to reach the cleanup anymore.
+    from code_helper.services.state import clear_default_wrapper
+
+    clear_default_wrapper(paths, name)
     for path in targets:
         try:
             path.unlink()
         except OSError as exc:
             raise CodeHelperError(f"failed to remove {path}: {exc}") from exc
         print(f"removed {path}")
-    from code_helper.services.state import clear_default_wrapper
-
-    clear_default_wrapper(paths, name)
     return True
 
 

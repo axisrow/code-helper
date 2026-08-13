@@ -479,6 +479,110 @@ def test_main_screen_default_wrapper_marker_through_a_real_pty(tmp_path):
     run_session(expect_marker_after_enter=True)
 
 
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "posix", reason="PTY tests require POSIX")
+def test_set_default_confirmation_preview_is_visible_before_the_prompt(tmp_path):
+    """Manual PTY verification for the ``_run`` tee fix: ``set-default``'s
+    diff preview and ``[y/N]`` prompt must reach the real terminal BEFORE the
+    TUI blocks on the answer, not only afterwards via ``_notify``'s replay.
+    The injected-``read_key`` suite cannot see this — a full ``redirect_stdout``
+    around the handler buffers the preview invisibly while ``input()`` still
+    blocks for real, which is exactly the terminal-driver-class bug repo
+    convention requires a real PTY to catch."""
+    import errno
+    import pty
+    import select
+    import subprocess
+    import sys
+    import termios
+    import time
+
+    from code_helper.services.paths import Paths
+    from code_helper.services.spec import build_spec
+    from code_helper.services.state import set_default_wrapper
+    from code_helper.services.wrappers import install_wrapper
+
+    environment = os.environ.copy()
+    environment["HOME"] = str(tmp_path)
+    environment.pop("ZAI_API_KEY", None)
+    source_dir = str(Path(__file__).resolve().parents[1] / "src")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (source_dir, environment.get("PYTHONPATH")) if part
+    )
+
+    # A codex wrapper installed and marked default: applying it will patch a
+    # NOT-YET-EXISTING ~/.codex/config.toml, which counts as a real change
+    # and triggers `_confirm_set_default`'s preview + `[y/N]` prompt.
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="qwen3.5:9b")
+    install_wrapper(paths, spec)
+    set_default_wrapper(paths, "codex", spec.alias)
+
+    master_fd, slave_fd = pty.openpty()
+    child = subprocess.Popen(
+        [sys.executable, "-m", "code_helper", "tui"],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=environment,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+    output = bytearray()
+    search_from = 0
+
+    def read_until(marker: str) -> None:
+        nonlocal search_from
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            found = output.find(marker.encode(), search_from)
+            if found >= 0:
+                search_from = found + len(marker)
+                return
+            ready, _, _ = select.select([master_fd], [], [], 0.1)
+            if ready:
+                try:
+                    output.extend(os.read(master_fd, 4096))
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
+        raise AssertionError(output.decode(errors="replace")[-3000:])
+
+    def menu_key(value: str) -> None:
+        deadline = time.monotonic() + 15
+        while termios.tcgetattr(master_fd)[3] & termios.ICANON:
+            if time.monotonic() >= deadline:
+                raise AssertionError("TUI did not enter raw mode")
+            time.sleep(0.01)
+        os.write(master_fd, value.encode())
+
+    try:
+        read_until("Apply codex default")
+        # Digit shortcuts are positional. The 3 built-in claude presets plus
+        # the one installed codex wrapper give 4 numbered wrapper rows, so
+        # "Apply codex default" (after Add, Profile) is digit 7.
+        menu_key("7")
+        # The preview/prompt is written outside the TUI's raw-mode redraw
+        # loop, so canonical-mode input() reads a real line — send "n\n".
+        read_until("Continue? [y/N]")
+        # By the time the prompt itself is visible, the preview text that
+        # precedes it must already be in the captured output too — proving
+        # it reached the terminal before the blocking read, not after.
+        assert b"About to write" in output
+        os.write(master_fd, b"n\n")
+        # A decline raises CodeHelperError; `_run` reports it and pauses on
+        # `_notify` until acknowledged.
+        read_until("Press any key to continue")
+        menu_key(" ")
+        read_until("Esc quit")
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=2)
+        os.close(master_fd)
+        os.close(slave_fd)
+
+
 # --- active token-profile pre-selection (issue #23) --------------------------
 
 
