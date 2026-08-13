@@ -86,12 +86,10 @@ class TuiSession:
     ``_run_*`` is a screen; the ``_``-prefixed helpers are UI primitives
     shared across screens.
 
-    The dispatch contract is unchanged: ``_run(handler)`` still calls
-    ``handler(self.args)``, so the CLI handlers (``_handle_add`` etc.) see
-    the same Namespace they always did. The TUI's mutation of ``self.args``
-    before each dispatch is the load-bearing bridge — see P2.4's
-    ``AddRequest``/``EditTokenRequest``/``SetDefaultRequest`` for the typed
-    view the handlers themselves consume.
+    The typed handlers receive frozen ``AddRequest``/``EditTokenRequest``/
+    ``SetDefaultRequest`` instances directly. ``self.args`` remains only the
+    session configuration supplied by argparse (for example ``debug`` and
+    ``dry_run``) plus the legacy remove-handler bridge.
     """
 
     __slots__ = ("args", "_tab_provider", "_tab_label")
@@ -157,8 +155,8 @@ class TuiSession:
             print(text)
         press_any_key("Press any key to continue...")
 
-    def _run(self, handler) -> None:
-        """Dispatch a CLI handler and preserve its user-facing output.
+    def _run(self, handler, request=None) -> None:
+        """Dispatch a CLI handler/request and preserve its user-facing output.
 
         Tees stdout instead of fully redirecting it: some handlers (e.g.
         ``set-default``'s ``_confirm_set_default``) print a preview and then
@@ -193,7 +191,7 @@ class TuiSession:
         real_stdout = sys.stdout
         sys.stdout = _Tee(real_stdout, buffer)
         try:
-            handler(self.args)
+            handler(self.args if request is None else request)
         except CodeHelperError as exc:
             if getattr(self.args, "debug", False):
                 sys.stdout = real_stdout
@@ -450,14 +448,21 @@ class TuiSession:
         profile = self._select_profile(spec.provider.name, editing=True)
         if profile is None:
             return
-        self.args.name = alias
-        (
-            self.args.profile,
-            self.args.profile_token,
-            self.args.profile_rename_from,
-            self.args.profile_rename_to,
-        ) = profile
-        self._run(_handle_edit_token)
+        from code_helper.cli.requests import EditTokenRequest
+
+        profile_name, profile_token, rename_from, rename_to = profile
+        self._run(
+            _handle_edit_token,
+            EditTokenRequest(
+                name=alias,
+                profile=profile_name,
+                profile_token=profile_token,
+                profile_rename_from=rename_from,
+                profile_rename_to=rename_to,
+                dry_run=getattr(self.args, "dry_run", False),
+                debug=getattr(self.args, "debug", False),
+            ),
+        )
 
     def _run_set_default(self, paths) -> None:
         """Patch ``~/.codex/config.toml`` with codex's default wrapper."""
@@ -475,166 +480,195 @@ class TuiSession:
         spec = self._resolve_spec(alias)
         if spec is None:
             return
-        self.args.agent = spec.agent.name
-        self.args.provider = spec.provider.name
-        self.args.model = spec.model
+        from code_helper.cli.requests import SetDefaultRequest
+
         # FIXED providers reject a --base-url even when it equals their own
         # registry default; forward the resolved address only for
         # REQUIRED/OVERRIDABLE (issue #30 follow-up).
-        self.args.base_url = (
-            spec.provider.base_url
-            if spec.provider.base_url_policy is not BaseUrlPolicy.FIXED
-            else None
+        self._run(
+            _handle_set_default,
+            SetDefaultRequest(
+                agent=spec.agent.name,
+                provider=spec.provider.name,
+                model=spec.model,
+                base_url=(
+                    spec.provider.base_url
+                    if spec.provider.base_url_policy is not BaseUrlPolicy.FIXED
+                    else None
+                ),
+                restore=False,
+                slot=None,
+                catalog_json=None,
+                dry_run=getattr(self.args, "dry_run", False),
+                force=False,
+                debug=getattr(self.args, "debug", False),
+            ),
         )
-        self.args.restore = False
-        self.args.slot = None
-        self.args.catalog_json = None
-        self.args.force = False
-        self._run(_handle_set_default)
 
-    def _run_add(self) -> None:
-        """Create a wrapper through provider → profile → model → agent → name."""
-        from code_helper.cli.parser import _handle_add
-        from code_helper.errors import CodeHelperError
-        from code_helper.services.model import (
-            AGENTS,
-            PROVIDERS,
-            AuthPolicy,
-            BaseUrlPolicy,
-            Provider,
-            resolve_shape,
-            with_auth,
-            with_base_url,
-        )
-        from code_helper.services.models_api import list_models
-        from code_helper.services.paths import Paths
-        from code_helper.services.secrets import token_for_discovery
-        from code_helper.services.spec import suggest_alias
+    def _add_provider_choices(self):
+        """Return provider menu rows and their runtime-auth choices."""
+        from code_helper.services.model import PROVIDERS, AuthPolicy
 
-        # An OVERRIDABLE provider gets a SECOND row rather than an extra
-        # screen: `ollama` (default) and `ollama (with token)` both pick the
-        # same provider.
-        provider_items: list[tuple[str, str]] = []
-        provider_choices: dict[str, tuple[Provider, bool]] = {}
+        items: list[tuple[str, str]] = []
+        choices = {}
         for provider in PROVIDERS:
-            provider_items.append(
-                (provider.name, f"{provider.name} — {provider.description}")
-            )
-            provider_choices[provider.name] = (provider, False)
+            items.append((provider.name, f"{provider.name} — {provider.description}"))
+            choices[provider.name] = (provider, False)
             if (
                 provider.auth_policy is AuthPolicy.OVERRIDABLE
                 and provider.auth != "secret"
             ):
-                secret_value = f"{provider.name}:secret"
-                provider_items.append(
+                value = f"{provider.name}:secret"
+                items.append(
                     (
-                        secret_value,
+                        value,
                         f"{provider.name} (with token) — reverse proxy / cloud auth",
                     )
                 )
-                provider_choices[secret_value] = (provider, True)
-        while True:  # provider level
-            selection = self._pick(
-                [*provider_items, (_BACK, "Back")], "Select a provider:"
-            )
-            if selection == _BACK:
-                return
-            provider, want_secret_auth = provider_choices[selection]
-            provider = with_auth(provider, want_secret=want_secret_auth)
+                choices[value] = (provider, True)
+        return items, choices
 
-            typed_url: str | None = None
-            if provider.base_url_policy is not BaseUrlPolicy.FIXED:
-                default = f" [{provider.base_url}]" if provider.base_url else ""
-                typed_url = self._read_text(f"Base URL for {provider.name}{default}: ")
-                if typed_url is None:
-                    continue
-                if provider.base_url_policy is BaseUrlPolicy.REQUIRED and not typed_url:
-                    continue
-                try:
-                    provider = with_base_url(provider, typed_url or None)
-                except CodeHelperError as exc:
-                    self._notify(f"error: {exc}")
-                    continue
+    def _choose_add_provider(self):
+        """Choose and configure a provider, or return ``_BACK``/``None``."""
+        from code_helper.errors import CodeHelperError
+        from code_helper.services.model import BaseUrlPolicy, with_auth, with_base_url
 
-            # Profile is the previous level for model selection.
+        items, choices = self._add_provider_choices()
+        selection = self._pick([*items, (_BACK, "Back")], "Select a provider:")
+        if selection == _BACK:
+            return _BACK
+        provider, want_secret_auth = choices[selection]
+        provider = with_auth(provider, want_secret=want_secret_auth)
+        typed_url: str | None = None
+        if provider.base_url_policy is not BaseUrlPolicy.FIXED:
+            default = f" [{provider.base_url}]" if provider.base_url else ""
+            typed_url = self._read_text(f"Base URL for {provider.name}{default}: ")
+            if typed_url is None:
+                return None
+            if provider.base_url_policy is BaseUrlPolicy.REQUIRED and not typed_url:
+                return None
+            try:
+                provider = with_base_url(provider, typed_url or None)
+            except CodeHelperError as exc:
+                self._notify(f"error: {exc}")
+                return None
+        return provider, want_secret_auth, typed_url
+
+    def _choose_add_model(self, provider, profile_name, profile_token):
+        """Discover and choose a model; ``_BACK`` returns to profile choice."""
+        from code_helper.services.models_api import list_models
+        from code_helper.services.paths import Paths
+        from code_helper.services.secrets import token_for_discovery
+
+        discovery_token = profile_token or token_for_discovery(
+            Paths.default(), provider, profile_name=profile_name or None
+        )
+        result = list_models(provider, token=discovery_token)
+        items = [(model, model) for model in result.models]
+        items.extend((("__custom__", "Enter model manually"), (_BACK, "Back")))
+        prompt = f"Select a model for {provider.name}:"
+        if not result.ok:
+            prompt = f"Model discovery unavailable for {provider.name}; enter a model:"
+        model = self._pick(items, prompt)
+        if model != "__custom__":
+            return model
+        typed = self._read_text("Model: ")
+        return typed or None
+
+    def _choose_add_agent(
+        self, provider, model, profile_name, profile, typed_url, want_secret_auth
+    ):
+        """Choose an agent and alias, then dispatch the typed Add request."""
+        from code_helper.cli.parser import _handle_add
+        from code_helper.cli.requests import AddRequest
+        from code_helper.errors import CodeHelperError
+        from code_helper.services.model import AGENTS, resolve_shape
+        from code_helper.services.spec import suggest_alias
+
+        items = []
+        for agent in AGENTS:
+            try:
+                resolve_shape(agent, provider)
+            except CodeHelperError:
+                continue
+            items.append((agent.name, f"{agent.name} — {agent.description}"))
+        agent_name = self._pick([*items, (_BACK, "Back")], "Select an agent:")
+        if agent_name == _BACK:
+            return _BACK
+        try:
+            default_alias = suggest_alias(model, agent_name, profile_name or None)
+        except CodeHelperError as exc:
+            self._notify(f"error: {exc}")
+            return _BACK
+        alias = self._read_text(f"Command name [{default_alias}]: ")
+        if alias is None:
+            return None
+        _, profile_token, rename_from, rename_to = profile
+        self._run(
+            _handle_add,
+            AddRequest(
+                name=None,
+                agent=agent_name,
+                provider=provider.name,
+                model=model,
+                alias=alias or default_alias,
+                shape=None,
+                base_url=typed_url,
+                auth="secret" if want_secret_auth else None,
+                profile=profile_name or None,
+                profile_token=profile_token,
+                profile_rename_from=rename_from,
+                profile_rename_to=rename_to,
+                list_models=False,
+                dry_run=getattr(self.args, "dry_run", False),
+                force=False,
+                debug=getattr(self.args, "debug", False),
+            ),
+        )
+        return True
+
+    def _run_add_provider(self, provider, want_secret_auth, typed_url) -> bool:
+        """Run profile → model → agent for one selected provider."""
+        while True:
+            if provider.auth == "secret":
+                profile = self._select_profile(provider.name, editing=False)
+                if profile is None:
+                    return False
+            else:
+                profile = ("", None, None, None)
+            profile_name, profile_token, _, _ = profile
             while True:
-                profile: ProfileChoice | None
-                if provider.auth == "secret":
-                    profile = self._select_profile(provider.name, editing=False)
-                    if profile is None:
-                        break
-                else:
-                    profile = ("", None, None, None)
-
-                profile_name, profile_token, rename_from, rename_to = profile
-                discovery_token = profile_token or token_for_discovery(
-                    Paths.default(), provider, profile_name=profile_name or None
-                )
-                result = list_models(provider, token=discovery_token)
-                model_items = [(model, model) for model in result.models]
-                model_items.append(("__custom__", "Enter model manually"))
-                model_items.append((_BACK, "Back"))
-                prompt = f"Select a model for {provider.name}:"
-                if not result.ok:
-                    prompt = (
-                        f"Model discovery unavailable for {provider.name}; "
-                        "enter a model:"
-                    )
-
-                # Model is the previous level for agent selection.
+                model = self._choose_add_model(provider, profile_name, profile_token)
+                if model == _BACK:
+                    break
+                if model is None:
+                    continue
                 while True:
-                    model = self._pick(model_items, prompt)
-                    if model == _BACK:
+                    outcome = self._choose_add_agent(
+                        provider,
+                        model,
+                        profile_name,
+                        profile,
+                        typed_url,
+                        want_secret_auth,
+                    )
+                    if outcome is True:
+                        return True
+                    if outcome == _BACK:
                         break
-                    if model == "__custom__":
-                        typed_model = self._read_text("Model: ")
-                        if typed_model is None or not typed_model:
-                            continue
-                        model = typed_model
+                    # A cancelled alias re-opens the agent menu for this model.
 
-                    agent_items: list[tuple[str, str]] = []
-                    for agent in AGENTS:
-                        try:
-                            resolve_shape(agent, provider)
-                        except CodeHelperError:
-                            continue
-                        agent_items.append(
-                            (agent.name, f"{agent.name} — {agent.description}")
-                        )
-
-                    # Agent is the previous level for alias input.
-                    while True:
-                        agent_name = self._pick(
-                            [*agent_items, (_BACK, "Back")], "Select an agent:"
-                        )
-                        if agent_name == _BACK:
-                            break
-                        try:
-                            default_alias = suggest_alias(
-                                model, agent_name, profile_name or None
-                            )
-                        except CodeHelperError as exc:
-                            self._notify(f"error: {exc}")
-                            break
-                        alias = self._read_text(f"Command name [{default_alias}]: ")
-                        if alias is None:
-                            continue
-
-                        self.args.name = None
-                        self.args.force = False
-                        self.args.agent = agent_name
-                        self.args.provider = provider.name
-                        self.args.model = model
-                        self.args.alias = alias or default_alias
-                        self.args.shape = None
-                        self.args.base_url = typed_url
-                        self.args.auth = "secret" if want_secret_auth else None
-                        self.args.profile = profile_name or None
-                        self.args.profile_token = profile_token
-                        self.args.profile_rename_from = rename_from
-                        self.args.profile_rename_to = rename_to
-                        self._run(_handle_add)
-                        return
+    def _run_add(self) -> None:
+        """Create a wrapper through provider → profile → model → agent → name."""
+        while True:
+            selected = self._choose_add_provider()
+            if selected == _BACK:
+                return
+            if selected is None:
+                continue
+            provider, want_secret_auth, typed_url = selected
+            if self._run_add_provider(provider, want_secret_auth, typed_url):
+                return
 
     def _run_settings(self) -> None:
         while True:

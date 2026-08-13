@@ -25,6 +25,7 @@ import os
 import sys
 from dataclasses import replace
 
+from code_helper.cli.requests import AddRequest, EditTokenRequest, SetDefaultRequest
 from code_helper.errors import CodeHelperError
 
 
@@ -396,7 +397,7 @@ def _add_install_and_cache(spec, req, paths, token, resolved, profile_name):
     return wrote
 
 
-def _handle_add(args: argparse.Namespace) -> int:
+def _handle_add(args: argparse.Namespace | AddRequest) -> int:
     """Install (or update) a wrapper — from a preset, or from the three axes.
 
     Disambiguation rule (deterministic, so it survives future name overlaps):
@@ -413,12 +414,11 @@ def _handle_add(args: argparse.Namespace) -> int:
     branching surface stays readable; see the individual docstrings for the
     invariants each carries.
     """
-    from code_helper.cli.requests import AddRequest
     from code_helper.services.paths import Paths
     from code_helper.services.secrets import valid_active_profile
 
     paths = Paths.default()
-    req = AddRequest.from_namespace(args)
+    req = args if isinstance(args, AddRequest) else AddRequest.from_namespace(args)
     using_axes = req.agent is not None or req.provider is not None
 
     # Issue #23: an explicit --profile always wins; otherwise the CLI picks up
@@ -557,7 +557,7 @@ def _edit_token_resolve_profile(
     return new_name, None, None
 
 
-def _handle_edit_token(args: argparse.Namespace) -> int:
+def _handle_edit_token(args: argparse.Namespace | EditTokenRequest) -> int:
     """Interactively rotate the token of a secret-auth wrapper.
 
     Unlike ``add``, this always prompts via ``getpass`` directly — it never
@@ -570,7 +570,6 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     import getpass
 
     from code_helper.cli.menu import MenuCancelled, select_from_menu
-    from code_helper.cli.requests import EditTokenRequest
     from code_helper.services.paths import Paths
     from code_helper.services.secrets import (
         DEFAULT_PROFILE,
@@ -589,7 +588,11 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
         spec_from_installed,
     )
 
-    req = EditTokenRequest.from_namespace(args)
+    req = (
+        args
+        if isinstance(args, EditTokenRequest)
+        else EditTokenRequest.from_namespace(args)
+    )
 
     paths = Paths.default()
     dry_run = req.dry_run
@@ -745,7 +748,7 @@ def _handle_remove(args: argparse.Namespace) -> int:
     return 0
 
 
-def _handle_set_default(args: argparse.Namespace) -> int:
+def _handle_set_default(args: argparse.Namespace | SetDefaultRequest) -> int:
     """Patch (or restore) Codex's OWN ``~/.codex/config.toml`` default.
 
     Thin shell, same contract as every other handler here: resolve
@@ -754,12 +757,15 @@ def _handle_set_default(args: argparse.Namespace) -> int:
     agent's own configuration file — see ``services/codex_default.py`` for
     why that is safe (patch, never replace; always backed up first).
     """
-    from code_helper.cli.requests import SetDefaultRequest
     from code_helper.services.codex_default import apply_set_default, restore_default
     from code_helper.services.model import get_agent, get_provider, with_base_url
     from code_helper.services.paths import Paths
 
-    req = SetDefaultRequest.from_namespace(args)
+    req = (
+        args
+        if isinstance(args, SetDefaultRequest)
+        else SetDefaultRequest.from_namespace(args)
+    )
 
     paths = Paths.default()
 
