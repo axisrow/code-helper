@@ -53,7 +53,7 @@ from code_helper.services.render import (
     toml_string,
 )
 from code_helper.services.spec import build_spec
-from code_helper.services.wrappers import _catalog_self_marked
+from code_helper.services.wrappers import _ownership_catalog_marker
 
 __all__ = [
     "DefaultPatch",
@@ -571,7 +571,7 @@ def _gate_catalog_write(
     """Decide whether the catalog write is allowed, WITHOUT writing anything.
 
     Reuses the SAME structural ``managed_by`` proof
-    (``wrappers._catalog_self_marked``) the per-alias OPENAI_TOML catalogs use
+    (``wrappers._ownership_catalog_marker``) the per-alias OPENAI_TOML catalogs use
     — a hand-curated ``~/.codex/model.json`` is protected exactly like a
     hand-curated ``<alias>.model.json`` would be. EVERY real overwrite of
     EXISTING content — foreign or our own previously-managed catalog — goes
@@ -607,7 +607,7 @@ def _gate_catalog_write(
     if existing == body:
         return _CatalogPlan(catalog_path, body, existing, False, no_op=True)
 
-    foreign = existing is not None and not _catalog_self_marked(catalog_path)
+    foreign = existing is not None and not _ownership_catalog_marker(catalog_path)
     overwriting_existing_content = existing is not None
 
     if dry_run:
@@ -758,6 +758,100 @@ def apply_set_default(
     return config_changed or catalog_wrote
 
 
+@dataclass(frozen=True)
+class _RestorePlan:
+    """Everything :func:`restore_default` needs, read once before any write.
+
+    Reading both files up front is what lets confirmation happen for BOTH
+    restores before EITHER is written — see :func:`_confirm_restore`.
+    """
+
+    config_path: Path
+    backup_path: Path
+    backup_body: str
+    current: str
+    catalog_path: Path
+    catalog_backup_path: Path
+    catalog_backup_body: str | None
+    catalog_current: str | None
+
+    @property
+    def config_changed(self) -> bool:
+        return self.current != self.backup_body
+
+    @property
+    def catalog_changed(self) -> bool:
+        return (
+            self.catalog_backup_body is not None
+            and self.catalog_current != self.catalog_backup_body
+        )
+
+
+def _restore_plan(paths: Paths, *, slot: int, catalog_json: str | None) -> _RestorePlan:
+    """Read the backup slot and the current files a restore would overwrite.
+
+    Raises:
+        CodeHelperError: no config backup exists at ``slot``. A missing
+            CATALOG backup is not an error — only the config.toml restore is
+            mandatory (see :func:`restore_default`'s docstring).
+    """
+    backup_path = paths.codex_main_config_backup(slot)
+    backup_body = read_text_or_none(backup_path)
+    if backup_body is None:
+        raise CodeHelperError(f"no backup found at {backup_path}; nothing to restore")
+
+    config_path = paths.codex_main_config()
+    catalog_path = _resolve_catalog_path(paths, catalog_json)
+    catalog_backup_path = _catalog_backup_slots(catalog_path)[3 - slot]
+    return _RestorePlan(
+        config_path=config_path,
+        backup_path=backup_path,
+        backup_body=backup_body,
+        current=read_text_or_none(config_path) or "",
+        catalog_path=catalog_path,
+        catalog_backup_path=catalog_backup_path,
+        catalog_backup_body=read_text_or_none(catalog_backup_path),
+        catalog_current=read_text_or_none(catalog_path),
+    )
+
+
+def _confirm_restore(plan: _RestorePlan, *, force: bool, confirm) -> None:
+    """Collect every confirmation a restore needs, before ANY file is written.
+
+    Writing config first (as an earlier version of this function did) and then
+    asking about the catalog meant a declined catalog confirm left config.toml
+    ALREADY overwritten with ``backup_body`` — an inconsistent config<->catalog
+    pairing (the exact thing the paired restore exists to avoid) with no
+    rollback, since ``restore_default`` does not itself back up ``current``
+    before overwriting it. Collecting every confirmation up front means a
+    refusal on either file leaves BOTH files completely untouched.
+
+    Raises:
+        CodeHelperError: either overwrite is refused (no ``--force``, no
+            confirmation).
+    """
+    if plan.config_changed:
+        preview = diff_preview(plan.current, plan.backup_body)
+        if not force and not (confirm and confirm(plan.config_path, preview)):
+            raise CodeHelperError(
+                f"about to restore {plan.config_path} from {plan.backup_path} — "
+                f"refusing without confirmation (use --force)"
+            )
+    if plan.catalog_changed:
+        assert plan.catalog_backup_body is not None  # implied by catalog_changed
+        catalog_preview = diff_preview(
+            plan.catalog_current or "",
+            plan.catalog_backup_body,
+            label=str(plan.catalog_path),
+        )
+        if not force and not (confirm and confirm(plan.catalog_path, catalog_preview)):
+            raise CodeHelperError(
+                f"about to restore {plan.catalog_path} from "
+                f"{plan.catalog_backup_path} — refusing without confirmation "
+                f"(use --force)"
+            )
+
+
 def restore_default(
     paths: Paths,
     *,
@@ -792,68 +886,29 @@ def restore_default(
             destroy a DIFFERENT current config.toml (or catalog) if either was
             edited (by hand, or via another tool) since the backup was taken.
     """
-    backup_path = paths.codex_main_config_backup(slot)
-    backup_body = read_text_or_none(backup_path)
-    if backup_body is None:
-        raise CodeHelperError(f"no backup found at {backup_path}; nothing to restore")
+    plan = _restore_plan(paths, slot=slot, catalog_json=catalog_json)
 
-    config_path = paths.codex_main_config()
-    current = read_text_or_none(config_path) or ""
-
-    catalog_path = _resolve_catalog_path(paths, catalog_json)
-    catalog_backup_slots = _catalog_backup_slots(catalog_path)
-    catalog_backup_path = catalog_backup_slots[3 - slot]
-    catalog_backup_body = read_text_or_none(catalog_backup_path)
-    catalog_current = read_text_or_none(catalog_path)
-    catalog_changed = (
-        catalog_backup_body is not None and catalog_current != catalog_backup_body
-    )
-
-    if current == backup_body and not catalog_changed:
+    if not plan.config_changed and not plan.catalog_changed:
         print("no changes")
         return False
 
     if dry_run:
         # --dry-run never prompts and never refuses — it only previews, same
         # ordering as apply_set_default.
-        if current != backup_body:
-            print(f"would restore {config_path} from {backup_path}")
-        if catalog_changed:
-            print(f"would restore {catalog_path} from {catalog_backup_path}")
+        if plan.config_changed:
+            print(f"would restore {plan.config_path} from {plan.backup_path}")
+        if plan.catalog_changed:
+            print(f"would restore {plan.catalog_path} from {plan.catalog_backup_path}")
         return True
 
-    # Confirm BOTH restores before writing EITHER file. Writing config first
-    # (as an earlier version of this function did) and then asking about the
-    # catalog meant a declined catalog confirm left config.toml ALREADY
-    # overwritten with backup_body — an inconsistent config<->catalog pairing
-    # (the exact thing the paired restore exists to avoid) with no rollback,
-    # since this function does not itself back up ``current`` before
-    # overwriting it. Collecting every confirmation up front means a refusal
-    # on either file leaves BOTH files completely untouched.
-    if current != backup_body:
-        preview = diff_preview(current, backup_body)
-        if not force and not (confirm and confirm(config_path, preview)):
-            raise CodeHelperError(
-                f"about to restore {config_path} from {backup_path} — refusing "
-                f"without confirmation (use --force)"
-            )
-    if catalog_changed:
-        assert catalog_backup_body is not None  # implied by catalog_changed above
-        catalog_preview = diff_preview(
-            catalog_current or "", catalog_backup_body, label=str(catalog_path)
-        )
-        if not force and not (confirm and confirm(catalog_path, catalog_preview)):
-            raise CodeHelperError(
-                f"about to restore {catalog_path} from {catalog_backup_path} — "
-                f"refusing without confirmation (use --force)"
-            )
+    _confirm_restore(plan, force=force, confirm=confirm)
 
-    if current != backup_body:
-        atomic_write(config_path, backup_body, mode=None)
-        print(f"restored {config_path} from {backup_path}")
-    if catalog_changed:
-        assert catalog_backup_body is not None  # implied by catalog_changed above
-        atomic_write(catalog_path, catalog_backup_body, mode=None)
-        print(f"restored {catalog_path} from {catalog_backup_path}")
+    if plan.config_changed:
+        atomic_write(plan.config_path, plan.backup_body, mode=None)
+        print(f"restored {plan.config_path} from {plan.backup_path}")
+    if plan.catalog_changed:
+        assert plan.catalog_backup_body is not None  # implied by catalog_changed
+        atomic_write(plan.catalog_path, plan.catalog_backup_body, mode=None)
+        print(f"restored {plan.catalog_path} from {plan.catalog_backup_path}")
 
     return True
