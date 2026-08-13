@@ -468,9 +468,9 @@ def _handle_add(args: argparse.Namespace) -> int:
     wrote = _add_install_and_cache(spec, req, paths, token, resolved, profile_name)
     if not wrote:
         print("no changes")
-    elif not req.dry_run and str(paths.bin_dir) not in os.environ.get(
-        "PATH", ""
-    ).split(os.pathsep):
+    elif not req.dry_run and str(paths.bin_dir) not in os.environ.get("PATH", "").split(
+        os.pathsep
+    ):
         # `wrote` is True under --dry-run too ("would write" — install_wrapper's
         # documented contract), so without this guard a dry run would warn
         # about a PATH problem for a file it never actually created.
