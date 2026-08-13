@@ -21,6 +21,7 @@ _ADD = "add"
 _SETTINGS = "settings"
 _PROFILE = "profile"
 _SET_DEFAULT = "set-default"
+_HELP = "help"
 _QUIT = "quit"
 _BACK = "__back__"
 _NEW_PROFILE = "__new_profile__"
@@ -56,8 +57,11 @@ def _hint(
     from code_helper.cli.menu import MAX_DIGIT_ITEMS
 
     usable = min(numbered_count, MAX_DIGIT_ITEMS)
-    digits = "1" if usable == 1 else f"1-{usable}"
-    hint = f"Up/Down · {digits} · Enter select · Esc {exit_word} · Ctrl-C quit"
+    if usable:
+        digits = "1" if usable == 1 else f"1-{usable}"
+        hint = f"Up/Down · {digits} · Enter select · Esc {exit_word} · Ctrl-C quit"
+    else:
+        hint = f"Up/Down · Enter default · Tab/1-0 profile · ? keys · Esc {exit_word} · Ctrl-C quit"
     if tab_provider:
         hint += f" · Tab: {tab_provider} profile"
     if has_token_key:
@@ -112,11 +116,13 @@ class TuiSession:
         exit_word: str = "back",
         on_tab: Callable[[], None] | None = None,
         on_token: Callable[[str], None] | None = None,
+        on_key: dict[str, Callable[[str], object]] | None = None,
         tab_provider: str | None = None,
+        numbered: bool = True,
     ) -> str:
         from code_helper.cli.menu import MenuCancelled, Section, select_from_menu
 
-        numbered = sum(
+        numbered_count = sum(
             1
             for entry in items
             if not isinstance(entry, Section) and entry[0] not in (_BACK, _QUIT)
@@ -126,14 +132,16 @@ class TuiSession:
                 items,
                 prompt=prompt,
                 hint=_hint(
-                    numbered,
+                    numbered_count if numbered else 0,
                     exit_word=exit_word,
                     tab_provider=tab_provider,
                     has_token_key=on_token is not None,
                 ),
                 on_tab=on_tab,
                 on_token=on_token,
+                on_key=on_key,
                 unnumbered=frozenset({_BACK, _QUIT}),
+                numbered=numbered,
                 clear=True,
             )
         except MenuCancelled as exc:
@@ -395,7 +403,7 @@ class TuiSession:
         from code_helper.cli.menu import Section
         from code_helper.services.model import AGENTS
         from code_helper.services.wrappers import (
-            describe_all,
+            describe_all_columns,
             valid_default_wrapper,
         )
 
@@ -406,15 +414,9 @@ class TuiSession:
             if not agent_specs:
                 continue
             rows.append(Section(agent.name))
-            rows.extend(
-                describe_all(
-                    paths,
-                    agent_specs,
-                    installed_word="installed",
-                    not_installed_word="not installed",
-                    defaults={agent.name: valid_default_wrapper(paths, agent.name)},
-                )
-            )
+            rows.extend((name, "  ".join(columns)) for name, columns in describe_all_columns(
+                paths, agent_specs, defaults={agent.name: valid_default_wrapper(paths, agent.name)}
+            ))
         return rows
 
     def _resolve_spec(self, alias: str) -> object | None:
@@ -763,6 +765,30 @@ class TuiSession:
         set_active_selection(paths, provider, names[(idx + 1) % len(names)])
         self._refresh_active_label()
 
+    def _on_slot(self, slot: int) -> None:
+        from code_helper.services.paths import Paths
+        from code_helper.services.profiles import profile_slots
+        from code_helper.services.state import set_active_selection
+
+        slots = profile_slots(Paths.default())
+        if slot < len(slots):
+            provider, profile = slots[slot]
+            set_active_selection(Paths.default(), provider, profile)
+            self._refresh_active_label()
+
+    def _slot_section(self):
+        from code_helper.cli.menu import Section
+        from code_helper.services.paths import Paths
+        from code_helper.services.profiles import profile_slots
+
+        def label() -> str:
+            slots = profile_slots(Paths.default())
+            return "  ".join(
+                f"{i + 1} {provider}/{profile}" for i, (provider, profile) in enumerate(slots)
+            )
+
+        return Section(label)
+
     def _refresh_active_label(self) -> None:
         """Resolve the active provider and its rendered label, once."""
         self._tab_provider = self._resolve_tab_provider()
@@ -770,7 +796,14 @@ class TuiSession:
 
     def _main_prompt(self) -> str:
         """Live main-menu header, showing the active provider/profile."""
-        return f"code-helper — {self._tab_label}" if self._tab_label else "code-helper"
+        return f"code-helper{' ' * 37}{self._tab_label}" if self._tab_label else "code-helper"
+
+    def _show_help(self) -> None:
+        from code_helper.cli.menu import press_any_key
+
+        print("a add · e edit · d delete · t token · c codex default · s settings")
+        print("Tab/1-0 profile · Enter default · Esc back · Ctrl-C quit")
+        press_any_key("Press any key to continue...")
 
     def _profile_row_label(self) -> str:
         return f"Profile: {self._tab_label}" if self._tab_label else "Profile"
@@ -788,24 +821,30 @@ class TuiSession:
                 self._refresh_active_label()
                 tab_provider = self._tab_provider
                 paths = Paths.default()
-                # The wrapper list IS the main screen (issue #29): grouped by
-                # agent via `Section`, with `●` on the default wrapper and `t`
-                # for per-row token rotation. Enter makes a wrapper the default
-                # for its agent; the service rows sit below the wrappers.
+                keys = {
+                    "a": lambda _alias: _ADD,
+                    "c": lambda _alias: _SET_DEFAULT,
+                    "s": lambda _alias: _SETTINGS,
+                    "?": lambda _alias: _HELP,
+                    "TOKEN": lambda alias: f"token:{alias}",
+                    "e": lambda alias: f"token:{alias}",
+                    "d": lambda alias: f"remove:{alias}",
+                }
+                for i in range(10):
+                    keys[f"DIGIT_{i}"] = lambda _alias, i=i: self._on_slot(
+                        9 if i == 0 else i - 1
+                    )
                 choice = self._pick(
                     [
+                        self._slot_section(),
                         *self._wrapper_rows(paths),
-                        (_ADD, "Add"),
-                        (_PROFILE, self._profile_row_label),
-                        (_SET_DEFAULT, "Apply codex default"),
-                        (_SETTINGS, "Settings"),
-                        (_QUIT, "Quit"),
                     ],
                     self._main_prompt,
                     exit_word="quit",
                     on_tab=self._on_tab,
                     tab_provider=tab_provider,
-                    on_token=self._on_token,
+                    on_key=keys,
+                    numbered=False,
                 )
                 if choice in (_BACK, _QUIT):
                     return 0
@@ -817,6 +856,15 @@ class TuiSession:
                     self._run_set_default(paths)
                 elif choice == _SETTINGS:
                     self._run_settings()
+                elif choice == _HELP:
+                    self._show_help()
+                elif choice.startswith("token:"):
+                    self._on_token(choice.removeprefix("token:"))
+                elif choice.startswith("remove:"):
+                    from code_helper.cli.parser import _handle_remove
+
+                    self.args.name = choice.removeprefix("remove:")
+                    self._run(_handle_remove)
                 else:
                     # A wrapper alias — Enter makes it the default for its
                     # agent. `set_default_wrapper` is the raw store (#28);

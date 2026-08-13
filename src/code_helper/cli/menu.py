@@ -23,7 +23,7 @@ import getpass
 import os
 import shutil
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 __all__ = [
     "select_from_menu",
@@ -106,8 +106,8 @@ class Section:
 
     __slots__ = ("text",)
 
-    def __init__(self, text: str) -> None:
-        if "\n" in text or "\r" in text:
+    def __init__(self, text: str | Callable[[], str]) -> None:
+        if isinstance(text, str) and ("\n" in text or "\r" in text):
             raise ValueError("Section text must be a single line")
         self.text = text
 
@@ -144,6 +144,24 @@ def _translate(
     see :func:`select_from_menu`'s ``on_token``; without one it is ignored
     just like ``"OTHER"``), ``"DIGIT_1"``..``"DIGIT_9"``, ``"OTHER"``.
     """
+    # KeyReader feeds raw bytes as latin-1 code points so escape handling can
+    # remain byte-oriented.  Finish a UTF-8 sequence before consulting the
+    # layout map; decoding each byte separately turns one Cyrillic keypress
+    # into two replacement characters.
+    if 0xC2 <= ord(first) <= 0xFF:
+        width = 2 if ord(first) < 0xE0 else 3 if ord(first) < 0xF0 else 4
+        raw = [first]
+        for _ in range(width - 1):
+            nxt = read_more(_ESC_TIMEOUT)
+            if nxt is None or not 0x80 <= ord(nxt) <= 0xBF:
+                if nxt is not None:
+                    push_back(nxt)
+                return "OTHER"
+            raw.append(nxt)
+        try:
+            first = "".join(raw).encode("latin-1").decode("utf-8")
+        except UnicodeDecodeError:
+            return "OTHER"
     if first == "\x1b":
         nxt = read_more(_ESC_TIMEOUT)
         if nxt is None:
@@ -187,6 +205,9 @@ def _translate(
         return "HARD_CANCEL"
     if first == "\t":
         return "TAB"
+    from code_helper.cli.keymap import translate_key
+
+    first = translate_key(first)
     if first in ("t", "T"):
         return "TOKEN"
     if first in ("q", "Q"):
@@ -199,9 +220,9 @@ def _translate(
         return "HOME"
     if first == "G":
         return "END"
-    if first in "123456789":
+    if first in "0123456789":
         return f"DIGIT_{first}"
-    return "OTHER"
+    return first if first in "aedtc s?".replace(" ", "") else "OTHER"
 
 
 class KeyReader:
@@ -253,7 +274,7 @@ class KeyReader:
             ready, _, _ = select.select([fd], [], [], timeout)
             if not ready:
                 return None
-            return os.read(fd, 1).decode("utf-8", errors="replace")
+            return os.read(fd, 1).decode("latin-1")
 
         def _push_back(b: str) -> None:
             self._pending = b
@@ -263,7 +284,7 @@ class KeyReader:
             if self._pending is not None:
                 first, self._pending = self._pending, None
             else:
-                first = os.read(fd, 1).decode("utf-8", errors="replace")
+                first = os.read(fd, 1).decode("latin-1")
             return _translate(first, _read_more, _push_back)
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
@@ -402,6 +423,7 @@ def _build_menu_state(
     *,
     hint: str | None | Callable[[], str],
     unnumbered: frozenset[str],
+    numbered: bool,
 ) -> _MenuState:
     """Construct a :class:`_MenuState` from raw ``items`` — pure, no IO.
 
@@ -422,7 +444,7 @@ def _build_menu_state(
         if isinstance(entry, Section):
             continue
         value = entry[0]
-        if value not in unnumbered and len(digit_of) < MAX_DIGIT_ITEMS:
+        if numbered and value not in unnumbered and len(digit_of) < MAX_DIGIT_ITEMS:
             digit_of[value] = len(digit_of) + 1
     by_digit = {n: value for value, n in digit_of.items()}
 
@@ -495,14 +517,14 @@ def _render_frame(
     for local, entry in enumerate(visible):
         i = first + local
         if isinstance(entry, Section):
-            header = entry.text
+            header = entry.text() if callable(entry.text) else entry.text
             print_fn(f" {_fit(header, width - 1) if state.redraw else header}")
             continue
         value, label = entry
         label_text = label() if callable(label) else label
         marker = ">" if i == cursor_pair else " "
         digit = str(state.digit_of[value]) if value in state.digit_of else "·"
-        row = f"{digit} {marker} {label_text}"
+        row = f"{digit} {marker} {label_text}" if state.digit_of else f"{marker} {label_text}"
         print_fn(f" {_fit(row, width - 1) if state.redraw else row}")
     if state.redraw and first + len(visible) < len(state.pairs):
         print_fn(f" ↓ {len(state.pairs) - first - len(visible)} more")
@@ -517,6 +539,7 @@ def _dispatch_key(
     *,
     on_tab: Callable[[], None] | None,
     on_token: Callable[[str], None] | None,
+    on_key: Mapping[str, Callable[[str], object]] | None,
 ):
     """Act on one translated ``key`` — returns a sentinel or a selected value.
 
@@ -526,6 +549,8 @@ def _dispatch_key(
         on_token) and the loop should redraw; never returns for CANCEL /
         HARD_CANCEL (raises :class:`MenuCancelled`).
     """
+    if on_key is not None and key in on_key:
+        return on_key[key](state.pairs[state.selectable[state.index]][0])
     if key == "TAB" and on_tab is not None:
         on_tab()
         return None
@@ -573,7 +598,9 @@ def select_from_menu(
     hint: str | None | Callable[[], str] = None,
     on_tab: Callable[[], None] | None = None,
     on_token: Callable[[str], None] | None = None,
+    on_key: Mapping[str, Callable[[str], object]] | None = None,
     unnumbered: frozenset[str] = frozenset(),
+    numbered: bool = True,
     read_key: Callable[[], str] | None = None,
     print_fn: Callable[[str], None] = print,
     clear: bool = False,
@@ -659,7 +686,12 @@ def select_from_menu(
         MenuCancelled: the user cancelled — ``hard=True`` for Ctrl-C,
             ``hard=False`` for Esc/``q``.
     """
-    state = _build_menu_state(items, hint=hint, unnumbered=unnumbered)
+    reserved = {"CANCEL", "HARD_CANCEL"}
+    if on_key is not None and reserved & set(on_key):
+        raise ValueError("on_key cannot override cancellation keys")
+    state = _build_menu_state(
+        items, hint=hint, unnumbered=unnumbered, numbered=numbered
+    )
     if read_key is None:
         # One reader shared across the whole process, NOT `_read_key_raw` —
         # see `_default_read_key`'s docstring for why a fresh reader (per
@@ -683,7 +715,7 @@ def select_from_menu(
             state.first = False
 
             selected = _dispatch_key(
-                read_key(), state, on_tab=on_tab, on_token=on_token
+                read_key(), state, on_tab=on_tab, on_token=on_token, on_key=on_key
             )
             if selected is not None:
                 return selected

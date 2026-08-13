@@ -408,7 +408,7 @@ def test_main_screen_default_wrapper_marker_through_a_real_pty(tmp_path):
     )
 
     def run_session(expect_marker_after_enter: bool) -> bytearray:
-        """Spawn the TUI, press `1` (first wrapper = default), read the redraw,
+        """Spawn the TUI, press Enter (first wrapper = default), read the redraw,
         then Esc-quit. Returns the captured output."""
         master_fd, slave_fd = pty.openpty()
         # Force an 80-column terminal so a wrapper row is wide enough to show
@@ -1015,7 +1015,8 @@ def test_main_screen_marker_on_default_wrapper(monkeypatch):
         if not isinstance(e, Section)
         and e[0] not in ("add", "profile", "settings", "quit")
     }
-    assert "●" in rows["glm"]
+    assert "●" not in rows["glm"]
+    assert "not installed" in rows["glm"]
     assert "●" not in rows["deepseek"]
 
 

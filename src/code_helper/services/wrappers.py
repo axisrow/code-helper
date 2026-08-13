@@ -1343,6 +1343,33 @@ def describe_all(
     ]
 
 
+def describe_wrapper_columns(
+    spec: WrapperSpec, *, installed: bool, default: bool = False
+) -> tuple[str, str, str]:
+    """TUI-only name/provider/model columns, independent of prose descriptions."""
+    name = f"● {spec.name}" if default else f"  {spec.name}"
+    model = spec.model + (" (not installed)" if not installed else "")
+    return name, spec.provider.name, model
+
+
+def describe_all_columns(
+    paths: Paths, specs: Sequence[WrapperSpec], *, defaults: dict[str, str | None]
+) -> list[tuple[str, tuple[str, str, str]]]:
+    """Return aligned semantic columns for the interactive main screen."""
+    raw = [
+        (spec.name, describe_wrapper_columns(
+            spec, installed=is_installed(paths, spec.name),
+            default=defaults.get(spec.agent.name) == spec.name,
+        ))
+        for spec in specs
+    ]
+    widths = [max((len(columns[i]) for _, columns in raw), default=0) for i in range(2)]
+    return [
+        (name, (columns[0].ljust(widths[0]), columns[1].ljust(widths[1]), columns[2]))
+        for name, columns in raw
+    ]
+
+
 def list_wrappers(paths: Paths, *, print_fn=print) -> None:
     """Print the wrapper registry + whether each is present on disk.
 
@@ -1393,6 +1420,7 @@ def discover_managed(paths: Paths) -> list[str]:
         and _is_usable_alias(entry.name)
     ]
     return sorted(found)
+
 
 
 def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:

@@ -192,3 +192,5 @@ def set_default_wrapper(paths: Paths, agent_name: str, alias: str) -> None:
     wrappers[agent_name] = alias
     state["default_wrapper"] = wrappers
     _write_state(paths, state)
+
+
