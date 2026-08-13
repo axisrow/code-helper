@@ -524,7 +524,11 @@ def _render_frame(
         label_text = label() if callable(label) else label
         marker = ">" if i == cursor_pair else " "
         digit = str(state.digit_of[value]) if value in state.digit_of else "·"
-        row = f"{digit} {marker} {label_text}" if state.digit_of else f"{marker} {label_text}"
+        row = (
+            f"{digit} {marker} {label_text}"
+            if state.digit_of
+            else f"{marker} {label_text}"
+        )
         print_fn(f" {_fit(row, width - 1) if state.redraw else row}")
     if state.redraw and first + len(visible) < len(state.pairs):
         print_fn(f" ↓ {len(state.pairs) - first - len(visible)} more")

@@ -1357,10 +1357,14 @@ def describe_all_columns(
 ) -> list[tuple[str, tuple[str, str, str]]]:
     """Return aligned semantic columns for the interactive main screen."""
     raw = [
-        (spec.name, describe_wrapper_columns(
-            spec, installed=is_installed(paths, spec.name),
-            default=defaults.get(spec.agent.name) == spec.name,
-        ))
+        (
+            spec.name,
+            describe_wrapper_columns(
+                spec,
+                installed=is_installed(paths, spec.name),
+                default=defaults.get(spec.agent.name) == spec.name,
+            ),
+        )
         for spec in specs
     ]
     widths = [max((len(columns[i]) for _, columns in raw), default=0) for i in range(2)]
@@ -1420,7 +1424,6 @@ def discover_managed(paths: Paths) -> list[str]:
         and _is_usable_alias(entry.name)
     ]
     return sorted(found)
-
 
 
 def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:

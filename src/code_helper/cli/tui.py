@@ -414,9 +414,14 @@ class TuiSession:
             if not agent_specs:
                 continue
             rows.append(Section(agent.name))
-            rows.extend((name, "  ".join(columns)) for name, columns in describe_all_columns(
-                paths, agent_specs, defaults={agent.name: valid_default_wrapper(paths, agent.name)}
-            ))
+            rows.extend(
+                (name, "  ".join(columns))
+                for name, columns in describe_all_columns(
+                    paths,
+                    agent_specs,
+                    defaults={agent.name: valid_default_wrapper(paths, agent.name)},
+                )
+            )
         return rows
 
     def _resolve_spec(self, alias: str) -> object | None:
@@ -441,7 +446,6 @@ class TuiSession:
         if spec is None:
             return
         if spec.auth != "secret":
-            self._notify(f"{alias} has no editable token.")
             return
         profile = self._select_profile(spec.provider.name, editing=True)
         if profile is None:
@@ -784,7 +788,8 @@ class TuiSession:
         def label() -> str:
             slots = profile_slots(Paths.default())
             return "  ".join(
-                f"{i + 1} {provider}/{profile}" for i, (provider, profile) in enumerate(slots)
+                f"{i + 1} {provider}/{profile}"
+                for i, (provider, profile) in enumerate(slots)
             )
 
         return Section(label)
@@ -796,7 +801,11 @@ class TuiSession:
 
     def _main_prompt(self) -> str:
         """Live main-menu header, showing the active provider/profile."""
-        return f"code-helper{' ' * 37}{self._tab_label}" if self._tab_label else "code-helper"
+        return (
+            f"code-helper{' ' * 37}{self._tab_label}"
+            if self._tab_label
+            else "code-helper"
+        )
 
     def _show_help(self) -> None:
         from code_helper.cli.menu import press_any_key
