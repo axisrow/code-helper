@@ -456,14 +456,13 @@ def test_valid_default_wrapper_none_when_unset(tmp_path):
 
 
 @pytest.mark.integration
-def test_valid_default_wrapper_returns_a_preset_alias(tmp_path):
-    """A preset alias is live even with nothing on disk — ``preset_names``
-    is the static half of the live set, independent of ``bin_dir``."""
+def test_valid_default_wrapper_none_for_uninstalled_preset(tmp_path):
+    """A preset name alone must not create a selectable default ghost."""
     from code_helper.services.state import set_default_wrapper
 
     paths = Paths.from_home(tmp_path)
     set_default_wrapper(paths, "claude", "glm")
-    assert valid_default_wrapper(paths, "claude") == "glm"
+    assert valid_default_wrapper(paths, "claude") is None
 
 
 @pytest.mark.integration
@@ -1791,3 +1790,111 @@ def test_describe_wrapper_marker_preserves_state_column_alignment():
         default=True,
     )
     assert unmarked.index("installed") == marked.index("installed")
+
+
+@pytest.mark.integration
+def test_remove_wrapper_removes_owned_siblings_and_clears_default(tmp_path):
+    from code_helper.services.state import default_wrapper, set_default_wrapper
+    from code_helper.services.wrappers import remove_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    install_wrapper(paths, spec)
+    set_default_wrapper(paths, "codex", spec.alias)
+
+    assert remove_wrapper(paths, spec.alias) is True
+    assert not paths.script_for(spec.alias).exists()
+    assert not paths.codex_config_for(spec.alias).exists()
+    assert not paths.codex_catalog_for(spec.alias).exists()
+    assert default_wrapper(paths, "codex") is None
+
+
+@pytest.mark.integration
+def test_remove_wrapper_refuses_foreign_file_without_force(tmp_path):
+    from code_helper.services.wrappers import remove_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    paths.bin_dir.mkdir(parents=True)
+    paths.script_for("foreign").write_text("#!/bin/sh\n", encoding="utf-8")
+    with pytest.raises(CodeHelperError, match="use --force"):
+        remove_wrapper(paths, "foreign")
+    assert remove_wrapper(paths, "foreign", force=True) is True
+
+
+@pytest.mark.integration
+def test_remove_wrapper_survives_a_failed_sibling_unlink(tmp_path, monkeypatch):
+    """A mid-sequence unlink failure must not make the wrapper itself
+    unrecoverable (siblings unlink before the wrapper executable, the
+    ownership proof a retry needs), AND must not clear the default pointer
+    for a wrapper that is still installed and still the user's default —
+    the default is only cleared once every unlink has actually succeeded."""
+    from pathlib import Path
+
+    from code_helper.services.state import default_wrapper, set_default_wrapper
+    from code_helper.services.wrappers import remove_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    install_wrapper(paths, spec)
+    set_default_wrapper(paths, "codex", spec.alias)
+
+    catalog = paths.codex_catalog_for(spec.alias)
+    real_unlink = Path.unlink
+
+    def flaky_unlink(self, *a, **kw):
+        if self == catalog:
+            raise OSError("simulated transient failure")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+
+    with pytest.raises(CodeHelperError, match="failed to remove"):
+        remove_wrapper(paths, spec.alias)
+
+    # The wrapper itself must still be present — it is the ownership proof a
+    # retry needs — and its default must be untouched: the removal did not
+    # actually succeed, so the still-installed wrapper must not lose its
+    # default out from under it.
+    assert paths.script_for(spec.alias).exists()
+    assert default_wrapper(paths, "codex") == spec.alias
+
+    monkeypatch.undo()
+
+    # A retry now succeeds and cleans up everything, including the sibling
+    # that failed the first time, and only NOW clears the default.
+    assert remove_wrapper(paths, spec.alias) is True
+    assert not paths.script_for(spec.alias).exists()
+    assert not paths.codex_config_for(spec.alias).exists()
+    assert not catalog.exists()
+    assert default_wrapper(paths, "codex") is None
+
+
+@pytest.mark.integration
+def test_remove_wrapper_reports_but_does_not_undo_a_failed_default_clear(
+    tmp_path, monkeypatch
+):
+    """If every unlink succeeds but the follow-up state.json write fails, the
+    files are gone regardless — that cannot be undone — so the failure must
+    be reported (not swallowed as success) without claiming the deletion
+    itself didn't happen."""
+    import code_helper.services.state as state
+    from code_helper.services.state import set_default_wrapper
+    from code_helper.services.wrappers import remove_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    install_wrapper(paths, spec)
+    set_default_wrapper(paths, "codex", spec.alias)
+
+    def flaky_write_state(paths_arg, state_dict):
+        raise OSError("simulated disk-full failure")
+
+    monkeypatch.setattr(state, "_write_state", flaky_write_state)
+
+    with pytest.raises(CodeHelperError, match="failed to clear its default pointer"):
+        remove_wrapper(paths, spec.alias)
+
+    # The deletion itself is NOT undone — the files are genuinely gone.
+    assert not paths.script_for(spec.alias).exists()
+    assert not paths.codex_config_for(spec.alias).exists()
+    assert not paths.codex_catalog_for(spec.alias).exists()

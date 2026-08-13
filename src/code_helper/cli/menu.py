@@ -366,6 +366,7 @@ class _MenuState:
         "first",
         "redraw",
         "width",
+        "height",
         "hint_text",
         "frame_lines",
     )
@@ -379,6 +380,7 @@ class _MenuState:
         by_digit,
         redraw,
         width,
+        height,
         hint_text,
         frame_lines,
     ) -> None:
@@ -388,6 +390,7 @@ class _MenuState:
         self.by_digit = by_digit
         self.redraw = redraw
         self.width = width
+        self.height = height
         self.hint_text = hint_text
         self.frame_lines = frame_lines
         self.index = 0
@@ -424,7 +427,9 @@ def _build_menu_state(
     by_digit = {n: value for value, n in digit_of.items()}
 
     redraw = sys.stdout.isatty()
-    width = shutil.get_terminal_size((80, 24)).columns if redraw else 0
+    size = shutil.get_terminal_size((80, 24)) if redraw else None
+    width = size.columns if size else 0
+    height = size.lines if size else 0
     hint_text = hint() if callable(hint) else hint
     frame_lines = len(pairs) + 2 + (2 if hint_text else 0)
 
@@ -435,6 +440,7 @@ def _build_menu_state(
         by_digit=by_digit,
         redraw=redraw,
         width=width,
+        height=height,
         hint_text=hint_text,
         frame_lines=frame_lines,
     )
@@ -445,42 +451,64 @@ def _render_frame(
     *,
     prompt: str | Callable[[], str],
     clear: bool,
-    clear_seq: str,
     clear_screen: str,
     print_fn: Callable[[str], None],
 ) -> None:
-    """Render one menu frame to ``print_fn`` — pure output, no key reading.
-
-    Evaluates a callable ``prompt`` fresh each frame so a header that
-    reflects state an ``on_tab`` handler mutated stays current. Every
-    rendered row is truncated to the terminal width via :func:`_fit` — a row
-    longer than the terminal wraps into extra physical rows the in-place
-    redraw does not know about, and the menu creeps down the screen.
-    """
+    """Render one frame, adapting its viewport to the current terminal size."""
+    prior_frame_lines = state.frame_lines
+    if state.redraw:
+        size = shutil.get_terminal_size((80, 24))
+        state.width, state.height = size.columns, size.lines
     width = state.width
-    redraw = state.redraw
     prompt_text = prompt() if callable(prompt) else prompt
-    heading = _fit(prompt_text, width) if redraw else prompt_text
-    if redraw:
-        lead = clear_seq if not state.first else (clear_screen if clear else "")
-        print_fn(f"{lead}{heading}\n")
+    heading = _fit(prompt_text, width) if state.redraw else prompt_text
+
+    # Keep the selected row in a viewport that fits the terminal.  The cursor
+    # index stays in the full selectable list, so navigation/digits retain
+    # their stable meanings while PageUp/PageDown can move through long menus.
+    if state.redraw:
+        fixed_rows = 2 + (2 if state.hint_text else 0)
+        # Reserve two rows for viewport indicators only when clipping is
+        # necessary, so indicators never push a frame below terminal height.
+        capacity = max(1, state.height - fixed_rows)
+        if len(state.pairs) > capacity:
+            capacity = max(1, capacity - 2)
+        selected_pair = state.selectable[state.index]
+        first = max(0, selected_pair - capacity // 2)
+        first = min(first, max(0, len(state.pairs) - capacity))
+        visible = state.pairs[first : first + capacity]
+        indicators = int(first > 0) + int(first + len(visible) < len(state.pairs))
+        state.frame_lines = len(visible) + fixed_rows + indicators
+        lead = f"\033[{prior_frame_lines}A\033[J"
+        prefix = (
+            clear_screen if state.first and clear else ("" if state.first else lead)
+        )
+        print_fn(f"{prefix}{heading}\n")
     else:
+        visible = state.pairs
+        first = 0
         print_fn(f"\n{heading}")
+
     cursor_pair = state.selectable[state.index]
-    for i, entry in enumerate(state.pairs):
+    if state.redraw and first:
+        print_fn(f" ↑ {first} more")
+    for local, entry in enumerate(visible):
+        i = first + local
         if isinstance(entry, Section):
             header = entry.text
-            print_fn(f" {_fit(header, width - 1) if redraw else header}")
+            print_fn(f" {_fit(header, width - 1) if state.redraw else header}")
             continue
         value, label = entry
         label_text = label() if callable(label) else label
         marker = ">" if i == cursor_pair else " "
         digit = str(state.digit_of[value]) if value in state.digit_of else "·"
         row = f"{digit} {marker} {label_text}"
-        print_fn(f" {_fit(row, width - 1) if redraw else row}")
+        print_fn(f" {_fit(row, width - 1) if state.redraw else row}")
+    if state.redraw and first + len(visible) < len(state.pairs):
+        print_fn(f" ↓ {len(state.pairs) - first - len(visible)} more")
     if state.hint_text:
-        fitted_hint = _fit(state.hint_text, width) if redraw else state.hint_text
-        print_fn(f"\n {fitted_hint}" if redraw else f" {fitted_hint}")
+        fitted_hint = _fit(state.hint_text, width) if state.redraw else state.hint_text
+        print_fn(f"\n {fitted_hint}" if state.redraw else f" {fitted_hint}")
 
 
 def _dispatch_key(
@@ -510,11 +538,19 @@ def _dispatch_key(
     if key == "DOWN":
         state.index = (state.index + 1) % len(state.selectable)
         return None
-    if key in ("HOME", "PAGE_UP"):
+    if key == "HOME":
         state.index = 0
         return None
-    if key in ("END", "PAGE_DOWN"):
+    if key == "END":
         state.index = len(state.selectable) - 1
+        return None
+    if key == "PAGE_UP":
+        state.index = max(0, state.index - max(1, state.height - 4))
+        return None
+    if key == "PAGE_DOWN":
+        state.index = min(
+            len(state.selectable) - 1, state.index + max(1, state.height - 4)
+        )
         return None
     if key == "ENTER":
         return state.pairs[state.selectable[state.index]][0]
@@ -608,9 +644,8 @@ def select_from_menu(
 
     On a real terminal the menu is redrawn *in place* on every keypress; the
     cursor is hidden for the duration (restored in a ``finally``, so it comes
-    back even if the caller raises out of ``read_key``). ``HOME``/``END``/
-    ``PAGE_UP``/``PAGE_DOWN`` jump to the first/last item (there is nothing to
-    page through in a short menu); ``DIGIT_<n>`` selects the n-th NUMBERED
+    back even if the caller raises out of ``read_key``). ``HOME``/``END`` jump
+    to the first/last item; ``PAGE_UP``/``PAGE_DOWN`` move by one viewport; ``DIGIT_<n>`` selects the n-th NUMBERED
     item immediately if it exists, else is ignored. Every printed row is
     truncated to the real terminal width (see :func:`_fit`) — a row longer
     than the terminal wraps into extra physical rows the in-place redraw
@@ -631,7 +666,6 @@ def select_from_menu(
         # keypress OR per `select_from_menu` call) drops a pushed-back byte.
         read_key = _default_read_key
 
-    clear_seq = f"\033[{state.frame_lines}A\033[J"
     clear_screen = "\033[2J\033[H"
     hide_cursor = "\033[?25l"
     show_cursor = "\033[?25h"
@@ -643,7 +677,6 @@ def select_from_menu(
                 state,
                 prompt=prompt,
                 clear=clear,
-                clear_seq=clear_seq,
                 clear_screen=clear_screen,
                 print_fn=print_fn,
             )

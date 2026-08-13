@@ -21,6 +21,7 @@ parser so they parse BOTH before and after the subcommand.
 """
 
 import argparse
+import os
 import sys
 from dataclasses import replace
 
@@ -467,6 +468,17 @@ def _handle_add(args: argparse.Namespace) -> int:
     wrote = _add_install_and_cache(spec, req, paths, token, resolved, profile_name)
     if not wrote:
         print("no changes")
+    elif not req.dry_run and str(paths.bin_dir) not in os.environ.get("PATH", "").split(
+        os.pathsep
+    ):
+        # `wrote` is True under --dry-run too ("would write" — install_wrapper's
+        # documented contract), so without this guard a dry run would warn
+        # about a PATH problem for a file it never actually created.
+        print(
+            f"warning: {paths.bin_dir} is not on PATH — add it to your shell "
+            f"profile to run '{spec.alias}'",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -698,6 +710,20 @@ def _handle_edit_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_remove(args: argparse.Namespace) -> int:
+    """Remove one managed wrapper and its owned companion files."""
+    from code_helper.services.paths import Paths
+    from code_helper.services.wrappers import remove_wrapper
+
+    remove_wrapper(
+        Paths.default(),
+        args.name,
+        dry_run=getattr(args, "dry_run", False),
+        force=getattr(args, "force", False),
+    )
+    return 0
+
+
 def _handle_set_default(args: argparse.Namespace) -> int:
     """Patch (or restore) Codex's OWN ``~/.codex/config.toml`` default.
 
@@ -923,6 +949,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="token profile to update (default: default)",
     )
     p_edit_token.set_defaults(func=_handle_edit_token)
+
+    p_remove = subparsers.add_parser(
+        "remove",
+        help="remove a wrapper and its managed companion files",
+        parents=[sub_flags],
+    )
+    p_remove.add_argument("name", help="wrapper name to remove")
+    p_remove.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="remove an unmanaged wrapper file too",
+    )
+    p_remove.set_defaults(func=_handle_remove)
 
     p_set_default = subparsers.add_parser(
         "set-default",

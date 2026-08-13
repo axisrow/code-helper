@@ -80,6 +80,7 @@ __all__ = [
     "render_script",
     # lifecycle
     "install_wrapper",
+    "remove_wrapper",
     "is_installed",
     "is_managed",
     "spec_from_installed",
@@ -1186,6 +1187,79 @@ def install_wrapper(
     return wrote
 
 
+def remove_wrapper(
+    paths: Paths, name: str, *, dry_run: bool = False, force: bool = False
+) -> bool:
+    """Remove a wrapper and its managed OPENAI_TOML siblings safely.
+
+    Refuses to delete an unmanaged executable unless the caller explicitly
+    passes ``force``. Only siblings carrying their own ownership proof are
+    removed, so a wrapper removal cannot silently delete user configuration.
+    """
+    if not _is_usable_alias(name):
+        raise CodeHelperError(f"invalid wrapper name: {name}")
+    wrapper = paths.script_for(name)
+    if not wrapper.exists():
+        raise CodeHelperError(f"wrapper not found: {wrapper}")
+    if not is_managed(paths, name) and not force:
+        raise CodeHelperError(
+            f"refusing to remove unmanaged file {wrapper} (use --force)"
+        )
+
+    siblings = [
+        path
+        for path, ours in (
+            (
+                paths.codex_config_for(name),
+                _ownership_marker_only(paths.codex_config_for(name)),
+            ),
+            (
+                paths.codex_catalog_for(name),
+                _catalog_self_marked(paths.codex_catalog_for(name)),
+            ),
+        )
+        if path.exists() and ours
+    ]
+    # Siblings first, the wrapper executable last: `is_managed`/`is_installed`
+    # both key off the executable's presence, so keeping it around until
+    # every sibling is confirmed gone means a failed unlink partway through
+    # (permissions, a transient filesystem error) leaves a wrapper that is
+    # still recognized and retryable — not a dangling alias a retry can no
+    # longer find (`wrapper not found`) with orphaned siblings behind it.
+    targets = [*siblings, wrapper]
+    if dry_run:
+        for path in targets:
+            print(f"would remove {path}")
+        return True
+
+    for path in targets:
+        try:
+            path.unlink()
+        except OSError as exc:
+            # Every file is untouched or gone at this point — the default
+            # pointer has NOT been cleared yet, so a still-installed wrapper
+            # never loses its default out from under a failed removal.
+            raise CodeHelperError(f"failed to remove {path}: {exc}") from exc
+        print(f"removed {path}")
+
+    # Only clear the default pointer once every unlink above has actually
+    # succeeded — clearing it any earlier would strip a still-installed
+    # wrapper's default the moment a LATER sibling unlink fails. A failure
+    # in this write itself is reported, not swallowed as success, but does
+    # NOT retroactively undo the deletion that already happened: the files
+    # are gone regardless, so raising here only signals "the pointer may
+    # still be stale", which the message says explicitly.
+    from code_helper.services.state import clear_default_wrapper
+
+    try:
+        clear_default_wrapper(paths, name)
+    except OSError as exc:
+        raise CodeHelperError(
+            f"removed {wrapper} but failed to clear its default pointer: {exc}"
+        ) from exc
+    return True
+
+
 def describe_wrapper(
     spec: WrapperSpec,
     *,
@@ -1351,10 +1425,6 @@ def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
     if is_installed(paths, alias) and is_managed(paths, alias):
         spec = spec_from_installed(paths, alias)
         if spec is not None and spec.agent.name == agent_name:
-            return alias
-        return None
-    if alias in preset_names():
-        if get_preset(alias).agent == agent_name:
             return alias
         return None
     return None

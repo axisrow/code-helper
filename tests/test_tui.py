@@ -302,7 +302,7 @@ def test_list_handles_a_managed_wrapper_whose_marker_names_an_unknown_provider(
     _menu_sequence(monkeypatch, ["list", "orphaned-wrapper", "__back__", "quit"])
 
     assert main(["tui"]) == 0
-    assert "error" in capsys.readouterr().err.lower()
+    assert "error" in capsys.readouterr().out.lower()
 
 
 @pytest.mark.integration
@@ -367,13 +367,13 @@ def test_provider_first_flow_through_a_real_pty(tmp_path):
     try:
         read_until("Esc quit")
         # `1` is the first wrapper on the main screen (issue #29): Enter makes
-        # it the default for its agent. We stay on the main screen — no
-        # sub-screen to Esc out of.
+        # it the default for its agent. Uninstalled wrappers now give a
+        # visible instruction rather than creating a ghost default.
         menu_key("1")
+        read_until("Wrapper not installed")
+        menu_key(" ")
         read_until("Esc quit")
-        # Esc on the main screen exits (exit_word="quit").
-        menu_key("\x1b")
-        assert b"Press any key" not in output
+        assert b"Press any key" in output
     finally:
         if child.poll() is None:
             child.kill()
@@ -453,14 +453,15 @@ def test_main_screen_default_wrapper_marker_through_a_real_pty(tmp_path):
 
         try:
             read_until("Esc quit")
-            # First wrapper (deepseek) gets no `●` yet on a fresh install.
+            # Uninstalled wrappers cannot become defaults: the guidance stays
+            # visible until acknowledged, then the menu redraws unchanged.
             menu_key("1")
+            read_until("Wrapper not installed")
+            menu_key(" ")
             read_until("Esc quit")
             if expect_marker_after_enter:
-                # The `●` marker now prefixes the default wrapper row.
-                assert b"\xe2\x97\x8f" in output  # ● in UTF-8
-            menu_key("\x1b")  # Esc quits the main screen
-            assert b"Press any key" not in output
+                assert b"\xe2\x97\x8f" not in output
+            assert b"Press any key" in output
         finally:
             if child.poll() is None:
                 child.kill()
@@ -476,6 +477,110 @@ def test_main_screen_default_wrapper_marker_through_a_real_pty(tmp_path):
     # test exists only to exercise the real ANSI redraw path that the
     # injected-`read_key` suite cannot see.
     run_session(expect_marker_after_enter=True)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "posix", reason="PTY tests require POSIX")
+def test_set_default_confirmation_preview_is_visible_before_the_prompt(tmp_path):
+    """Manual PTY verification for the ``_run`` tee fix: ``set-default``'s
+    diff preview and ``[y/N]`` prompt must reach the real terminal BEFORE the
+    TUI blocks on the answer, not only afterwards via ``_notify``'s replay.
+    The injected-``read_key`` suite cannot see this — a full ``redirect_stdout``
+    around the handler buffers the preview invisibly while ``input()`` still
+    blocks for real, which is exactly the terminal-driver-class bug repo
+    convention requires a real PTY to catch."""
+    import errno
+    import pty
+    import select
+    import subprocess
+    import sys
+    import termios
+    import time
+
+    from code_helper.services.paths import Paths
+    from code_helper.services.spec import build_spec
+    from code_helper.services.state import set_default_wrapper
+    from code_helper.services.wrappers import install_wrapper
+
+    environment = os.environ.copy()
+    environment["HOME"] = str(tmp_path)
+    environment.pop("ZAI_API_KEY", None)
+    source_dir = str(Path(__file__).resolve().parents[1] / "src")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (source_dir, environment.get("PYTHONPATH")) if part
+    )
+
+    # A codex wrapper installed and marked default: applying it will patch a
+    # NOT-YET-EXISTING ~/.codex/config.toml, which counts as a real change
+    # and triggers `_confirm_set_default`'s preview + `[y/N]` prompt.
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama", model="qwen3.5:9b")
+    install_wrapper(paths, spec)
+    set_default_wrapper(paths, "codex", spec.alias)
+
+    master_fd, slave_fd = pty.openpty()
+    child = subprocess.Popen(
+        [sys.executable, "-m", "code_helper", "tui"],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=environment,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+    output = bytearray()
+    search_from = 0
+
+    def read_until(marker: str) -> None:
+        nonlocal search_from
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            found = output.find(marker.encode(), search_from)
+            if found >= 0:
+                search_from = found + len(marker)
+                return
+            ready, _, _ = select.select([master_fd], [], [], 0.1)
+            if ready:
+                try:
+                    output.extend(os.read(master_fd, 4096))
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
+        raise AssertionError(output.decode(errors="replace")[-3000:])
+
+    def menu_key(value: str) -> None:
+        deadline = time.monotonic() + 5
+        while termios.tcgetattr(master_fd)[3] & termios.ICANON:
+            if time.monotonic() >= deadline:
+                raise AssertionError("TUI did not enter raw mode")
+            time.sleep(0.01)
+        os.write(master_fd, value.encode())
+
+    try:
+        read_until("Apply codex default")
+        # Digit shortcuts are positional. The 3 built-in claude presets plus
+        # the one installed codex wrapper give 4 numbered wrapper rows, so
+        # "Apply codex default" (after Add, Profile) is digit 7.
+        menu_key("7")
+        # The preview/prompt is written outside the TUI's raw-mode redraw
+        # loop, so canonical-mode input() reads a real line — send "n\n".
+        read_until("Continue? [y/N]")
+        # By the time the prompt itself is visible, the preview text that
+        # precedes it must already be in the captured output too — proving
+        # it reached the terminal before the blocking read, not after.
+        assert b"About to write" in output
+        os.write(master_fd, b"n\n")
+        # A decline raises CodeHelperError; `_run` reports it and pauses on
+        # `_notify` until acknowledged.
+        read_until("Press any key to continue")
+        menu_key(" ")
+        read_until("Esc quit")
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=2)
+        os.close(master_fd)
+        os.close(slave_fd)
 
 
 # --- active token-profile pre-selection (issue #23) --------------------------
@@ -886,9 +991,11 @@ def test_main_screen_marker_on_default_wrapper(monkeypatch):
     with the `●` marker; every other wrapper is not."""
     from code_helper.cli.menu import Section
     from code_helper.services.state import default_wrapper, set_default_wrapper
+    from code_helper.services.wrappers import install_wrapper
 
     paths = Paths.default()
-    # glm is a preset (claude agent); mark it the default for claude.
+    # A default must point to a real installed wrapper, not just a preset name.
+    install_wrapper(paths, "glm", token="test-token")
     set_default_wrapper(paths, "claude", "glm")
     assert default_wrapper(paths, "claude") == "glm"
 
@@ -917,15 +1024,44 @@ def test_main_screen_enter_sets_default_wrapper(monkeypatch):
     """Enter on a wrapper row makes it the default for its agent; the marker
     moves on the next redraw."""
     from code_helper.services.state import default_wrapper
+    from code_helper.services.wrappers import install_wrapper
 
     paths = Paths.default()
     assert default_wrapper(paths, "claude") is None
+    install_wrapper(paths, "glm", token="test-token")
 
     # DOWN moves to glm (second selectable wrapper after deepseek), Enter sets
     # it as the default, then END + ENTER reaches Quit.
     _real_menu_keys(monkeypatch, ["DOWN", "ENTER", "END", "ENTER"])
     assert main(["tui"]) == 0
     assert default_wrapper(paths, "claude") == "glm"
+
+
+@pytest.mark.integration
+def test_main_screen_enter_on_an_unmanaged_foreign_file_does_not_set_a_ghost_default(
+    monkeypatch,
+):
+    """Enter's guard checked `is_installed` (existence only), but
+    `valid_default_wrapper` — the ONLY reader that matters, used by both the
+    `●` marker and `set-default` — requires `is_installed` AND `is_managed`.
+    A foreign (unmanaged) file sitting at a preset's alias path would let
+    Enter write a default that the very next read silently rejects: a
+    default that "sets" but never sticks, with no error shown either time."""
+    from code_helper.services.state import default_wrapper
+
+    paths = Paths.default()
+    # A foreign executable at the "deepseek" preset's path — no ownership
+    # marker, so `is_installed` is True but `is_managed` is False.
+    paths.bin_dir.mkdir(parents=True, exist_ok=True)
+    foreign = paths.script_for("deepseek")
+    foreign.write_text("#!/bin/sh\necho not ours\n", encoding="utf-8")
+    foreign.chmod(0o755)
+
+    # `deepseek` is the first selectable wrapper row on a fresh menu.
+    _real_menu_keys(monkeypatch, ["ENTER", "END", "ENTER"])
+    assert main(["tui"]) == 0
+
+    assert default_wrapper(paths, "claude") is None
 
 
 @pytest.mark.integration
@@ -977,7 +1113,7 @@ def test_main_screen_no_dead_end_for_non_secret_wrapper(monkeypatch, capsys):
     assert main(["tui"]) == 0
 
     output = capsys.readouterr().out
-    assert "has no editable token." not in output
+    assert "deepseek has no editable token." in output
 
 
 @pytest.mark.integration
@@ -1026,8 +1162,8 @@ def test_main_screen_has_apply_codex_default_row(monkeypatch):
 @pytest.mark.integration
 def test_apply_codex_default_dispatches_into_apply_set_default(monkeypatch):
     """Selecting the row calls ``apply_set_default`` with the codex default
-    wrapper's ``(agent, provider, model)`` and ``force=True`` (the menu item IS
-    the confirmation, so the CLI's ``[y/N]`` prompt is skipped — issue #30)."""
+    wrapper's ``(agent, provider, model)`` and preserves ``force=False`` so the
+    CLI confirmation preview is shown before Codex configuration changes."""
     import code_helper.services.codex_default as codex_default
     from code_helper.services.spec import build_spec
     from code_helper.services.state import set_default_wrapper
@@ -1061,7 +1197,73 @@ def test_apply_codex_default_dispatches_into_apply_set_default(monkeypatch):
     assert calls[0]["agent"] == "codex"
     assert calls[0]["provider"] == "ollama"
     assert calls[0]["model"] == "qwen3.5:9b"
-    assert calls[0]["force"] is True
+    assert calls[0]["force"] is False
+
+
+@pytest.mark.unit
+def test_run_shows_output_live_before_a_blocking_input_call(monkeypatch):
+    """``_run`` must not hide a handler's output behind a confirmation prompt.
+
+    ``_confirm_set_default`` prints a preview and then calls ``input()`` —
+    exactly the shape reproduced here. Redirecting stdout for the whole
+    handler (as ``_run`` used to) buffers the preview into a ``StringIO``:
+    the preview is invisible on the real terminal at the moment ``input()``
+    blocks, so the user answers blind and only sees the preview afterwards,
+    too late to inform the decision.
+    """
+    import argparse
+    import io
+
+    from code_helper.cli.tui import TuiSession
+
+    session = TuiSession(argparse.Namespace(debug=False))
+    monkeypatch.setattr("code_helper.cli.menu.press_any_key", lambda *_a, **_kw: None)
+
+    # A stand-in for the real terminal, so writes to it can be inspected
+    # precisely at the moment input() blocks.
+    real_terminal = io.StringIO()
+    monkeypatch.setattr("sys.stdout", real_terminal)
+
+    seen_before_input = {}
+
+    def fake_input(prompt=""):
+        # At the moment input() blocks, the preview line must already have
+        # reached the real terminal — not be trapped in a redirect buffer
+        # that is only replayed after the handler returns.
+        seen_before_input["preview_visible"] = (
+            "About to write /some/path" in real_terminal.getvalue()
+        )
+        return "y"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    def handler(_args):
+        print("About to write /some/path. Continue? [y/N]")
+        input()
+
+    session._run(handler)
+
+    assert seen_before_input.get("preview_visible") is True
+
+
+@pytest.mark.unit
+def test_run_reraises_under_debug():
+    """``_run`` must honor ``--debug`` like every other dispatch site
+    (``emit_error``'s contract): re-raise ``CodeHelperError`` instead of
+    swallowing it into a one-line buffered message, so ``--debug`` still
+    surfaces the full traceback from the TUI."""
+    import argparse
+
+    from code_helper.cli.tui import TuiSession
+    from code_helper.errors import CodeHelperError
+
+    session = TuiSession(argparse.Namespace(debug=True))
+
+    def handler(_args):
+        raise CodeHelperError("boom")
+
+    with pytest.raises(CodeHelperError, match="boom"):
+        session._run(handler)
 
 
 @pytest.mark.integration
@@ -1145,5 +1347,5 @@ def test_apply_codex_default_errors_when_no_codex_default_set(monkeypatch, capsy
     _menu_sequence(monkeypatch, ["set-default", "quit"])
 
     assert main(["tui"]) == 0
-    err = capsys.readouterr().err
-    assert "no default wrapper set for codex" in err.lower()
+    output = capsys.readouterr().out
+    assert "no default wrapper set for codex" in output.lower()
