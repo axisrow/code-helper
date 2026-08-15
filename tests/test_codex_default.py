@@ -17,6 +17,8 @@ from code_helper.services.codex_default import (
     _config_backup_slots,
     _rotate_backups,
     apply_set_default,
+    clear_default,
+    current_default,
     patch_config_toml,
     resolve_default_patch,
     restore_default,
@@ -883,3 +885,182 @@ def test_resolve_default_patch_uses_the_substituted_provider():
     litellm = with_base_url(get_provider("litellm"), "http://h:4000/v1")
     result = resolve_default_patch(CODEX, litellm, "gpt-4o", "/x/model.json")
     assert result.base_url == "http://h:4000/v1/"
+
+
+# ---------------------------------------------------------------------------
+# current_default — the read-only "what is applied" probe
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_current_default_reads_the_applied_provider(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text('model = "x"\nmodel_provider = "ollama"\n', encoding="utf-8")
+    assert current_default(paths) == "ollama"
+
+
+@pytest.mark.unit
+def test_current_default_is_none_when_nothing_is_applied(tmp_path):
+    """Missing file, empty file, and a file with no model_provider all mean
+    the same thing: no override is in effect."""
+    paths = Paths.from_home(tmp_path)
+    assert current_default(paths) is None
+
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("", encoding="utf-8")
+    assert current_default(paths) is None
+
+    config.write_text('approval_policy = "on-request"\n', encoding="utf-8")
+    assert current_default(paths) is None
+
+
+@pytest.mark.unit
+def test_current_default_never_raises_on_a_corrupt_file(tmp_path):
+    """Same posture as claude_settings.current_switch and state.load_state:
+    this is read on the optional UI path, where an unparseable file must
+    degrade to "nothing applied" rather than crash the screen that reads it.
+    """
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("this is not [[[ valid toml", encoding="utf-8")
+    assert current_default(paths) is None
+
+
+@pytest.mark.unit
+def test_current_default_rejects_a_provider_not_in_the_registry(tmp_path):
+    """A hand-written or since-removed provider name is not echoed back, so
+    every non-None return is guaranteed to be a real PROVIDERS name."""
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text('model_provider = "no-such-provider"\n', encoding="utf-8")
+    assert current_default(paths) is None
+
+
+# ---------------------------------------------------------------------------
+# clear_default — codex's "native": remove the override, keep everything else
+# ---------------------------------------------------------------------------
+
+
+_FOREIGN_CONFIG = """\
+# a comment the user wrote
+approval_policy = "on-request"
+model = "glm-5.2:cloud"
+model_provider = "ollama"
+model_catalog_json = "/home/user/.codex/model.json"
+
+[model_providers.ollama]
+name = "local Ollama daemon"
+base_url = "http://127.0.0.1:11434/v1/"
+wire_api = "responses"
+
+[model_providers.mine]
+name = "hand written"
+base_url = "http://example"
+
+[projects.'/home/user/work']
+trust_level = "trusted"
+"""
+
+
+@pytest.mark.unit
+def test_clear_default_removes_only_the_managed_region(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(_FOREIGN_CONFIG, encoding="utf-8")
+
+    assert clear_default(paths, force=True) is True
+
+    result = config.read_text(encoding="utf-8")
+    # The managed region is gone... (matched as whole assignments, not bare
+    # substrings — `model_provider` is also a prefix of the `model_providers`
+    # table name the user's own entry below must keep.)
+    assert "model_provider =" not in result
+    assert "model_catalog_json =" not in result
+    assert "model =" not in result
+    assert "[model_providers.ollama]" not in result
+    # ...and everything the user owns survives untouched.
+    assert "# a comment the user wrote" in result
+    assert 'approval_policy = "on-request"' in result
+    assert "[model_providers.mine]" in result
+    assert 'name = "hand written"' in result
+    assert "[projects.'/home/user/work']" in result
+    assert current_default(paths) is None
+
+
+@pytest.mark.unit
+def test_clear_default_is_a_no_op_when_nothing_is_applied(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    assert clear_default(paths, force=True) is False
+
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text('approval_policy = "on-request"\n', encoding="utf-8")
+    assert clear_default(paths, force=True) is False
+    assert config.read_text(encoding="utf-8") == 'approval_policy = "on-request"\n'
+
+
+@pytest.mark.unit
+def test_clear_default_writes_a_backup(tmp_path):
+    """A clear is exactly as recoverable as a set — same rotate_backups path."""
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(_FOREIGN_CONFIG, encoding="utf-8")
+
+    clear_default(paths, force=True)
+
+    backup = paths.codex_main_config_backup(1)
+    assert backup.exists()
+    assert backup.read_text(encoding="utf-8") == _FOREIGN_CONFIG
+
+
+@pytest.mark.unit
+def test_clear_default_refuses_without_confirmation(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(_FOREIGN_CONFIG, encoding="utf-8")
+
+    with pytest.raises(CodeHelperError, match="refusing without confirmation"):
+        clear_default(paths)
+    assert config.read_text(encoding="utf-8") == _FOREIGN_CONFIG
+
+
+@pytest.mark.unit
+def test_clear_default_dry_run_never_writes(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(_FOREIGN_CONFIG, encoding="utf-8")
+
+    assert clear_default(paths, dry_run=True) is True
+    assert config.read_text(encoding="utf-8") == _FOREIGN_CONFIG
+    assert not paths.codex_main_config_backup(1).exists()
+
+
+@pytest.mark.unit
+def test_clear_default_is_the_inverse_of_apply_set_default(tmp_path):
+    """Round-trip: applying then clearing returns the file to content that
+    carries no managed region, with the user's own keys still in place."""
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text('approval_policy = "on-request"\n', encoding="utf-8")
+
+    apply_set_default(
+        paths, agent=CODEX, provider=OLLAMA, model="glm-5.2:cloud", force=True
+    )
+    assert current_default(paths) == "ollama"
+
+    clear_default(paths, force=True)
+    assert current_default(paths) is None
+    result = config.read_text(encoding="utf-8")
+    assert 'approval_policy = "on-request"' in result
+    assert "[model_providers.ollama]" not in result
+    assert "model_provider =" not in result

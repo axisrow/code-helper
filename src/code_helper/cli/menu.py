@@ -204,6 +204,16 @@ def _translate_escape(read_more: Callable[[float], str | None]) -> str:
         params += b
     if final in _ARROW_FINAL:
         return _ARROW_FINAL[final]
+    if final == "Z" and not params:
+        # Shift+Tab (back-tab) — CSI Z, the ONE escape a terminal sends that
+        # is neither an arrow nor a `~`-form key. Deliberately checked here
+        # rather than added to `_ARROW_FINAL`: that table is shared with the
+        # SS3 branch above (`ESC O Z` is not back-tab and must stay "OTHER")
+        # and with `_read_line_raw`'s `_MOVES`, which has no entry for a
+        # back-tab and would silently ignore a movement name it cannot
+        # resolve. The `not params` guard keeps a parameterized `ESC [ 1 Z`
+        # from being read as the bare back-tab it is not.
+        return "BACK_TAB"
     if final == "~":
         return _TILDE_FINAL.get(params, "OTHER")
     return "OTHER"
@@ -225,7 +235,15 @@ _CHAR_KEYS = {
     "g": "HOME",
     "G": "END",
 }
-_PASSTHROUGH = "aedtcs?"
+#: Characters `select_from_menu` hands to `on_key` verbatim. A key bound in a
+#: caller's `on_key` but MISSING here is silently dead — `_translate_char`
+#: reports it as "OTHER" and the binding never fires. That is not
+#: hypothetical: `w` (the old switch screen) was bound in the TUI, documented
+#: in its help text, and listed in `keymap._LAYOUTS`, yet never worked,
+#: because it was never added to this string. `tests/test_tui.py` now pins
+#: every main-screen binding against `_translate_char` so the two cannot
+#: drift apart again.
+_PASSTHROUGH = "aedtps?"
 
 
 def _translate_char(first: str) -> str:

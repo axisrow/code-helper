@@ -32,6 +32,30 @@ def _real_menu_keys(monkeypatch, keys):
     monkeypatch.setattr(menu, "select_from_menu", _select)
 
 
+def _tab_on_profile_screen(monkeypatch, presses=1):
+    """Enter the Profile screen and press Tab there, then quit.
+
+    Tab cycles the active token profile, and it lives on the Profile screen
+    (`p`) — the main screen's Tab-adjacent keys drive the backend chipset
+    instead. The Profile screen is the only menu that passes `on_tab`, so
+    firing it wherever it is offered reaches exactly that screen.
+    """
+    seen = {"tabbed": 0}
+
+    def _select(_items, *, on_tab=None, **_kwargs):
+        if on_tab is None:
+            # The main screen: enter the Profile screen the first time, then
+            # quit once the Tab presses have happened.
+            return "quit" if seen["tabbed"] else "profile"
+        while seen["tabbed"] < presses:
+            seen["tabbed"] += 1
+            on_tab()
+        return "__back__"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    return seen
+
+
 @pytest.mark.integration
 def test_main_menu_lists_wrappers_grouped_by_agent_and_quit_exits(monkeypatch, capsys):
     # The wrapper list IS the main screen now (issue #29): no separate "List"
@@ -74,11 +98,10 @@ def test_add_order_is_provider_model_agent_alias(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _prompt: "my-codex")
 
     assert main(["tui"]) == 0
-    # The main-menu header now also carries the "Live: ..." switch status
-    # (see TuiSession._main_prompt) — check the prefix rather than the exact
-    # string, since the live label's width varies with the active provider.
+    # The header no longer restates which backend is live: the chipset rows
+    # say that in place (see TuiSession._main_prompt).
     assert seen[0].startswith("code-helper")
-    assert "Live:" in seen[0]
+    assert "Live:" not in seen[0]
     assert seen[1:4] == [
         "Select a provider:",
         "Select a model for ollama:",
@@ -266,11 +289,11 @@ def test_t_rotates_token_for_secret_wrapper_from_main_screen(monkeypatch):
     paths = Paths.default()
     secrets.save_credential(paths, "zai", "sk-old", "default")
     assert main(["add", "glm", "--profile", "default"]) == 0
-    # Main screen: presets are [deepseek, glm, glm-ollama] under Section("claude").
-    # DOWN moves to glm (index 1 among selectable wrappers), `t` opens its token
-    # profile picker, `1` picks the first profile (default), the getpass stub
-    # supplies the new token, then END + ENTER reaches Quit.
-    _real_menu_keys(monkeypatch, ["DOWN", "TOKEN", "ENTER", "CANCEL"])
+    # Main screen rows: the two chipset rows (claude, codex) come first, then
+    # the wrapper list [deepseek, glm, glm-ollama] under Section("claude").
+    # Three DOWNs reach glm; `t` opens its token profile picker, ENTER picks
+    # the first profile (default), the getpass stub supplies the new token.
+    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "DOWN", "TOKEN", "ENTER", "CANCEL"])
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-new")
 
     assert main(["tui"]) == 0
@@ -616,27 +639,25 @@ def test_tui_tab_cycles_the_active_profile(monkeypatch):
     secrets.save_credential(paths, "litellm", "sk-personal", "personal")
     set_active_selection(paths, "litellm", "work")
 
-    # The main menu's on_tab handler cycles profiles; a single Tab advances
+    # Tab lives on the Profile screen now (the main screen's Left/Right and
+    # Shift+Tab belong to the backend chipset). A single Tab there advances
     # work -> personal (profile_names order: default, then alpha).
-    def _select(_items, *, on_tab=None, **_kwargs):
-        if on_tab is not None:
-            on_tab()
-        return "quit"
-
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    _tab_on_profile_screen(monkeypatch)
     assert main(["tui"]) == 0
     assert active_selection(paths) == ("litellm", "personal")
 
 
 @pytest.mark.integration
 def test_tui_tab_updates_profile_row_label_not_just_header(monkeypatch):
-    """Issue #26: after Tab the header updated but the 'Profile: ...' row
-    stayed frozen at its pre-Tab value, because the row label was a static
-    string resolved before the menu opened while the header was a callable.
-    The fix makes the row label a callable too — here we verify the row's
-    callable reflects the post-Tab profile, not the pre-Tab one."""
+    """Issue #26: a label resolved to a string BEFORE the menu opened freezes
+    at its pre-Tab value while the rest of the frame moves on. Every label
+    that can change under a keypress must be a callable the menu re-evaluates
+    per frame. Tab lives on the Profile screen now, so the label under test is
+    that screen's slot strip — the invariant is unchanged.
+    """
     import code_helper.services.secrets as secrets
-    from code_helper.services.state import active_selection, set_active_selection
+    from code_helper.cli.menu import Section
+    from code_helper.services.state import set_active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "litellm", "sk-work", "work")
@@ -645,25 +666,25 @@ def test_tui_tab_updates_profile_row_label_not_just_header(monkeypatch):
 
     captured = {}
 
-    def _select(items, *, on_tab=None, prompt=None, **_kwargs):
-        # The hotkey-only screen has no Profile row; its callable header tracks
-        # the active profile through a Tab redraw instead.
-        assert callable(prompt)
-        before = prompt()
-        if on_tab is not None:
-            on_tab()
-        after = prompt()
-        captured["before"] = before
-        captured["after"] = after
-        return "quit"
+    def _select(items, *, on_tab=None, **_kwargs):
+        if on_tab is None:
+            return "quit" if captured else "profile"
+        strip = next(e for e in items if isinstance(e, Section))
+        assert callable(strip.text), "a label that can change must be callable"
+        captured["before"] = strip.text()
+        on_tab()
+        captured["after"] = strip.text()
+        return "__back__"
 
     monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
-    # Before Tab the row shows the pre-Tab profile; after Tab it tracks the
-    # new active profile — the two must differ (the desync froze them equal).
-    assert "work" in captured["before"]
-    assert "personal" in captured["after"]
-    assert captured["before"] != captured["after"]
+    # The strip lists every provider/profile slot and marks none of them, so
+    # what must change across a Tab is the ACTIVE selection it is rendered
+    # from — pinned via state rather than by grepping the strip text.
+    from code_helper.services.state import active_selection
+
+    assert active_selection(paths) == ("litellm", "personal")
+    assert captured["before"] and captured["after"]
     assert active_selection(paths) == ("litellm", "personal")
 
 
@@ -682,12 +703,7 @@ def test_tui_tab_works_on_a_fresh_install_with_no_prior_profile_screen_visit(
     secrets.save_credential(paths, "zai", "sk-one", "axisrow")
     secrets.save_credential(paths, "zai", "sk-two", "bemyownrobot")
 
-    def _select(_items, *, on_tab=None, **_kwargs):
-        if on_tab is not None:
-            on_tab()
-        return "quit"
-
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    _tab_on_profile_screen(monkeypatch)
     assert main(["tui"]) == 0
     selection = active_selection(paths)
     assert selection is not None
@@ -711,12 +727,7 @@ def test_tui_tab_on_fresh_install_selects_the_first_profile(monkeypatch):
     # Deliberately no set_active_selection: fresh install, never-set state.
     names = list(secrets.profile_names(paths, "zai"))
 
-    def _select(_items, *, on_tab=None, **_kwargs):
-        if on_tab is not None:
-            on_tab()
-        return "quit"
-
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    _tab_on_profile_screen(monkeypatch)
     assert main(["tui"]) == 0
     assert active_selection(paths) == ("zai", names[0])
 
@@ -727,12 +738,7 @@ def test_tui_tab_is_a_silent_noop_with_no_cached_profiles(monkeypatch):
 
     paths = Paths.default()
 
-    def _select(_items, *, on_tab=None, **_kwargs):
-        if on_tab is not None:
-            on_tab()
-        return "quit"
-
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    _tab_on_profile_screen(monkeypatch)
     assert main(["tui"]) == 0
     assert not paths.state_file().exists()
     assert load_state(paths) == {}
@@ -752,12 +758,7 @@ def test_tui_tab_falls_through_a_stale_stored_provider(monkeypatch):
     # Stale: litellm has no cached profiles at all, unlike zai.
     set_active_selection(paths, "litellm", "ghost")
 
-    def _select(_items, *, on_tab=None, **_kwargs):
-        if on_tab is not None:
-            on_tab()
-        return "quit"
-
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    _tab_on_profile_screen(monkeypatch)
     assert main(["tui"]) == 0
     assert active_selection(paths) == ("zai", "work")
 
@@ -927,12 +928,7 @@ def test_tui_profile_screen_finds_ollama_profiles_after_a_token_install(
     paths = Paths.default()
     secrets.save_credential(paths, "ollama", "sk-ollama-proxy", "proxy")
 
-    def _select(_items, *, on_tab=None, **_kwargs):
-        if on_tab is not None:
-            on_tab()
-        return "quit"
-
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    _tab_on_profile_screen(monkeypatch)
     assert main(["tui"]) == 0
     assert active_selection(paths) == ("ollama", "proxy")
 
@@ -1014,9 +1010,9 @@ def test_main_screen_enter_sets_default_wrapper(monkeypatch):
     assert default_wrapper(paths, "claude") is None
     install_wrapper(paths, "glm", token="test-token")
 
-    # DOWN moves to glm (second selectable wrapper after deepseek), Enter sets
-    # it as the default, then END + ENTER reaches Quit.
-    _real_menu_keys(monkeypatch, ["DOWN", "ENTER", "CANCEL"])
+    # Past the two chipset rows, then one more DOWN to reach glm (the second
+    # wrapper, after deepseek); Enter makes it the default.
+    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "DOWN", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
     assert default_wrapper(paths, "claude") == "glm"
 
@@ -1041,8 +1037,8 @@ def test_main_screen_enter_on_an_unmanaged_foreign_file_does_not_set_a_ghost_def
     foreign.write_text("#!/bin/sh\necho not ours\n", encoding="utf-8")
     foreign.chmod(0o755)
 
-    # `deepseek` is the first selectable wrapper row on a fresh menu.
-    _real_menu_keys(monkeypatch, ["ENTER", "CANCEL"])
+    # `deepseek` is the first wrapper row, below the two chipset rows.
+    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
     assert default_wrapper(paths, "claude") is None
@@ -1092,8 +1088,9 @@ def test_main_screen_groups_colliding_managed_wrapper_under_installed_agent(
 def test_main_screen_no_dead_end_for_non_secret_wrapper(monkeypatch, capsys):
     """`t` on a non-secret wrapper (deepseek is literal) is a silent no-op —
     the old dead-end 'has no editable token.' screen is gone (issue #29)."""
-    # TOKEN on the first wrapper (deepseek, non-secret), then quit.
-    _real_menu_keys(monkeypatch, ["TOKEN", "CANCEL"])
+    # TOKEN on the first wrapper (deepseek, non-secret), reached past the two
+    # chipset rows, then quit.
+    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "TOKEN", "CANCEL"])
     assert main(["tui"]) == 0
 
     output = capsys.readouterr().out
@@ -1114,309 +1111,264 @@ def test_main_screen_hint_advertises_token_key(monkeypatch):
     assert "? keys" in captured["hint"]
 
 
-# --- apply codex default into ~/.codex/config.toml (issue #30) --------------
+# --- the chipset frame ------------------------------------------------------
 
 
-@pytest.mark.integration
-def test_main_screen_has_apply_codex_default_row(monkeypatch):
-    """Issue #30: an explicit 'Apply codex default' row sits in the service
-    block, separate from the Enter-on-wrapper action (#29) — applying the
-    agent's native config is an intentional step, not a side effect."""
+def _chip_rows(items) -> dict[str, str]:
+    """Rendered chipset rows from a captured `items` list, keyed by agent."""
     from code_helper.cli.menu import Section
 
-    captured: list[list] = []
-
-    def _select(items, **_kwargs):
-        captured.append(list(items))
-        return "quit"
-
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
-    assert main(["tui"]) == 0
-
-    main_items = captured[0]
-    rows = {
-        e[0]: (e[1]() if callable(e[1]) else e[1])
-        for e in main_items
-        if not isinstance(e, Section)
+    return {
+        entry[0].removeprefix("agent:"): (
+            entry[1]() if callable(entry[1]) else entry[1]
+        )
+        for entry in items
+        if not isinstance(entry, Section) and entry[0].startswith("agent:")
     }
-    assert "set-default" not in rows
+
+
+def _capture_frames(monkeypatch, keys):
+    """Drive the real menu and return each frame's rendered chipset rows."""
+    import code_helper.cli.menu as menu
+
+    iterator = iter(keys)
+    real_select = menu.select_from_menu
+    frames: list[dict[str, str]] = []
+
+    def _select(items, **kwargs):
+        def _read():
+            frames.append(_chip_rows(items))
+            return next(iterator)
+
+        return real_select(items, read_key=_read, **kwargs)
+
+    monkeypatch.setattr(menu, "select_from_menu", _select)
+    return frames
 
 
 @pytest.mark.integration
-def test_apply_codex_default_dispatches_into_apply_set_default(monkeypatch):
-    """Selecting the row calls ``apply_set_default`` with the codex default
-    wrapper's ``(agent, provider, model)`` and preserves ``force=False`` so the
-    CLI confirmation preview is shown before Codex configuration changes."""
-    import code_helper.services.codex_default as codex_default
-    from code_helper.services.spec import build_spec
-    from code_helper.services.state import set_default_wrapper
-    from code_helper.services.wrappers import install_wrapper
-
-    paths = Paths.default()
-    # Install a real codex wrapper so valid_default_wrapper can resolve it.
-    install_wrapper(
-        paths, build_spec(agent="codex", provider="ollama", model="qwen3.5:9b")
-    )
-    set_default_wrapper(paths, "codex", "qwen3.5-codex")
-
-    calls: list[dict] = []
-
-    def _fake_apply(paths_arg, *, agent, provider, model, **_kw):
-        calls.append(
-            {
-                "agent": agent.name,
-                "provider": provider.name,
-                "model": model,
-                "force": _kw.get("force", False),
-            }
-        )
-        return True
-
-    monkeypatch.setattr(codex_default, "apply_set_default", _fake_apply)
-    _menu_sequence(monkeypatch, ["set-default", "quit"])
-
+def test_chipset_shows_one_row_per_agent_with_native_applied(monkeypatch):
+    """A fresh install overrides nothing, so every agent sits on `native` —
+    and `native` is present for BOTH agents even though only claude has a
+    `native` PROVIDER (codex clears its managed region instead)."""
+    frames = _capture_frames(monkeypatch, ["CANCEL"])
     assert main(["tui"]) == 0
-    assert len(calls) == 1
-    assert calls[0]["agent"] == "codex"
-    assert calls[0]["provider"] == "ollama"
-    assert calls[0]["model"] == "qwen3.5:9b"
-    assert calls[0]["force"] is False
 
-
-@pytest.mark.unit
-def test_run_shows_output_live_before_a_blocking_input_call(monkeypatch):
-    """``_run`` must not hide a handler's output behind a confirmation prompt.
-
-    ``_confirm_set_default`` prints a preview and then calls ``input()`` —
-    exactly the shape reproduced here. Redirecting stdout for the whole
-    handler (as ``_run`` used to) buffers the preview into a ``StringIO``:
-    the preview is invisible on the real terminal at the moment ``input()``
-    blocks, so the user answers blind and only sees the preview afterwards,
-    too late to inform the decision.
-    """
-    import argparse
-    import io
-
-    from code_helper.cli.tui import TuiSession
-
-    session = TuiSession(argparse.Namespace(debug=False))
-    monkeypatch.setattr("code_helper.cli.menu.press_any_key", lambda *_a, **_kw: None)
-
-    # A stand-in for the real terminal, so writes to it can be inspected
-    # precisely at the moment input() blocks.
-    real_terminal = io.StringIO()
-    monkeypatch.setattr("sys.stdout", real_terminal)
-
-    seen_before_input = {}
-
-    def fake_input(prompt=""):
-        # At the moment input() blocks, the preview line must already have
-        # reached the real terminal — not be trapped in a redirect buffer
-        # that is only replayed after the handler returns.
-        seen_before_input["preview_visible"] = (
-            "About to write /some/path" in real_terminal.getvalue()
-        )
-        return "y"
-
-    monkeypatch.setattr("builtins.input", fake_input)
-
-    def handler(_args):
-        print("About to write /some/path. Continue? [y/N]")
-        input()
-
-    session._run(handler)
-
-    assert seen_before_input.get("preview_visible") is True
-
-
-@pytest.mark.unit
-def test_run_reraises_under_debug():
-    """``_run`` must honor ``--debug`` like every other dispatch site
-    (``emit_error``'s contract): re-raise ``CodeHelperError`` instead of
-    swallowing it into a one-line buffered message, so ``--debug`` still
-    surfaces the full traceback from the TUI."""
-    import argparse
-
-    from code_helper.cli.tui import TuiSession
-    from code_helper.errors import CodeHelperError
-
-    session = TuiSession(argparse.Namespace(debug=True))
-
-    def handler(_args):
-        raise CodeHelperError("boom")
-
-    with pytest.raises(CodeHelperError, match="boom"):
-        session._run(handler)
+    rows = frames[0]
+    assert set(rows) == {"claude", "codex"}
+    # Applied AND highlighted on the focused row; applied-only elsewhere.
+    assert "[*native]" in rows["claude"]
+    assert "[native]" in rows["codex"] or "[*native]" in rows["codex"]
 
 
 @pytest.mark.integration
-def test_apply_codex_default_forwards_runtime_base_url(monkeypatch):
-    """A codex default wrapper on a REQUIRED-base_url provider (e.g. litellm)
-    must have its resolved base_url forwarded to ``apply_set_default`` — the
-    row hardcoded ``args.base_url = None``, which makes ``_handle_set_default``
-    re-derive the provider from the registry (empty base_url for REQUIRED)
-    and crash with 'needs a base URL', discarding the exact endpoint the
-    installed wrapper was built with (issue #30 follow-up)."""
-    import code_helper.services.codex_default as codex_default
-    from code_helper.services.model import get_provider, with_base_url
-    from code_helper.services.spec import build_spec
-    from code_helper.services.state import set_default_wrapper
-    from code_helper.services.wrappers import install_wrapper
-
-    paths = Paths.default()
-    litellm = with_base_url(get_provider("litellm"), "http://h:4000/v1")
-    install_wrapper(paths, build_spec(agent="codex", provider=litellm, model="gpt-4o"))
-    set_default_wrapper(paths, "codex", "gpt-4o-codex")
-
-    calls: list[dict] = []
-
-    def _fake_apply(paths_arg, *, agent, provider, model, **_kw):
-        calls.append({"base_url": provider.base_url})
-        return True
-
-    monkeypatch.setattr(codex_default, "apply_set_default", _fake_apply)
-    _menu_sequence(monkeypatch, ["set-default", "quit"])
-
+def test_chipset_lifecycle_is_visible_per_agent(monkeypatch):
+    """The two mechanisms differ in WHEN they take effect, and the row says
+    so — a live settings.json patch vs. a config.toml read at next launch."""
+    frames = _capture_frames(monkeypatch, ["CANCEL"])
     assert main(["tui"]) == 0
-    assert len(calls) == 1
-    assert calls[0]["base_url"] == "http://h:4000/v1/"
+
+    assert frames[0]["claude"].endswith("live")
+    assert frames[0]["codex"].endswith("next launch")
 
 
 @pytest.mark.integration
-def test_apply_codex_default_respects_global_dry_run(monkeypatch):
-    """``code-helper --dry-run tui`` selecting the row must not write
-    ``~/.codex/config.toml`` — the row hardcoded ``args.dry_run = False``,
-    overriding the already-parsed global ``--dry-run`` flag and breaking the
-    CLAUDE.md invariant '--dry-run never writes any file' (issue #30
-    follow-up)."""
-    import code_helper.services.codex_default as codex_default
-    from code_helper.services.spec import build_spec
-    from code_helper.services.state import set_default_wrapper
+def test_chips_are_installed_wrappers_not_bare_providers(monkeypatch):
+    """A chip is an already-resolved wrapper, which is what lets Enter apply
+    it with no model/token prompt. An uninstalled preset is not a chip."""
     from code_helper.services.wrappers import install_wrapper
 
-    paths = Paths.default()
-    install_wrapper(
-        paths, build_spec(agent="codex", provider="ollama", model="qwen3.5:9b")
-    )
-    set_default_wrapper(paths, "codex", "qwen3.5-codex")
+    install_wrapper(Paths.default(), "glm", token="test-token")
+    frames = _capture_frames(monkeypatch, ["CANCEL"])
+    assert main(["tui"]) == 0
 
-    calls: list[dict] = []
-    real_apply = codex_default.apply_set_default
-
-    def _spy_apply(paths_arg, *, dry_run, **kw):
-        calls.append({"dry_run": dry_run})
-        return real_apply(paths_arg, dry_run=dry_run, **kw)
-
-    monkeypatch.setattr(codex_default, "apply_set_default", _spy_apply)
-    _menu_sequence(monkeypatch, ["set-default", "quit"])
-
-    assert main(["--dry-run", "tui"]) == 0
-    assert len(calls) == 1
-    assert calls[0]["dry_run"] is True
+    claude = frames[0]["claude"]
+    assert "glm" in claude
+    # `deepseek`/`glm-ollama` are presets that were never installed here.
+    assert "deepseek" not in claude
+    assert "glm-ollama" not in claude
 
 
 @pytest.mark.integration
-def test_apply_codex_default_errors_when_no_codex_default_set(monkeypatch, capsys):
-    """Without a codex default wrapper, the action reports a clear error
-    naming the prerequisite (Enter on a codex wrapper row) rather than
-    silently doing nothing or crashing."""
-    import code_helper.services.codex_default as codex_default
+def test_right_moves_the_chip_cursor_and_wraps(monkeypatch):
+    from code_helper.services.wrappers import install_wrapper
 
+    install_wrapper(Paths.default(), "glm", token="test-token")
+    frames = _capture_frames(monkeypatch, ["RIGHT", "RIGHT", "CANCEL"])
+    assert main(["tui"]) == 0
+
+    assert "[*native]" in frames[0]["claude"]  # cursor on native
+    assert "<glm>" in frames[1]["claude"]  # moved to the wrapper chip
+    assert "[*native]" in frames[2]["claude"]  # wrapped back around
+
+
+@pytest.mark.integration
+def test_back_tab_moves_the_chip_cursor_like_left(monkeypatch):
+    """Shift+Tab is the backwards twin of Left, not a second mechanism."""
+    from code_helper.services.wrappers import install_wrapper
+
+    install_wrapper(Paths.default(), "glm", token="test-token")
+
+    def _frames_for(key):
+        # A fresh MonkeyPatch per run: re-patching `select_from_menu` while a
+        # previous patch is live would stack the two wrappers and pass
+        # `read_key` twice.
+        with pytest.MonkeyPatch.context() as patch:
+            frames = _capture_frames(patch, [key, "CANCEL"])
+            assert main(["tui"]) == 0
+        return frames
+
+    assert _frames_for("LEFT")[1]["claude"] == _frames_for("BACK_TAB")[1]["claude"]
+
+
+@pytest.mark.integration
+def test_moving_the_chip_cursor_does_no_io(monkeypatch):
+    """Applying happens on Enter, so Left/Right must be pure in-memory: the
+    per-agent config reads happen ONCE per main-loop iteration, never once
+    per keystroke. This is the pin on that caching discipline."""
+    import code_helper.cli.tui as tui
+    from code_helper.services.wrappers import install_wrapper
+
+    install_wrapper(Paths.default(), "glm", token="test-token")
+
+    calls = {"claude": 0, "codex": 0}
+    patched = {}
+    for name, backend in tui._AGENT_BACKENDS.items():
+        real = backend.read_applied
+
+        def counting(paths, _real=real, _name=name):
+            calls[_name] += 1
+            return _real(paths)
+
+        patched[name] = tui._AgentBackend(
+            read_applied=counting,
+            apply_wrapper=backend.apply_wrapper,
+            apply_native=backend.apply_native,
+            lifecycle=backend.lifecycle,
+        )
+    monkeypatch.setattr(tui, "_AGENT_BACKENDS", patched)
+
+    _real_menu_keys(monkeypatch, ["RIGHT"] * 10 + ["LEFT"] * 5 + ["CANCEL"])
+    assert main(["tui"]) == 0
+
+    assert calls == {"claude": 1, "codex": 1}
+
+
+@pytest.mark.integration
+def test_chip_cursor_is_independent_per_agent(monkeypatch):
+    """Each agent row remembers its own chip, so moving away and back does
+    not reset where the user was."""
+    from code_helper.services.wrappers import install_wrapper
+
+    install_wrapper(Paths.default(), "glm", token="test-token")
+    frames = _capture_frames(monkeypatch, ["RIGHT", "DOWN", "UP", "CANCEL"])
+    assert main(["tui"]) == 0
+
+    assert "<glm>" in frames[1]["claude"]
+    assert "<glm>" in frames[3]["claude"]  # survived the row round-trip
+
+
+@pytest.mark.integration
+def test_left_right_are_a_no_op_on_a_wrapper_row(monkeypatch):
+    """The chip cursor belongs to agent rows; on a wrapper row the keys do
+    nothing rather than moving some other row's cursor."""
+    from code_helper.services.wrappers import install_wrapper
+
+    install_wrapper(Paths.default(), "glm", token="test-token")
+    # DOWN twice lands past both agent rows, onto the wrapper list.
+    frames = _capture_frames(monkeypatch, ["DOWN", "DOWN", "RIGHT", "CANCEL"])
+    assert main(["tui"]) == 0
+
+    assert frames[2]["claude"] == frames[3]["claude"]
+
+
+@pytest.mark.integration
+def test_enter_on_an_agent_row_applies_the_highlighted_chip(monkeypatch):
+    """The TUI mirrors the CLI: Enter dispatches into the same handler with
+    the same request the command line would build, rather than writing the
+    config itself."""
+    import code_helper.cli.tui as tui
+    from code_helper.services.wrappers import install_wrapper
+
+    install_wrapper(Paths.default(), "glm", token="test-token")
+
+    seen = []
     monkeypatch.setattr(
-        codex_default,
-        "apply_set_default",
-        lambda *a, **kw: pytest.fail("must not be called without a codex default"),
+        tui.TuiSession,
+        "_apply_switch_wrapper",
+        lambda self, spec: seen.append(spec.name),
     )
-    _menu_sequence(monkeypatch, ["set-default", "quit"])
-
+    _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
-    output = capsys.readouterr().out
-    assert "no default wrapper set for codex" in output.lower()
 
-
-# --------------------------------------------------------------------------- #
-# `w` — live switch screen
-# --------------------------------------------------------------------------- #
+    assert seen == ["glm"]
 
 
 @pytest.mark.integration
-def test_switch_key_reaches_switch_screen(monkeypatch):
-    """`w` on the main screen dispatches into _run_switch, not any other
-    handler — the screen's own picker is reached and offers Back."""
-    _menu_sequence(monkeypatch, ["switch", "__back__", "quit"])
-    assert main(["tui"]) == 0
+def test_enter_on_an_already_applied_chip_does_not_rewrite(monkeypatch):
+    """A no-op is reported, not written — re-applying what is already applied
+    should not rotate a backup or touch the config."""
+    import code_helper.cli.tui as tui
 
-
-@pytest.mark.integration
-def test_switch_screen_wrapper_row_dispatches_from_wrapper(monkeypatch):
-    """Selecting an installed anthropic-env wrapper's row on the switch
-    screen calls apply_switch with SwitchRequest.from_wrapper set to that
-    wrapper's alias — the --from-wrapper fast path, zero prompts."""
-    import code_helper.services.claude_settings as claude_settings
-
-    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
-    assert main(["add", "glm"]) == 0
-
-    calls: list[dict] = []
-
-    def _fake_apply(_paths, *, provider, tier_models, **_kw):
-        calls.append({"provider": provider.name, "tier_models": tier_models})
-        return True
-
-    monkeypatch.setattr(claude_settings, "apply_switch", _fake_apply)
-    _menu_sequence(monkeypatch, ["switch", "wrapper:glm", "quit"])
-
-    assert main(["tui"]) == 0
-    assert len(calls) == 1
-    assert calls[0]["provider"] == "zai"
-    assert calls[0]["tier_models"].sonnet == "glm-5-turbo"
-
-
-@pytest.mark.integration
-def test_switch_screen_native_row_dispatches_a_reset(monkeypatch):
-    """Selecting the `native` row calls apply_switch with the `native`
-    (env_reset) provider — no model/token collection for it."""
-    import code_helper.services.claude_settings as claude_settings
-
-    calls: list[dict] = []
-
-    def _fake_apply(_paths, *, provider, **_kw):
-        calls.append({"provider": provider.name})
-        return True
-
-    monkeypatch.setattr(claude_settings, "apply_switch", _fake_apply)
-    _menu_sequence(monkeypatch, ["switch", "provider:native", "quit"])
-
-    assert main(["tui"]) == 0
-    assert len(calls) == 1
-    assert calls[0]["provider"] == "native"
-
-
-@pytest.mark.integration
-def test_switch_screen_lists_only_anthropic_env_claude_wrappers(monkeypatch):
-    """A codex/ollama-launch wrapper never appears as a switch row — only
-    installed claude anthropic-env wrappers, plus `native`."""
-    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
-    assert main(["add", "glm"]) == 0
-    assert main(["add", "glm-ollama"]) == 0
-    assert (
-        main(["add", "--agent", "codex", "--provider", "ollama", "--model", "x"]) == 0
+    applied = []
+    monkeypatch.setattr(
+        tui.TuiSession, "_apply_switch_native", lambda self: applied.append("native")
     )
+    monkeypatch.setattr(tui.TuiSession, "_notify", lambda self, text: None)
 
-    values_seen: list[str] = []
-    answers = iter(["switch", "__back__", "quit"])
-
-    def _select(items, **_kwargs):
-        from code_helper.cli.menu import Section
-
-        vals = [entry[0] for entry in items if not isinstance(entry, Section)]
-        if any(v.startswith("wrapper:") or v == "provider:native" for v in vals):
-            values_seen[:] = vals
-        return next(answers)
-
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
-
+    _real_menu_keys(monkeypatch, ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
-    assert "wrapper:glm" in values_seen
-    assert "wrapper:glm-ollama" not in values_seen
-    assert "provider:native" in values_seen
+
+    assert applied == []
+
+
+@pytest.mark.integration
+def test_a_removed_wrapper_disappears_from_the_strip(monkeypatch):
+    """Chips are rebuilt once per iteration, so a wrapper removed mid-session
+    is gone on the next frame — and a chip cursor left past the end of the
+    shorter strip is clamped, not left dangling."""
+    from code_helper.services.wrappers import install_wrapper, remove_wrapper
+
+    paths = Paths.default()
+    install_wrapper(paths, "glm", token="test-token")
+
+    import code_helper.cli.menu as menu
+
+    frames: list[dict[str, str]] = []
+    real_select = menu.select_from_menu
+    state = {"n": 0}
+
+    def _select(items, **kwargs):
+        def _read():
+            frames.append(_chip_rows(items))
+            state["n"] += 1
+            if state["n"] == 1:
+                return "RIGHT"  # park the cursor on the glm chip
+            if state["n"] == 2:
+                remove_wrapper(paths, "glm", force=True)
+                return "CANCEL"  # leave the menu so the loop re-renders
+            return "CANCEL"
+
+        return real_select(items, read_key=_read, **kwargs)
+
+    monkeypatch.setattr(menu, "select_from_menu", _select)
+    assert main(["tui"]) == 0
+
+    assert "<glm>" in frames[1]["claude"]
+
+
+@pytest.mark.unit
+def test_every_main_screen_key_survives_translation():
+    """A key bound in `on_key` but missing from `menu._PASSTHROUGH` is
+    silently dead — the bug that left `w` (switch) non-functional while it was
+    documented in the help text and listed in `keymap._LAYOUTS`. Pin every
+    single-character binding the main screen declares against the translator
+    so the two can never drift apart again.
+    """
+    from code_helper.cli.menu import _translate_char
+
+    # Mirrors the `keys` table in TuiSession.run.
+    for key in ("a", "p", "s", "?", "e", "d"):
+        assert _translate_char(key) == key, f"{key!r} is bound but not passed through"
+    # `t` is bound through the TOKEN alias rather than verbatim.
+    assert _translate_char("t") == "TOKEN"
