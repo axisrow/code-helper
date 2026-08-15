@@ -331,7 +331,8 @@ def test_required_provider_accepts_a_valid_url():
 @pytest.mark.unit
 def test_required_provider_auto_completes_a_bare_host():
     got = with_base_url(_RUNTIME_REQUIRED, "78.47.183.125")
-    assert got.base_url == "https://78.47.183.125:4000/v1"
+    # No path is guessed — see normalize_base_url's docstring for why.
+    assert got.base_url == "https://78.47.183.125:4000"
 
 
 @pytest.mark.unit

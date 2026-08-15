@@ -168,7 +168,11 @@ def test_add_litellm_claude_with_base_url(tmp_path, monkeypatch):
     )
     assert code == 0
     body = _body(tmp_path, "gpt-4o-claude")
-    assert "export ANTHROPIC_BASE_URL='http://localhost:4000/v1'" in body
+    # anthropic_base_url strips the /v1 suffix: Claude Code appends
+    # /v1/messages itself, so a stored /v1 would double it to /v1/v1/messages
+    # and every request would 404 — this is the bug a live user hit.
+    assert "export ANTHROPIC_BASE_URL='http://localhost:4000'" in body
+    assert "/v1" not in body
     assert "export ANTHROPIC_AUTH_TOKEN='sk-test'" in body
 
 
