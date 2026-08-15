@@ -40,7 +40,12 @@ import os
 import sys
 from dataclasses import replace
 
-from code_helper.cli.requests import AddRequest, EditTokenRequest, SetDefaultRequest
+from code_helper.cli.requests import (
+    AddRequest,
+    EditTokenRequest,
+    RemoveRequest,
+    SetDefaultRequest,
+)
 from code_helper.errors import CodeHelperError
 
 # Modules, not names — see this module's docstring on late binding.
@@ -761,14 +766,17 @@ def _confirm_remove(paths: list) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
-def _handle_remove(args: argparse.Namespace) -> int:
+def _handle_remove(args: argparse.Namespace | RemoveRequest) -> int:
     """Remove one managed wrapper and its owned companion files."""
 
+    req = (
+        args if isinstance(args, RemoveRequest) else RemoveRequest.from_namespace(args)
+    )
     remove_wrapper(
         Paths.default(),
-        args.name,
-        dry_run=getattr(args, "dry_run", False),
-        force=getattr(args, "force", False),
+        req.name,
+        dry_run=req.dry_run,
+        force=req.force,
         confirm=_confirm_remove,
     )
     return 0

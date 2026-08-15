@@ -29,7 +29,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 
-__all__ = ["AddRequest", "EditTokenRequest", "SetDefaultRequest"]
+__all__ = ["AddRequest", "EditTokenRequest", "RemoveRequest", "SetDefaultRequest"]
 
 
 def _g(args: argparse.Namespace, name: str, default: object = None) -> object:
@@ -125,6 +125,36 @@ class EditTokenRequest:
             profile_rename_from=_g(args, "profile_rename_from"),
             profile_rename_to=_g(args, "profile_rename_to"),
             dry_run=bool(_g(args, "dry_run", False)),
+            debug=bool(_g(args, "debug", False)),
+        )
+
+
+@dataclass(frozen=True)
+class RemoveRequest:
+    """Inputs to ``_handle_remove`` (the ``remove`` subcommand and TUI ``d``).
+
+    The last handler still reading a raw ``Namespace``: the TUI dispatched
+    remove by assigning ``self.args.name`` in place, the one surviving instance
+    of the mutation pattern the rest of this module replaced. With this request
+    the TUI constructs its intent directly, so no screen mutates the parser
+    Namespace any more.
+
+    ``force`` carries the ``--force`` flag that lets ``remove_wrapper`` delete
+    an unmanaged wrapper file; the TUI never sets it, so a foreign file can
+    only be removed from an explicit command line.
+    """
+
+    name: str
+    dry_run: bool
+    force: bool
+    debug: bool
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> RemoveRequest:
+        return cls(
+            name=_g(args, "name"),
+            dry_run=bool(_g(args, "dry_run", False)),
+            force=bool(_g(args, "force", False)),
             debug=bool(_g(args, "debug", False)),
         )
 
