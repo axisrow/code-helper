@@ -87,9 +87,10 @@ class TuiSession:
     shared across screens.
 
     The typed handlers receive frozen ``AddRequest``/``EditTokenRequest``/
-    ``SetDefaultRequest`` instances directly. ``self.args`` remains only the
-    session configuration supplied by argparse (for example ``debug`` and
-    ``dry_run``) plus the legacy remove-handler bridge.
+    ``RemoveRequest``/``SetDefaultRequest`` instances directly. ``self.args``
+    now carries only the session configuration supplied by argparse (``debug``
+    and ``dry_run``, which the Settings screen toggles); no screen mutates it
+    to pass an argument into a handler any more.
     """
 
     __slots__ = ("args", "_tab_provider", "_tab_label")
@@ -905,9 +906,19 @@ class TuiSession:
                     self._on_token(choice.removeprefix("token:"))
                 elif choice.startswith("remove:"):
                     from code_helper.cli.parser import _handle_remove
+                    from code_helper.cli.requests import RemoveRequest
 
-                    self.args.name = choice.removeprefix("remove:")
-                    self._run(_handle_remove)
+                    # `force` stays False: removing an unmanaged file is an
+                    # explicit-command-line decision, never a keypress.
+                    self._run(
+                        _handle_remove,
+                        RemoveRequest(
+                            name=choice.removeprefix("remove:"),
+                            dry_run=getattr(self.args, "dry_run", False),
+                            force=False,
+                            debug=getattr(self.args, "debug", False),
+                        ),
+                    )
                 else:
                     # A wrapper alias — Enter makes it the default for its
                     # agent. `set_default_wrapper` is the raw store (#28);
