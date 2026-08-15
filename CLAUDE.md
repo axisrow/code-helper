@@ -16,7 +16,7 @@ Guidance for Claude Code when working in this repository.
 | Run tests | `pytest -q` |
 | Lint | `ruff check .` |
 | Format | `ruff format .` |
-| CLI entry points | `code-helper add [<preset>] \| add --agent A --provider P --model M \| list [wrappers\|agents\|providers\|matrix] \| edit-token [<name>] \| set-default [...] \| tui` |
+| CLI entry points | `code-helper add [<preset>] \| add --agent A --provider P --model M \| list [wrappers\|agents\|providers\|matrix] \| edit-token [<name>] \| set-default [...] \| switch [<provider>\|--from-wrapper NAME] \| tui` |
 
 ## Architecture
 
@@ -32,6 +32,7 @@ Guidance for Claude Code when working in this repository.
 | Service | `services/models_api.py` | `list_models(provider)` — never raises, degrades to `error` |
 | Service | `services/wrappers.py` | generated-script lifecycle: install/list/describe/ownership guard |
 | Service | `services/codex_default.py` | `set-default` — patches `~/.codex/config.toml` in place |
+| Service | `services/claude_settings.py` | `switch` — live-patches `~/.claude/settings.json`'s `env` block so an already-running `claude` picks up a new backend on its next prompt, no restart |
 | Service | `services/secrets.py` | token resolution: env → cached profile → prompt |
 | Service | `services/paths.py` | frozen `Paths` dataclass, pure path arithmetic off `home` |
 | Service | `services/state.py` | active token-profile pointer (`state.json`) |
@@ -56,7 +57,10 @@ Guidance for Claude Code when working in this repository.
 - `--dry-run` never writes any file.
 - TUI is a mirror of the CLI, not a second implementation — every menu item dispatches into the same `_handle_*` functions; no duplicated validation or state-changing service calls.
 - `--provider` always selects constructor mode; `add <name>` is always a preset. Never guess between them.
-- `set-default` is the only command allowed to touch an agent's own config file (`~/.codex/config.toml`), and only via patch (never replace), with backups and `tomllib` verification.
+- `set-default` and `switch` are the only commands allowed to touch an agent's own config file — `~/.codex/config.toml` and `~/.claude/settings.json` respectively — and only via patch (never replace), with rotating backups and post-write verification (`tomllib` for TOML, a re-parse + managed-region diff for JSON).
+- `set-default` persists a **preference** applied at the agent's next launch; `switch` changes what an **already-running** `claude` does on its next prompt (Claude Code re-reads `settings.json` between prompts) — they patch different files for different lifecycles, never conflate the two.
+- `ConfigShape.ANTHROPIC_SETTINGS` (the `switch` mechanism) is declared by providers only, never by any `Agent` — that is what guarantees adding it cannot perturb `resolve_shape`/wrapper generation for the `ANTHROPIC_ENV`/`OPENAI_TOML`/`OLLAMA_LAUNCH` shapes. Compatibility for `switch` is computed by `claude_settings`/`model.switchable_providers`, a separate resolver from `resolve_shape`.
+- A provider that means "clear the override, restore the agent's native behaviour" (e.g. `native`) is data too — `Provider.env_reset: bool`, never a name check. `_validate_provider` enforces that an `env_reset` provider carries no address and no credential.
 - `OPENAI_TOML` is the extension point for new OpenAI-compatible providers — adding one is a `PROVIDERS` entry, no code changes.
 
 ## Testing

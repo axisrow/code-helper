@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from code_helper.backends._atomic import atomic_write, read_text_or_none
+from code_helper.backends._atomic import rotate_backups as _rotate_backups
 from code_helper.errors import CodeHelperError
 from code_helper.services.model import (
     Agent,
@@ -476,38 +477,6 @@ def _verify_patch_applied(original: str, patched: str, patch: DefaultPatch) -> N
                 "content outside the managed keys/table — refusing to write; "
                 "this is a code-helper bug, please report it"
             )
-
-
-def _rotate_backups(slots: tuple[Path, Path, Path], *, current: str) -> None:
-    """FIFO-rotate 3 backup slots, then archive ``current`` into slot 1.
-
-    2->3 (oldest lost), 1->2, current->1. Runs via atomic_write for every
-    slot so the crash-safety guarantee is uniform across the whole rotation,
-    not just the final write. A slot that doesn't exist is simply skipped (no
-    error) — the ring degrades gracefully on a fresh install. Takes the three
-    slot paths directly (not a ``Paths`` + accessor name) so the SAME rotation
-    logic serves both ``config.toml``'s ring and the catalog's own ring —
-    the catalog needs its own backup exactly like config.toml does, since a
-    ``set-default`` overwrites the previous default's catalog just as much as
-    it overwrites the previous default's config.
-
-    ``current`` is passed in by the caller (the same ``original`` text it
-    already read and diffed/confirmed against) rather than re-read from disk
-    here: re-reading would both waste an I/O round-trip and open a TOCTOU gap
-    — on a real interactive confirm, the file on disk could have changed
-    between the earlier read and this call, and archiving that different,
-    unreviewed content into slot 1 while writing ``patched`` (derived from the
-    ORIGINAL read) would silently discard whatever changed in between.
-    """
-    slot3, slot2, slot1 = slots
-    body2 = read_text_or_none(slot2)
-    if body2 is not None:
-        atomic_write(slot3, body2, mode=None)
-    body1 = read_text_or_none(slot1)
-    if body1 is not None:
-        atomic_write(slot2, body1, mode=None)
-
-    atomic_write(slot1, current, mode=None)
 
 
 def _config_backup_slots(paths: Paths) -> tuple[Path, Path, Path]:

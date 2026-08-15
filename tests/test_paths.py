@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from code_helper.errors import CodeHelperError
 from code_helper.services.paths import Paths
 
 # Captured at import time, before _isolate_home redirects HOME.
@@ -102,3 +103,48 @@ def test_config_dir_resolution_is_pure_no_fs_effects(tmp_path):
     Paths.from_home(tmp_path).credentials_file()
     after = set(tmp_path.iterdir())
     assert before == after
+
+
+@pytest.mark.unit
+def test_from_home_resolves_claude_dir_under_injected_home(tmp_path):
+    p = Paths.from_home(tmp_path)
+    assert p.claude_dir == tmp_path / ".claude"
+
+
+@pytest.mark.unit
+def test_claude_dir_never_references_real_home(tmp_path):
+    """Same HOME-isolation guarantee as bin_dir/config_dir."""
+    real_home_str = str(REAL_HOME)
+    p = Paths.from_home(tmp_path)
+    assert not str(p.claude_dir).startswith(real_home_str)
+
+
+@pytest.mark.unit
+def test_claude_settings_resolves_under_claude_dir(tmp_path):
+    p = Paths.from_home(tmp_path)
+    assert p.claude_settings() == tmp_path / ".claude" / "settings.json"
+
+
+@pytest.mark.unit
+def test_claude_settings_resolution_is_pure_no_fs_effects(tmp_path):
+    before = set(tmp_path.iterdir())
+    Paths.from_home(tmp_path).claude_settings()
+    after = set(tmp_path.iterdir())
+    assert before == after
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("slot", [1, 2, 3])
+def test_claude_settings_backup_resolves_under_claude_dir(tmp_path, slot):
+    p = Paths.from_home(tmp_path)
+    assert p.claude_settings_backup(slot) == (
+        tmp_path / ".claude" / f"settings.json.bak{slot}"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("slot", [0, 4, -1, 99])
+def test_claude_settings_backup_rejects_an_invalid_slot(tmp_path, slot):
+    p = Paths.from_home(tmp_path)
+    with pytest.raises(CodeHelperError, match="invalid backup slot"):
+        p.claude_settings_backup(slot)

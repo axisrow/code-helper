@@ -74,8 +74,12 @@ def test_add_order_is_provider_model_agent_alias(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _prompt: "my-codex")
 
     assert main(["tui"]) == 0
-    assert seen[:4] == [
-        "code-helper",
+    # The main-menu header now also carries the "Live: ..." switch status
+    # (see TuiSession._main_prompt) — check the prefix rather than the exact
+    # string, since the live label's width varies with the active provider.
+    assert seen[0].startswith("code-helper")
+    assert "Live:" in seen[0]
+    assert seen[1:4] == [
         "Select a provider:",
         "Select a model for ollama:",
         "Select an agent:",
@@ -1328,3 +1332,91 @@ def test_apply_codex_default_errors_when_no_codex_default_set(monkeypatch, capsy
     assert main(["tui"]) == 0
     output = capsys.readouterr().out
     assert "no default wrapper set for codex" in output.lower()
+
+
+# --------------------------------------------------------------------------- #
+# `w` — live switch screen
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_switch_key_reaches_switch_screen(monkeypatch):
+    """`w` on the main screen dispatches into _run_switch, not any other
+    handler — the screen's own picker is reached and offers Back."""
+    _menu_sequence(monkeypatch, ["switch", "__back__", "quit"])
+    assert main(["tui"]) == 0
+
+
+@pytest.mark.integration
+def test_switch_screen_wrapper_row_dispatches_from_wrapper(monkeypatch):
+    """Selecting an installed anthropic-env wrapper's row on the switch
+    screen calls apply_switch with SwitchRequest.from_wrapper set to that
+    wrapper's alias — the --from-wrapper fast path, zero prompts."""
+    import code_helper.services.claude_settings as claude_settings
+
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
+    assert main(["add", "glm"]) == 0
+
+    calls: list[dict] = []
+
+    def _fake_apply(_paths, *, provider, tier_models, **_kw):
+        calls.append({"provider": provider.name, "tier_models": tier_models})
+        return True
+
+    monkeypatch.setattr(claude_settings, "apply_switch", _fake_apply)
+    _menu_sequence(monkeypatch, ["switch", "wrapper:glm", "quit"])
+
+    assert main(["tui"]) == 0
+    assert len(calls) == 1
+    assert calls[0]["provider"] == "zai"
+    assert calls[0]["tier_models"].sonnet == "glm-5-turbo"
+
+
+@pytest.mark.integration
+def test_switch_screen_native_row_dispatches_a_reset(monkeypatch):
+    """Selecting the `native` row calls apply_switch with the `native`
+    (env_reset) provider — no model/token collection for it."""
+    import code_helper.services.claude_settings as claude_settings
+
+    calls: list[dict] = []
+
+    def _fake_apply(_paths, *, provider, **_kw):
+        calls.append({"provider": provider.name})
+        return True
+
+    monkeypatch.setattr(claude_settings, "apply_switch", _fake_apply)
+    _menu_sequence(monkeypatch, ["switch", "provider:native", "quit"])
+
+    assert main(["tui"]) == 0
+    assert len(calls) == 1
+    assert calls[0]["provider"] == "native"
+
+
+@pytest.mark.integration
+def test_switch_screen_lists_only_anthropic_env_claude_wrappers(monkeypatch):
+    """A codex/ollama-launch wrapper never appears as a switch row — only
+    installed claude anthropic-env wrappers, plus `native`."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
+    assert main(["add", "glm"]) == 0
+    assert main(["add", "glm-ollama"]) == 0
+    assert (
+        main(["add", "--agent", "codex", "--provider", "ollama", "--model", "x"]) == 0
+    )
+
+    values_seen: list[str] = []
+    answers = iter(["switch", "__back__", "quit"])
+
+    def _select(items, **_kwargs):
+        from code_helper.cli.menu import Section
+
+        vals = [entry[0] for entry in items if not isinstance(entry, Section)]
+        if any(v.startswith("wrapper:") or v == "provider:native" for v in vals):
+            values_seen[:] = vals
+        return next(answers)
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+
+    assert main(["tui"]) == 0
+    assert "wrapper:glm" in values_seen
+    assert "wrapper:glm-ollama" not in values_seen
+    assert "provider:native" in values_seen
