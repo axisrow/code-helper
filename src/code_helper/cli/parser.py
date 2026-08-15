@@ -172,6 +172,28 @@ def _handle_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ask_yes_no(prompt: str) -> bool:
+    """Read one y/N answer with the same cancellation contract as every
+    other TUI text field (Esc/Ctrl-C via :func:`menu.read_line`), instead of
+    a bare ``input()`` that leaves Esc's raw bytes in the answer and lets
+    Ctrl-C escape as an uncaught ``KeyboardInterrupt``. A soft cancel (Esc) —
+    like a blank or non-"y" answer — means "no": declining a destructive
+    confirmation is not a cancel-worthy event. A hard cancel (Ctrl-C)
+    propagates, because that gesture means "leave the whole program", not
+    "decline this prompt" — the same hard/soft split every other TUI reader
+    makes (see ``TuiSession._read_text``).
+    """
+    from code_helper.cli.menu import MenuCancelled, read_line
+
+    try:
+        answer = read_line(prompt)
+    except MenuCancelled as exc:
+        if exc.hard:
+            raise
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
 def _confirm_overwrite(path) -> bool:
     """Ask before clobbering a foreign file — only when there is a TTY to ask.
 
@@ -182,10 +204,9 @@ def _confirm_overwrite(path) -> bool:
     """
     if not sys.stdin.isatty():
         return False
-    answer = input(
+    return _ask_yes_no(
         f"{path} exists and was not created by code-helper. Overwrite? [y/N] "
     )
-    return answer.strip().lower() in ("y", "yes")
 
 
 def _confirm_set_default(path, preview: str) -> bool:
@@ -204,8 +225,7 @@ def _confirm_set_default(path, preview: str) -> bool:
         return False
     if preview:
         print(preview)
-    answer = input(f"About to write {path}. Continue? [y/N] ")
-    return answer.strip().lower() in ("y", "yes")
+    return _ask_yes_no(f"About to write {path}. Continue? [y/N] ")
 
 
 def _read_profile_name(prompt: str) -> str | None:
@@ -762,8 +782,7 @@ def _confirm_remove(paths: list) -> bool:
     print("About to remove:")
     for path in paths:
         print(f"  {path}")
-    answer = input("Continue? [y/N] ")
-    return answer.strip().lower() in ("y", "yes")
+    return _ask_yes_no("Continue? [y/N] ")
 
 
 def _handle_remove(args: argparse.Namespace | RemoveRequest) -> int:
