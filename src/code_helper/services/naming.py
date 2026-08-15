@@ -117,18 +117,27 @@ def validate_alias(alias: str) -> str:
 #: just a ceiling so a pasted blob can't become a generated script's URL.
 MAX_BASE_URL_LENGTH = 512
 
-#: Defaults filled in by :func:`normalize_base_url` when a bare host/IP is
-#: supplied without a port or path. These match a self-hosted LiteLLM proxy's
-#: conventional endpoint; a user who wants a different port/path just types it.
+#: Default port filled in by :func:`normalize_base_url` when a bare host/IP is
+#: supplied without one. Matches a self-hosted LiteLLM proxy's conventional
+#: port; a user who wants a different port just types it.
+#:
+#: Deliberately no matching ``DEFAULT_BASE_URL_PATH``: unlike the port, the
+#: right path segment (``/v1`` or none) depends on which :class:`ConfigShape`
+#: the provider resolves to — required for OPENAI_TOML, poison for
+#: ANTHROPIC_ENV (see :func:`render.anthropic_base_url`) — and the shape is
+#: not known yet at this layer. Guessing a path here was the bug: it produced
+#: an ``ANTHROPIC_BASE_URL`` that 404s on every request. Leave path completion
+#: to each shape's renderer, which knows which protocol it is serving.
 DEFAULT_BASE_URL_PORT = "4000"
-DEFAULT_BASE_URL_PATH = "/v1"
+DEFAULT_BASE_URL_PATH = ""
 
 
 def normalize_base_url(url: str) -> str:
     """Auto-complete a bare host/IP into a full ``base_url``.
 
     A user typing ``78.47.183.125`` (no scheme, no port, no path) gets
-    ``https://78.47.183.125:4000/v1``. Input that already carries a scheme
+    ``https://78.47.183.125:4000`` — no path guessed, see
+    :data:`DEFAULT_BASE_URL_PATH`. Input that already carries a scheme
     (``http://``/``https://``) is returned untouched — an explicit ``http://``
     is respected, never rewritten to https. Only scheme-less input is touched.
 

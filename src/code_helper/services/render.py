@@ -25,7 +25,7 @@ it is not.
 from __future__ import annotations
 
 from collections.abc import Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from code_helper.errors import CodeHelperError
 from code_helper.services.model import ConfigShape, Provider
@@ -37,6 +37,7 @@ __all__ = [
     "openai_toml_body",
     "openai_catalog_body",
     "openai_base_url",
+    "anthropic_base_url",
     "openai_env_key",
     "toml_string",
     "MARKER_PREFIX",
@@ -84,6 +85,9 @@ def _render_anthropic_env(spec: WrapperSpec, token: str) -> str:
     The subagent line is emitted only when the spec carries one: Claude Code
     treats an unset ``CLAUDE_CODE_SUBAGENT_MODEL`` differently from an empty
     one, and the ``glm`` preset deliberately omits it.
+
+    ``ANTHROPIC_BASE_URL`` goes through :func:`anthropic_base_url`, not raw —
+    see that function for why.
     """
     q = _shell_single_quote
     tiers = spec.tier_models
@@ -91,7 +95,7 @@ def _render_anthropic_env(spec: WrapperSpec, token: str) -> str:
         "#!/bin/bash",
         _marker(spec),
         "(",
-        f"export ANTHROPIC_BASE_URL={q(spec.provider.base_url)}",
+        f"export ANTHROPIC_BASE_URL={q(anthropic_base_url(spec.provider.base_url))}",
         f"export ANTHROPIC_AUTH_TOKEN={q(token)}",
         "export ANTHROPIC_API_KEY=",
         f"export ANTHROPIC_DEFAULT_HAIKU_MODEL={q(tiers.haiku)}",
@@ -193,6 +197,37 @@ def openai_base_url(provider_base_url: str) -> str:
     if root.endswith("/v1"):
         return root + "/"
     return root + "/v1/"
+
+
+def anthropic_base_url(provider_base_url: str) -> str:
+    """Derive the ``ANTHROPIC_BASE_URL`` for the anthropic-env shape.
+
+    :func:`openai_base_url`'s mirror image, and for the same reason a dual-shape
+    provider like litellm needs both: Claude Code itself appends
+    ``/v1/messages`` to ``ANTHROPIC_BASE_URL``, so a stored value that already
+    carries a ``/v1`` suffix (typed by the user, or round-tripped through
+    ``wrappers._recover_base_url`` off an already-``/v1/``-suffixed OPENAI_TOML
+    profile) would double it to ``/v1/v1/messages`` and every request 404s.
+    Strip the suffix; leave everything else — including a bare root, and a
+    ``/v1`` that is not a whole trailing path segment — untouched. Idempotent,
+    like its sibling, so a recover-then-reinstall round trip is a no-op.
+
+    Public (not ``_``-prefixed) for the same reason ``openai_base_url`` is:
+    both the renderer and any future reader of ``provider.base_url`` for this
+    shape must derive the endpoint the same way.
+
+    Uses :func:`urllib.parse.urlsplit` rather than a bare string suffix check
+    so a host that merely *ends in* ``v1`` (``http://v1``) or carries ``/v1``
+    as a non-trailing path segment (``http://h/v1/proxy``) is never touched —
+    only a trailing whole ``/v1`` *path* segment qualifies.
+    """
+    root = provider_base_url.rstrip("/")
+    parts = urlsplit(root)
+    path = parts.path
+    if path.endswith("/v1"):
+        stripped = path[: -len("/v1")]
+        return urlunsplit((parts.scheme, parts.netloc, stripped, "", ""))
+    return root
 
 
 def openai_env_key(provider: Provider) -> str:

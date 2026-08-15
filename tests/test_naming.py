@@ -155,13 +155,15 @@ def test_script_for_still_does_no_io(tmp_path):
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        # Bare host/IP: scheme + default port + default path are filled in.
-        ("78.47.183.125", "https://78.47.183.125:4000/v1"),
-        ("host.example.com", "https://host.example.com:4000/v1"),
-        # Port present but no path: port kept, path added — no double port.
-        ("localhost:4000", "https://localhost:4000/v1"),
-        ("192.168.1.10:4000", "https://192.168.1.10:4000/v1"),
-        # Port and path both present: unchanged.
+        # Bare host/IP: scheme + default port filled in. No path is guessed —
+        # /v1 is only correct for the OPENAI_TOML shape and poison for
+        # ANTHROPIC_ENV, and the shape is not known at this layer.
+        ("78.47.183.125", "https://78.47.183.125:4000"),
+        ("host.example.com", "https://host.example.com:4000"),
+        # Port present but no path: port kept, no path added.
+        ("localhost:4000", "https://localhost:4000"),
+        ("192.168.1.10:4000", "https://192.168.1.10:4000"),
+        # An explicit path is left alone either way.
         ("192.168.1.10:4000/v1", "https://192.168.1.10:4000/v1"),
         # Already has a scheme: returned untouched (explicit http:// respected).
         ("http://127.0.0.1:11434", "http://127.0.0.1:11434"),

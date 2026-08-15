@@ -126,13 +126,14 @@ code-helper add --agent codex  --provider litellm \
                 --base-url http://localhost:4000/v1 --model gpt-4o
 ```
 
-**The URL must include `/v1`** (`http://localhost:4000/v1`, not just
-`http://localhost:4000`) — `--list-models` requests `{url}/models`, and the
-same value feeds the Codex TOML profile's `base_url`, which expects an
-OpenAI-style `/v1` root. One URL serves both agents: `claude` resolves to the
-direct `ANTHROPIC_*` env shape (LiteLLM's Anthropic Messages passthrough),
-`codex` resolves to a `[model_providers.litellm]` TOML profile — chosen
-automatically, same as every other provider here.
+Either form works — `http://localhost:4000` or `http://localhost:4000/v1` —
+`code-helper` derives the right endpoint for each agent from whichever you
+give it. One URL serves both agents: `claude` resolves to the direct
+`ANTHROPIC_*` env shape (LiteLLM's Anthropic Messages passthrough, which
+never takes a `/v1` suffix — `code-helper` strips one if present), `codex`
+resolves to a `[model_providers.litellm]` TOML profile whose `base_url` does
+need `/v1` (`code-helper` appends one if absent) — chosen automatically, same
+as every other provider here.
 
 The token comes from `LITELLM_API_KEY`, a selected token profile, or a hidden
 prompt — see [Where tokens live](#where-tokens-live) — exactly like any other

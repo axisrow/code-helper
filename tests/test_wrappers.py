@@ -23,6 +23,7 @@ from code_helper.services.model import (
 )
 from code_helper.services.paths import Paths
 from code_helper.services.render import (
+    anthropic_base_url,
     openai_catalog_body,
     openai_toml_body,
     render_script,
@@ -1170,7 +1171,9 @@ def test_spec_from_installed_recovers_base_url_anthropic_env(tmp_path):
 
     recovered = spec_from_installed(paths, "lm")
     assert recovered is not None
-    assert recovered.provider.base_url == "http://h:4000/v1"
+    # anthropic_base_url stripped the /v1 suffix when rendering, so recovery
+    # reads back the bare root the export line now carries.
+    assert recovered.provider.base_url == "http://h:4000"
 
 
 @pytest.mark.integration
@@ -1193,8 +1196,8 @@ def test_spec_from_installed_never_raises_on_a_corrupted_base_url(tmp_path):
     # that _env_value's single-line regex still matches and hands back
     # unchanged, so with_base_url/validate_base_url is what has to catch it.
     hacked = body.replace(
-        "export ANTHROPIC_BASE_URL='http://h:4000/v1'",
-        "export ANTHROPIC_BASE_URL='http://h:4000/v1\tbad'",
+        "export ANTHROPIC_BASE_URL='http://h:4000'",
+        "export ANTHROPIC_BASE_URL='http://h:4000\tbad'",
     )
     assert hacked != body  # sanity: the replace actually matched
     script.write_text(hacked, encoding="utf-8")
@@ -1223,6 +1226,63 @@ def test_reinstalling_a_recovered_openai_toml_spec_is_byte_identical(tmp_path):
     paths = Paths.from_home(tmp_path)
     provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
     spec = build_spec(agent="codex", provider=provider, model="gpt-4o", alias="lm")
+    install_wrapper(paths, spec, token="tok")
+
+    recovered = spec_from_installed(paths, "lm")
+    assert recovered is not None
+    assert install_wrapper(paths, recovered, token="tok") is False  # no-op
+
+
+# --- anthropic_base_url ------------------------------------------------------
+#
+# openai_base_url's mirror image: ANTHROPIC_BASE_URL must be the version-less
+# root because Claude Code appends /v1/messages itself. A base_url still
+# carrying a /v1 suffix (from --base-url, or round-tripped through
+# _recover_base_url off an OPENAI_TOML profile where /v1/ was already
+# appended) must have it stripped here, or the request becomes
+# .../v1/v1/messages and 404s — the bug this test suite exists to catch.
+
+
+@pytest.mark.unit
+def test_anthropic_base_url_strips_a_v1_suffix():
+    assert anthropic_base_url("http://h:4000/v1") == "http://h:4000"
+
+
+@pytest.mark.unit
+def test_anthropic_base_url_strips_a_trailing_v1_slash():
+    assert anthropic_base_url("http://h:4000/v1/") == "http://h:4000"
+
+
+@pytest.mark.unit
+def test_anthropic_base_url_leaves_a_bare_root_alone():
+    assert anthropic_base_url("http://h:4000") == "http://h:4000"
+
+
+@pytest.mark.unit
+def test_anthropic_base_url_is_idempotent():
+    once = anthropic_base_url("http://h:4000/v1")
+    assert anthropic_base_url(once) == once
+
+
+@pytest.mark.unit
+def test_anthropic_base_url_does_not_strip_a_v1_inside_the_path():
+    assert anthropic_base_url("http://h:4000/v1/proxy") == "http://h:4000/v1/proxy"
+
+
+@pytest.mark.unit
+def test_anthropic_base_url_does_not_strip_a_host_ending_in_v1():
+    assert anthropic_base_url("http://v1") == "http://v1"
+
+
+@pytest.mark.integration
+def test_reinstalling_a_recovered_anthropic_env_spec_is_byte_identical(tmp_path):
+    """Mirror of test_reinstalling_a_recovered_openai_toml_spec_is_byte_identical
+    for ANTHROPIC_ENV: without anthropic_base_url's strip being idempotent, the
+    recover -> re-render loop would oscillate the file body on every
+    edit-token."""
+    paths = Paths.from_home(tmp_path)
+    provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
+    spec = build_spec(agent="claude", provider=provider, model="gpt-4o", alias="lm")
     install_wrapper(paths, spec, token="tok")
 
     recovered = spec_from_installed(paths, "lm")
@@ -1338,7 +1398,7 @@ def test_edit_token_preserves_the_base_url(tmp_path, monkeypatch):
     assert main(["edit-token", "lm"]) == 0
 
     body = paths.script_for("lm").read_text(encoding="utf-8")
-    assert "export ANTHROPIC_BASE_URL='http://h:4000/v1'" in body
+    assert "export ANTHROPIC_BASE_URL='http://h:4000'" in body
     assert "export ANTHROPIC_AUTH_TOKEN='new-tok'" in body
 
 
