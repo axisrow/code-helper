@@ -53,6 +53,11 @@ _ESC_TIMEOUT = 0.05
 #: for — that wait would just add latency to every single Enter keypress.
 _PAIR_TIMEOUT = 0.002
 
+#: Fallback size for :func:`shutil.get_terminal_size` when the tty cannot be
+#: queried (piped output, tests). Shared by the menu's frame layout, the
+#: line-editor's scroll window, and the initial width probe.
+_TERM_FALLBACK = (80, 24)
+
 # CSI parameter bytes (0x30-0x3F) and intermediate bytes (0x20-0x2F) per
 # ECMA-48; a CSI sequence ends at the first byte in the final-byte range
 # (0x40-0x7E).
@@ -61,12 +66,34 @@ _CSI_FINAL = range(0x40, 0x7F)
 
 # Letter-form final byte -> key name, shared by both escape-sequence shapes
 # that end in a single letter: CSI (`\x1b[A`) and SS3 (`\x1bOA`, sent instead
-# of CSI in "application cursor mode").
-_ARROW_FINAL = {"A": "UP", "B": "DOWN", "H": "HOME", "F": "END"}
+# of CSI in "application cursor mode"). "C"/"D" (Right/Left) are only ever
+# consumed by `_read_line_raw`'s cursor movement — `select_from_menu`'s
+# `_dispatch_key` does not list "LEFT"/"RIGHT" and falls through to its
+# final `return None` ("OTHER"), so adding them here does not change menu
+# navigation.
+_ARROW_FINAL = {
+    "A": "UP",
+    "B": "DOWN",
+    "C": "RIGHT",
+    "D": "LEFT",
+    "H": "HOME",
+    "F": "END",
+}
 
 # CSI `~`-form final byte: `\x1b[<params>~` — Home/End/PageUp/PageDown as
 # sent by terminals that don't use the letter form above.
 _TILDE_FINAL = {"1": "HOME", "4": "END", "5": "PAGE_UP", "6": "PAGE_DOWN"}
+
+# Cursor-movement key -> new cursor position for the current buffer. A table
+# (like ``_CHAR_KEYS``) so a movement is a data change, and so the arrow-key
+# escape names and the Ctrl-A/Ctrl-E shortcuts resolve to the SAME move — the
+# line editor must not re-state "HOME means pos=0" twice.
+_MOVES: dict[str, Callable[[list[str], int], int]] = {
+    "LEFT": lambda chars, pos: max(0, pos - 1),
+    "RIGHT": lambda chars, pos: min(len(chars), pos + 1),
+    "HOME": lambda _chars, _pos: 0,
+    "END": lambda chars, _pos: len(chars),
+}
 
 
 class MenuCancelled(Exception):
@@ -237,16 +264,17 @@ def _translate(
     unchanged — pushback only matters to a caller reading a continuous byte
     stream, i.e. :func:`_read_key_raw`.
 
-    Returns one of: ``"UP"``, ``"DOWN"``, ``"HOME"``, ``"END"``,
-    ``"PAGE_UP"``, ``"PAGE_DOWN"``, ``"ENTER"``, ``"CANCEL"`` (Esc/``q`` — a
-    soft "go back" cancel), ``"HARD_CANCEL"`` (Ctrl-C — raw ``\\x03``; in raw
-    terminal mode ``ISIG`` is off, so this never raises ``KeyboardInterrupt``
-    on its own and MUST be handled as a distinct key, not folded into
-    ``CANCEL``), ``"TAB"`` (the Tab key — a caller-side hook key, see
-    :func:`select_from_menu`'s ``on_tab``; without one it is ignored just like
-    ``"OTHER"``), ``"TOKEN"`` (the ``t``/``T`` key — a caller-side hook key,
-    see :func:`select_from_menu`'s ``on_token``; without one it is ignored
-    just like ``"OTHER"``), ``"DIGIT_1"``..``"DIGIT_9"``, ``"OTHER"``.
+    Returns one of: ``"UP"``, ``"DOWN"``, ``"LEFT"``, ``"RIGHT"``,
+    ``"HOME"``, ``"END"``, ``"PAGE_UP"``, ``"PAGE_DOWN"``, ``"ENTER"``,
+    ``"CANCEL"`` (Esc/``q`` — a soft "go back" cancel), ``"HARD_CANCEL"``
+    (Ctrl-C — raw ``\\x03``; in raw terminal mode ``ISIG`` is off, so this
+    never raises ``KeyboardInterrupt`` on its own and MUST be handled as a
+    distinct key, not folded into ``CANCEL``), ``"TAB"`` (the Tab key — a
+    caller-side hook key, see :func:`select_from_menu`'s ``on_tab``; without
+    one it is ignored just like ``"OTHER"``), ``"TOKEN"`` (the ``t``/``T``
+    key — a caller-side hook key, see :func:`select_from_menu`'s ``on_token``;
+    without one it is ignored just like ``"OTHER"``), ``"DIGIT_1"``..``"DIGIT_9"``,
+    ``"OTHER"``.
     """
     if 0xC2 <= ord(first) <= 0xFF:
         decoded = _finish_utf8(first, read_more, push_back)
@@ -498,7 +526,7 @@ def _build_menu_state(
     by_digit = {n: value for value, n in digit_of.items()}
 
     redraw = sys.stdout.isatty()
-    size = shutil.get_terminal_size((80, 24)) if redraw else None
+    size = shutil.get_terminal_size(_TERM_FALLBACK) if redraw else None
     width = size.columns if size else 0
     height = size.lines if size else 0
     hint_text = hint() if callable(hint) else hint
@@ -559,6 +587,17 @@ def _row_text(entry, index: int, cursor_pair: int, state: _MenuState) -> str:
     return f"{digit} {marker} {label_text}"
 
 
+def _erase_lines(n: int) -> str:
+    """The cursor-up-and-clear escape that erases ``n`` previously drawn rows.
+
+    ``\\033[<n>A`` moves the cursor up ``n`` rows (a no-op at the top row),
+    then ``\\033[J`` clears from there to the end of the screen. The single
+    idiom both a frame redraw (its ``lead``) and the exit cleanup need, so the
+    erase form lives in one place instead of being re-derived at each site.
+    """
+    return f"\033[{n}A\033[J"
+
+
 def _render_frame(
     state: _MenuState,
     *,
@@ -570,7 +609,7 @@ def _render_frame(
     """Render one frame, adapting its viewport to the current terminal size."""
     prior_frame_lines = state.frame_lines
     if state.redraw:
-        size = shutil.get_terminal_size((80, 24))
+        size = shutil.get_terminal_size(_TERM_FALLBACK)
         state.width, state.height = size.columns, size.lines
     width = state.width
     prompt_text = prompt() if callable(prompt) else prompt
@@ -578,7 +617,7 @@ def _render_frame(
 
     if state.redraw:
         first, visible = _viewport(state)
-        lead = f"\033[{prior_frame_lines}A\033[J"
+        lead = _erase_lines(prior_frame_lines)
         prefix = (
             clear_screen if state.first and clear else ("" if state.first else lead)
         )
@@ -656,7 +695,7 @@ def _dispatch_key(
         raise MenuCancelled(hard=False)
     if key == "HARD_CANCEL":
         raise MenuCancelled(hard=True)
-    return None  # OTHER / TAB-without-on_tab / TOKEN-without-on_token
+    return None  # OTHER / LEFT / RIGHT / TAB-without-on_tab / TOKEN-without-on_token
 
 
 def select_from_menu(
@@ -796,6 +835,13 @@ def select_from_menu(
         raise MenuCancelled(hard=True) from None
     finally:
         if state.redraw:
+            # Erase the last drawn frame before returning — the same
+            # cursor-up-and-clear escape a frame's own `lead` uses, just not
+            # deferred to a next frame that may never come. Without this the
+            # menu's final frame is left on screen and whatever the caller
+            # prints next (a text prompt, a result) is drawn ON TOP of it
+            # instead of on a clean line.
+            print_fn(_erase_lines(state.frame_lines))
             print_fn(show_cursor)
 
 
@@ -806,16 +852,31 @@ def _read_line_raw(
     stream,
     output,
 ) -> str:
-    """Read one editable line while preserving the TUI cancellation contract."""
+    """Read one editable line while preserving the TUI cancellation contract.
+
+    Unlike the former one-char-at-a-time echo, the buffer/cursor model here is
+    what makes Left/Right/Home/End and a backspace that crosses a wrapped
+    physical row possible at all — both need to know the FULL line and where
+    in it the cursor sits, not just the last keystroke. Every mutation goes
+    through :func:`redraw`, which repaints the whole line from column 0 —
+    simpler than tracking incremental cursor deltas, and correct regardless of
+    whether the previous edit happened at the end of the line or the middle.
+
+    ``\\r\\n`` (not a bare ``\\n``) terminates every exit path — Enter, Esc,
+    Ctrl-C — because the terminal is in raw mode (``tty.setraw``), which turns
+    off ``ONLCR``: a bare ``\\n`` there moves the cursor down but leaves it in
+    whatever column the prompt/input ended at, so the NEXT thing printed
+    (another prompt, an error, the menu) starts indented by that width
+    instead of at column 0.
+    """
     import select
     import termios
     import tty
 
     fd = stream.fileno()
-    output.write(prompt)
-    output.flush()
     old = termios.tcgetattr(fd)
     chars: list[str] = []
+    pos = 0
     invalid_secret_char = False
 
     def read_more(timeout: float | None = None) -> str | None:
@@ -824,44 +885,94 @@ def _read_line_raw(
             return None
         return os.read(fd, 1).decode("utf-8", errors="replace")
 
+    def visible_text() -> str:
+        return ("•" * len(chars)) if secret else "".join(chars)
+
+    def redraw() -> None:
+        # Repaint the whole line from column 0: `\r` + `\033[K` (clear to end
+        # of line) removes any leftover from a longer previous frame, then
+        # the prompt + a WINDOW of text around `pos` is written, then the
+        # cursor is walked back with a relative CSI move (`\033[<n>D`) —
+        # never emitted at n=0, which some terminals treat as a 1-column move
+        # instead of a no-op.
+        #
+        # Unlike `_fit` (which truncates from the right for a fixed menu
+        # row), the window here scrolls horizontally to keep `pos` visible —
+        # a menu row never moves its "cursor" mid-line, but this one does,
+        # and truncating the tail would hide the very text a Home keypress
+        # or a mid-string edit needs to show.
+        width = shutil.get_terminal_size(_TERM_FALLBACK).columns
+        text = visible_text()
+        capacity = max(1, width - len(prompt) - 1)
+        if len(text) <= capacity:
+            window, cursor_col = text, pos
+        else:
+            start = min(max(0, pos - capacity // 2), len(text) - capacity)
+            window, cursor_col = text[start : start + capacity], pos - start
+        output.write(f"\r\033[K{prompt}{window}")
+        trailing = len(window) - cursor_col
+        if trailing > 0:
+            output.write(f"\033[{trailing}D")
+        output.flush()
+
     try:
         tty.setraw(fd)
+        redraw()
         while True:
             first = read_more()
             if first is None:
                 continue
             if first == "\x03":
+                output.write("\r\n")
+                output.flush()
                 raise MenuCancelled(hard=True)
+            # Escape sequences and the Ctrl-A/Ctrl-E shortcuts all reduce to a
+            # movement key; anything else is "OTHER" and falls through to the
+            # plain insert/edit handling below. Reusing `_translate_escape`
+            # (rather than re-parsing CSI/SS3 here) keeps the editor on the
+            # module's single escape translator — the inline copy it replaces
+            # had already drifted (it dropped the `~`-form Home/End).
             if first == "\x1b":
-                # A lone Escape is Back. Consume a cursor/function-key
-                # sequence instead of accidentally treating its bytes as text.
-                nxt = read_more(_ESC_TIMEOUT)
-                if nxt is None:
+                key = _translate_escape(read_more)
+                if key == "CANCEL":
+                    output.write("\r\n")
+                    output.flush()
                     raise MenuCancelled(hard=False)
-                if nxt in ("[", "O"):
-                    while True:
-                        tail = read_more(_ESC_TIMEOUT)
-                        if tail is None or ord(tail) in _CSI_FINAL:
-                            break
+            elif first == "\x01":  # Ctrl-A: start of line
+                key = "HOME"
+            elif first == "\x05":  # Ctrl-E: end of line
+                key = "END"
+            else:
+                key = "OTHER"
+            if key in _MOVES:
+                pos = _MOVES[key](chars, pos)
+                redraw()
                 continue
+            if first == "\x1b":
+                continue  # a cursor/function-key sequence we don't act on
             if first in ("\r", "\n"):
-                output.write("\n")
+                output.write("\r\n")
                 output.flush()
                 if secret and invalid_secret_char:
                     raise ValueError("secret input must contain ASCII characters")
                 return "".join(chars).strip()
             if first in ("\x08", "\x7f"):
-                if chars:
-                    chars.pop()
-                    output.write("\b \b")
-                    output.flush()
+                if pos > 0:
+                    del chars[pos - 1]
+                    pos -= 1
+                    redraw()
+                continue
+            if first == "\x15":  # Ctrl-U: clear the line
+                chars = []
+                pos = 0
+                redraw()
                 continue
             if secret and (first == "\ufffd" or ord(first) > 127):
                 invalid_secret_char = True
                 continue
-            chars.append(first)
-            output.write("•" if secret else first)
-            output.flush()
+            chars.insert(pos, first)
+            pos += 1
+            redraw()
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 

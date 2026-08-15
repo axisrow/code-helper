@@ -542,12 +542,24 @@ class TuiSession:
         provider = with_auth(provider, want_secret=want_secret_auth)
         typed_url: str | None = None
         if provider.base_url_policy is not BaseUrlPolicy.FIXED:
-            default = f" [{provider.base_url}]" if provider.base_url else ""
-            typed_url = self._read_text(f"Base URL for {provider.name}{default}: ")
-            if typed_url is None:
-                return None
-            if provider.base_url_policy is BaseUrlPolicy.REQUIRED and not typed_url:
-                return None
+            required = provider.base_url_policy is BaseUrlPolicy.REQUIRED
+            default = (
+                " (required)"
+                if required
+                else (f" [{provider.base_url}]" if provider.base_url else "")
+            )
+            # Re-ask on empty for a REQUIRED field — the same "validate, then
+            # loop" shape `_read_token` uses — so a stray Enter re-prompts the
+            # URL instead of dumping the user back to provider selection.
+            # `None` (Esc) still means cancel; only an empty submit loops.
+            while True:
+                typed_url = self._read_text(f"Base URL for {provider.name}{default}: ")
+                if typed_url is None:
+                    return None
+                if required and not typed_url:
+                    self._notify(f"A base URL is required for {provider.name}.")
+                    continue
+                break
             try:
                 provider = with_base_url(provider, typed_url or None)
             except CodeHelperError as exc:
