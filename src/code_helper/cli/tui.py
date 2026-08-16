@@ -1192,16 +1192,30 @@ class TuiSession:
         return None
 
     def _apply_chip(self, agent_name: str) -> None:
-        """Apply the highlighted chip of ``agent_name`` (Enter on its row)."""
+        """Apply the highlighted chip of ``agent_name`` (Enter on its row).
+
+        The already-applied short-circuit is trusted ONLY for the native
+        chip: ``applied is None`` is an exact, unambiguous read (see
+        ``_chip_is_applied``). A wrapper chip's "applied" is a heuristic —
+        matched by PROVIDER NAME only, because that is all a config file
+        records — so two installed wrappers sharing a provider (different
+        model/profile/token/base-url) are indistinguishable there and the
+        first one is reported applied even when the SECOND is the one
+        actually live. Short-circuiting Enter on that heuristic would make
+        the second wrapper permanently unreachable through the chipset — the
+        exact distinction it exists to expose — so a wrapper chip always
+        re-applies; the backend's own apply path already no-ops safely when
+        the resolved config truly hasn't changed.
+        """
         chips = self._chips.get(agent_name, [])
         if not chips:
             return
         chip = chips[min(self._chip_index.get(agent_name, 0), len(chips) - 1)]
-        if self._chip_is_applied(agent_name, chip):
-            self._notify(f"{agent_name} is already on {self._chip_name(chip)}.")
-            return
         backend = _AGENT_BACKENDS[agent_name]
         if chip == _NATIVE_CHIP:
+            if self._chip_is_applied(agent_name, chip):
+                self._notify(f"{agent_name} is already on {self._chip_name(chip)}.")
+                return
             getattr(self, backend.apply_native)()
         else:
             getattr(self, backend.apply_wrapper)(chip)

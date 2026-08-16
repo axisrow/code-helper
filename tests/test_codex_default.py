@@ -994,6 +994,35 @@ def test_clear_default_removes_only_the_managed_region(tmp_path):
 
 
 @pytest.mark.unit
+def test_clear_default_does_not_erase_an_unrecognized_providers_model_config(tmp_path):
+    # Regression: clear_default() looks up current_default(paths) only to
+    # find a REGISTRY provider name for the [model_providers.<name>] table
+    # to drop — but clear_config_toml() removes the `model`/`model_provider`/
+    # `model_catalog_json` top-level keys UNCONDITIONALLY, regardless of
+    # whether current_default() recognized the provider. A user who
+    # hand-configured `model_provider = "mine"` (not in code-helper's
+    # PROVIDERS registry) gets those keys silently deleted by `native`
+    # anyway, even though code-helper never wrote them and current_default()
+    # itself reports None (nothing of ours is applied).
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        _FOREIGN_CONFIG.replace('model_provider = "ollama"', 'model_provider = "mine"'),
+        encoding="utf-8",
+    )
+
+    assert current_default(paths) is None  # "mine" is not a registry provider
+
+    clear_default(paths, force=True)
+
+    result = config.read_text(encoding="utf-8")
+    assert 'model_provider = "mine"' in result
+    assert 'model = "glm-5.2:cloud"' in result
+    assert "model_catalog_json" in result
+
+
+@pytest.mark.unit
 def test_clear_default_is_a_no_op_when_nothing_is_applied(tmp_path):
     paths = Paths.from_home(tmp_path)
     assert clear_default(paths, force=True) is False

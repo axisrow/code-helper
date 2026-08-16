@@ -632,10 +632,16 @@ def clear_config_toml(original: str, provider_table: str | None) -> str:
     hand-maintained file and only the region this tool wrote is ours to take
     back.
 
-    ``provider_table`` is ``None`` when no managed provider is currently
-    applied; the top-level keys are still removed, since they are managed
-    regardless of which table they pointed at.
+    ``provider_table`` is ``None`` when ``model_provider`` names a provider
+    NOT in this tool's registry (see :func:`current_default`) — i.e. this
+    file's ``model``/``model_provider``/``model_catalog_json`` were not
+    necessarily ever written by ``set-default``. Removing them anyway would
+    be exactly the kind of foreign-config damage this function's own
+    docstring promises never to do, so ``None`` here means "not proven
+    ours" and the top-level keys are left untouched too, not just the table.
     """
+    if not provider_table:
+        return original
     text = original
     for key in _TOP_LEVEL_KEYS:
         # Consume the trailing newline with the line so removal does not

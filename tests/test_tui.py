@@ -1352,6 +1352,60 @@ def test_chip_cursor_is_independent_per_agent(monkeypatch):
 
 
 @pytest.mark.integration
+def test_enter_applies_the_second_wrapper_sharing_a_provider_with_the_first(
+    monkeypatch,
+):
+    """Regression: `_chip_is_applied` matches a wrapper chip by PROVIDER NAME
+    only (a config file records only the provider), so two installed
+    wrappers on the same provider are visually indistinguishable and the
+    first one reads as "applied". Enter used to short-circuit on that
+    heuristic for EVERY chip, making the second wrapper permanently
+    unreachable through the chipset. Only the native chip's applied read is
+    exact (`applied is None`) and still short-circuits; a wrapper chip must
+    always re-apply."""
+    from code_helper.services.spec import build_spec
+    from code_helper.services.wrappers import install_wrapper
+
+    install_wrapper(Paths.default(), "glm", token="test-token")
+    second = build_spec(
+        agent="claude", provider="zai", model="glm-5.2-air", alias="glm-air"
+    )
+    install_wrapper(Paths.default(), second, token="test-token-2")
+
+    import dataclasses
+
+    import code_helper.cli.tui as tui
+
+    # Pretend "glm" (the first zai wrapper) is the one currently live —
+    # _chip_is_applied will then also report "glm-air" as applied, since
+    # both share provider "zai". `_AGENT_BACKENDS` is built once at import
+    # time (`_register_agent_backends`) and captures `current_switch` as a
+    # bound function value there, so patching the source module after import
+    # would not reach it; `_AgentBackend` is frozen, so replace the whole
+    # entry rather than mutating a field.
+    monkeypatch.setitem(
+        tui._AGENT_BACKENDS,
+        "claude",
+        dataclasses.replace(
+            tui._AGENT_BACKENDS["claude"], read_applied=lambda paths: "zai"
+        ),
+    )
+
+    seen = []
+    monkeypatch.setattr(
+        tui.TuiSession,
+        "_apply_switch_wrapper",
+        lambda self, spec: seen.append(spec.name),
+    )
+    # RIGHT twice from native: native -> glm -> glm-air (order follows
+    # _all_wrapper_specs, alphabetical by alias: glm, glm-air).
+    _real_menu_keys(monkeypatch, ["RIGHT", "RIGHT", "ENTER", "CANCEL"])
+    assert main(["tui"]) == 0
+
+    assert seen == ["glm-air"]
+
+
+@pytest.mark.integration
 def test_left_right_are_a_no_op_on_a_wrapper_row(monkeypatch):
     """The chip cursor belongs to agent rows; on a wrapper row the keys do
     nothing rather than moving some other row's cursor."""
