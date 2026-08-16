@@ -391,7 +391,12 @@ def _credential_values(parsed: dict) -> set[str]:
 
 
 def _redacted_preview(
-    original: str, patched: str, token: str, *, original_parsed: dict, patched_parsed: dict
+    original: str,
+    patched: str,
+    token: str,
+    *,
+    original_parsed: dict,
+    patched_parsed: dict,
 ) -> str:
     """:func:`diff_preview` with every credential value replaced everywhere.
 
@@ -509,7 +514,11 @@ def apply_switch(
         return False
 
     preview = _redacted_preview(
-        original_text, patched_text, token, original_parsed=original, patched_parsed=patched
+        original_text,
+        patched_text,
+        token,
+        original_parsed=original,
+        patched_parsed=patched,
     )
 
     if dry_run:

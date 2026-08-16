@@ -448,7 +448,9 @@ def test_apply_switch_dry_run_redacts_the_previous_token_too(tmp_path, capsys):
     paths = Paths.from_home(tmp_path)
     litellm = with_base_url(LITELLM, "https://litellm.example.com/v1")
     old_patch = resolve_switch_patch(
-        litellm, tier_models=TierModels.uniform("glm-5.2"), token="sk-OLD-litellm-secret"
+        litellm,
+        tier_models=TierModels.uniform("glm-5.2"),
+        token="sk-OLD-litellm-secret",
     )
     _write(paths, {"env": dict(old_patch.env)})
 
