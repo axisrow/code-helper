@@ -21,6 +21,7 @@ _ADD = "add"
 _SETTINGS = "settings"
 _PROFILE = "profile"
 _SET_DEFAULT = "set-default"
+_SWITCH = "switch"
 _HELP = "help"
 _QUIT = "quit"
 _BACK = "__back__"
@@ -93,7 +94,7 @@ class TuiSession:
     to pass an argument into a handler any more.
     """
 
-    __slots__ = ("args", "_tab_provider", "_tab_label")
+    __slots__ = ("args", "_tab_provider", "_tab_label", "_live_switch")
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -104,6 +105,12 @@ class TuiSession:
         # and again by `_on_tab` the moment Tab changes the selection.
         self._tab_provider: str | None = None
         self._tab_label: str = ""
+        # Same reasoning as `_tab_provider` above: `current_switch` reads and
+        # JSON-parses settings.json, and `_main_prompt` is a callable
+        # re-evaluated on every redraw frame (including pure cursor
+        # movement) — so this is refreshed once per main-loop iteration
+        # instead of once per frame. See `_refresh_active_label`.
+        self._live_switch: str | None = None
 
     # --- UI primitives ---------------------------------------------------
 
@@ -506,13 +513,109 @@ class TuiSession:
             ),
         )
 
+    def _run_switch(self, paths) -> None:
+        """Live-patch ``~/.claude/settings.json`` — the ``w`` screen.
+
+        Distinct from Enter-on-a-wrapper-row (which sets the PERSISTED
+        default for the next launch): this changes an ALREADY RUNNING
+        ``claude``'s backend on its next prompt. Deliberately not merged
+        onto Enter — a single keypress that both records a preference and
+        live-rewrites Claude Code's global config would be a nasty surprise.
+
+        Rows: every installed ``anthropic-env`` claude wrapper (``switch
+        --from-wrapper``, zero prompts), then ``native`` (clears the
+        override). The currently-live entry, if any, carries the same ``●``
+        marker the default-wrapper column uses.
+        """
+        from code_helper.cli.parser import _handle_switch
+        from code_helper.cli.requests import SwitchRequest
+        from code_helper.services.model import ConfigShape, get_agent, get_provider
+        from code_helper.services.wrappers import is_installed
+
+        claude_wrappers = [
+            (spec.name, spec)
+            for spec in self._all_wrapper_specs()
+            if spec.agent.name == get_agent("claude").name
+            and spec.shape is ConfigShape.ANTHROPIC_ENV
+            and is_installed(paths, spec.name)
+        ]
+
+        # `_refresh_active_label` (run() calls it right before this screen is
+        # reachable) already read this from settings.json this iteration —
+        # reuse it instead of a second file read + JSON parse.
+        live = self._live_switch
+        items: list[tuple[str, str]] = [
+            (
+                f"wrapper:{name}",
+                f"{'● ' if spec.provider.name == live else '  '}{name} "
+                f"— {spec.provider.name}",
+            )
+            for name, spec in claude_wrappers
+        ]
+        native = get_provider("native")
+        items.append(
+            (
+                "provider:native",
+                f"{'● ' if live is None else '  '}native — {native.description}",
+            )
+        )
+        items.append((_BACK, "Back"))
+
+        choice = self._pick(items, "Switch the running claude's backend to:")
+        if choice == _BACK:
+            return
+
+        def switch_request(*, provider=None, from_wrapper=None) -> SwitchRequest:
+            # Both rows below only ever vary `provider`/`from_wrapper` — every
+            # other axis is meaningless from this screen (no model/token
+            # prompts, no restore) — so the 14 shared fields are filled once
+            # here instead of twice, keeping the two call sites from drifting
+            # apart if `SwitchRequest` grows another field later.
+            return SwitchRequest(
+                provider=provider,
+                from_wrapper=from_wrapper,
+                model=None,
+                haiku=None,
+                sonnet=None,
+                opus=None,
+                subagent_model=None,
+                base_url=None,
+                auth=None,
+                profile=None,
+                restore=False,
+                slot=None,
+                status=False,
+                dry_run=getattr(self.args, "dry_run", False),
+                force=False,
+                debug=getattr(self.args, "debug", False),
+            )
+
+        if choice == "provider:native":
+            self._run(_handle_switch, switch_request(provider="native"))
+            return
+
+        alias = choice.removeprefix("wrapper:")
+        self._run(_handle_switch, switch_request(from_wrapper=alias))
+
     def _add_provider_choices(self):
-        """Return provider menu rows and their runtime-auth choices."""
-        from code_helper.services.model import PROVIDERS, AuthPolicy
+        """Return provider menu rows and their runtime-auth choices.
+
+        Filtered to ``compatible_providers(claude)`` — NOT raw ``PROVIDERS``
+        — so a switch-only entry (``native``: presents only
+        ``ANTHROPIC_SETTINGS``, which no ``Agent`` consumes) never appears as
+        an ``add`` choice. ``add`` always builds a claude wrapper here, so
+        this is equivalent to what `resolve_shape` would accept, computed
+        without actually calling it.
+        """
+        from code_helper.services.model import (
+            AuthPolicy,
+            compatible_providers,
+            get_agent,
+        )
 
         items: list[tuple[str, str]] = []
         choices = {}
-        for provider in PROVIDERS:
+        for provider in compatible_providers(get_agent("claude")):
             items.append((provider.name, f"{provider.name} — {provider.description}"))
             choices[provider.name] = (provider, False)
             if (
@@ -843,21 +946,43 @@ class TuiSession:
 
     def _refresh_active_label(self) -> None:
         """Resolve the active provider and its rendered label, once."""
+        from code_helper.services.claude_settings import current_switch
+        from code_helper.services.paths import Paths
+
         self._tab_provider = self._resolve_tab_provider()
         self._tab_label = self._active_label(self._tab_provider)
+        # Read once per main-loop iteration, not once per redraw frame —
+        # `_main_prompt` (a callable re-evaluated on every keypress,
+        # including pure cursor movement) reads `self._live_switch` instead
+        # of re-deriving it; see `__init__`'s comment on `_live_switch`.
+        self._live_switch = current_switch(Paths.default())
+
+    def _live_switch_label(self) -> str:
+        """``"Live: zai"`` / ``"Live: native"`` for the header row.
+
+        Reads the cache ``_refresh_active_label`` fills once per main-loop
+        iteration — not the file itself: this is called from ``_main_prompt``,
+        a callable re-evaluated on every redraw frame (including pure cursor
+        movement), so re-reading and re-parsing settings.json there would
+        mean doing that I/O on every keystroke rather than once per screen.
+        """
+        live = self._live_switch
+        return f"Live: {live}" if live else "Live: native"
 
     def _main_prompt(self) -> str:
         """Live main-menu header, showing the active provider/profile."""
-        return (
-            f"code-helper{' ' * 37}{self._tab_label}"
-            if self._tab_label
-            else "code-helper"
-        )
+        live_label = self._live_switch_label()
+        if self._tab_label:
+            return f"code-helper{' ' * 20}{live_label}{' ' * 8}{self._tab_label}"
+        return f"code-helper{' ' * 28}{live_label}"
 
     def _show_help(self) -> None:
         from code_helper.cli.menu import press_any_key
 
-        print("a add · e edit · d delete · t token · c codex default · s settings")
+        print(
+            "a add · e edit · d delete · t token · c codex default · w switch live "
+            "· s settings"
+        )
         print("Tab/1-0 profile · Enter default · Esc back · Ctrl-C quit")
         press_any_key("Press any key to continue...")
 
@@ -880,6 +1005,7 @@ class TuiSession:
                 keys = {
                     "a": lambda _alias: _ADD,
                     "c": lambda _alias: _SET_DEFAULT,
+                    "w": lambda _alias: _SWITCH,
                     "s": lambda _alias: _SETTINGS,
                     "?": lambda _alias: _HELP,
                     "TOKEN": lambda alias: f"token:{alias}",
@@ -910,6 +1036,8 @@ class TuiSession:
                     self._run_profile_screen()
                 elif choice == _SET_DEFAULT:
                     self._run_set_default(paths)
+                elif choice == _SWITCH:
+                    self._run_switch(paths)
                 elif choice == _SETTINGS:
                     self._run_settings()
                 elif choice == _HELP:

@@ -65,6 +65,7 @@ __all__ = [
     "get_provider",
     "resolve_shape",
     "compatible_providers",
+    "switchable_providers",
     "with_base_url",
     "with_auth",
 ]
@@ -102,6 +103,24 @@ class ConfigShape(StrEnum):
     #: distinct from "incompatible", a different, honest error.
     OPENAI_TOML = "openai-toml"
 
+    #: Patches the ``env`` block of Claude Code's OWN ``~/.claude/settings.json``
+    #: in place (``services/claude_settings.py``, the ``switch`` command) —
+    #: instead of generating a wrapper script, it changes what an ALREADY
+    #: RUNNING ``claude`` process does on its next prompt, because Claude Code
+    #: re-reads that file between prompts.
+    #:
+    #: Deliberately declared by no :class:`Agent`: this is not a mechanism an
+    #: agent is launched *through* (the thing ``ConfigShape`` otherwise always
+    #: means) — it is consumed by an agent re-reading its own settings file
+    #: while already running. Keeping it off every ``Agent.shapes`` is what
+    #: guarantees, structurally rather than by ``_SHAPE_PRIORITY`` ordering,
+    #: that ``resolve_shape``/``compatible_providers``/wrapper generation are
+    #: unaffected by this shape's existence — see
+    #: ``test_anthropic_settings_shape_on_no_agent``. Compatibility for the
+    #: ``switch`` command is instead computed by the sibling resolver
+    #: ``claude_settings.switchable_providers``.
+    ANTHROPIC_SETTINGS = "anthropic-settings"
+
 
 class ModelListAPI(StrEnum):
     """Which HTTP shape lists a provider's models (see ``services/models_api``)."""
@@ -124,6 +143,12 @@ _SHAPE_PRIORITY: tuple[ConfigShape, ...] = (
     ConfigShape.ANTHROPIC_ENV,
     ConfigShape.OPENAI_TOML,
     ConfigShape.OLLAMA_LAUNCH,
+    # Last, and inert in practice: no Agent declares ANTHROPIC_SETTINGS (see
+    # its docstring), so `common` can never contain it and this priority slot
+    # is never actually consulted by resolve_shape. Listed anyway so the
+    # "unreachable" guard at the end of resolve_shape stays honest — every
+    # ConfigShape member has a priority entry, none silently unprioritised.
+    ConfigShape.ANTHROPIC_SETTINGS,
 )
 
 #: An agent's binary name is interpolated into a generated script UNQUOTED (see
@@ -242,6 +267,23 @@ class Provider:
     model_list_url: str = ""
     #: For :attr:`ConfigShape.OPENAI_TOML`: ``"responses"`` or ``"chat"``.
     wire_api: str = ""
+    #: This provider is the agent's NATIVE backend: "switching to it" means
+    #: REMOVING every managed key from the target config, restoring whatever
+    #: the agent does with no redirection at all (for ``claude``: OAuth +
+    #: native models). Declared, not inferred from an empty ``base_url`` +
+    #: ``auth="none"`` — that combination is also what an unresolved
+    #: ``BaseUrlPolicy.REQUIRED`` provider looks like before ``with_base_url``
+    #: runs, and a reader (or ``claude_settings.resolve_switch_patch``) must
+    #: be able to tell "deliberately no address" from "not yet resolved" from
+    #: the registry alone. Enforced by ``_validate_provider``: ``env_reset``
+    #: implies an empty ``base_url`` (policy FIXED), ``auth="none"``, an empty
+    #: ``token_env_var``, and ``model_list_api is NONE`` — a reset provider
+    #: that carried an address or a credential would be a contradiction in
+    #: terms. Mirrors how ``BaseUrlPolicy``/``AuthPolicy`` already turn a
+    #: provider axis into declared data instead of a name check: the only
+    #: reader of this field branches on ``provider.env_reset``, never on
+    #: ``provider.name == "anthropic"``.
+    env_reset: bool = False
     description: str = ""
 
 
@@ -279,6 +321,9 @@ PROVIDERS: tuple[Provider, ...] = (
                 ConfigShape.ANTHROPIC_ENV,
                 ConfigShape.OLLAMA_LAUNCH,
                 ConfigShape.OPENAI_TOML,
+                # Lets `switch --from-wrapper` retarget a live claude session
+                # at this same daemon — see ConfigShape.ANTHROPIC_SETTINGS.
+                ConfigShape.ANTHROPIC_SETTINGS,
             }
         ),
         base_url="http://127.0.0.1:11434",
@@ -299,7 +344,7 @@ PROVIDERS: tuple[Provider, ...] = (
     ),
     Provider(
         name="zai",
-        shapes=frozenset({ConfigShape.ANTHROPIC_ENV}),
+        shapes=frozenset({ConfigShape.ANTHROPIC_ENV, ConfigShape.ANTHROPIC_SETTINGS}),
         base_url="https://api.z.ai/api/anthropic",
         auth="secret",
         token_env_var="ZAI_API_KEY",
@@ -315,7 +360,13 @@ PROVIDERS: tuple[Provider, ...] = (
         # (ANTHROPIC_ENV > OPENAI_TOML) resolves `claude × litellm` to the
         # direct env shape and `codex × litellm` to the TOML profile, with no
         # special-case code needed for either.
-        shapes=frozenset({ConfigShape.ANTHROPIC_ENV, ConfigShape.OPENAI_TOML}),
+        shapes=frozenset(
+            {
+                ConfigShape.ANTHROPIC_ENV,
+                ConfigShape.OPENAI_TOML,
+                ConfigShape.ANTHROPIC_SETTINGS,
+            }
+        ),
         # REQUIRED, not FIXED: this is the user's own server, not an address
         # this project could ship a default for. base_url is supplied at
         # runtime (--base-url / a TUI prompt) via model.with_base_url — see
@@ -330,6 +381,26 @@ PROVIDERS: tuple[Provider, ...] = (
         # proxied uniformly for every provider it fronts.
         wire_api="chat",
         description="LiteLLM proxy (user-supplied base URL)",
+    ),
+    Provider(
+        name="native",
+        # "native", not "anthropic": this entry does not represent a backend
+        # (an address to send requests to) — it represents the ABSENCE of
+        # one. `env_reset=True` is what that means: switching to it CLEARS
+        # the override rather than pointing at anything. The name says so
+        # honestly, rather than implying "Anthropic" is one more provider
+        # among equals with its own endpoint.
+        #
+        # Only the switch-only mechanism — see ConfigShape.ANTHROPIC_SETTINGS.
+        # `resolve_shape(claude, native)` therefore always raises "no common
+        # configuration mechanism": this is correct, not a gap — a wrapper
+        # cannot mean "be normal claude", that is just `claude` with no
+        # wrapper at all. `code-helper add`/`list matrix` show it as
+        # switch-only rather than a usable pairing (see cli/parser.py's
+        # `_handle_list_axes`).
+        shapes=frozenset({ConfigShape.ANTHROPIC_SETTINGS}),
+        env_reset=True,
+        description="native — clears the override, restores OAuth + stock models",
     ),
 )
 
@@ -414,13 +485,43 @@ def _validate_provider(provider: Provider) -> None:
             f"also carries a registry base_url {provider.base_url!r} — the "
             f"runtime value passed to with_base_url would silently overwrite it"
         )
-    if provider.base_url_policy is not BaseUrlPolicy.REQUIRED and not provider.base_url:
+    # env_reset is exempt from this FIXED/OVERRIDABLE-must-carry-a-base_url
+    # rule: it is checked, more specifically, by the env_reset block below —
+    # an env_reset provider is SUPPOSED to have no base_url at all.
+    if (
+        not provider.env_reset
+        and provider.base_url_policy is not BaseUrlPolicy.REQUIRED
+        and not provider.base_url
+    ):
         raise CodeHelperError(
             f"provider {provider.name!r} declares base_url_policy="
             f"{provider.base_url_policy.value!r} but has no registry base_url "
             f"— FIXED has no other source, and an OVERRIDABLE default cannot "
             f"be empty (that is what REQUIRED is for)"
         )
+    # An env_reset provider is declared "no address, no credential" ON
+    # PURPOSE — that is the whole meaning of "switching to it clears the
+    # override". If it carried any of these, claude_settings.resolve_switch_patch
+    # would have something to write, contradicting env_reset's own contract.
+    if provider.env_reset:
+        prefix = f"provider {provider.name!r} declares env_reset=True but also "
+        if provider.base_url or provider.base_url_policy is not BaseUrlPolicy.FIXED:
+            raise CodeHelperError(
+                f"{prefix}a base_url {provider.base_url!r} / policy "
+                f"{provider.base_url_policy.value!r} — a reset provider must "
+                f"have no address at all"
+            )
+        if provider.auth != "none" or provider.token_env_var:
+            raise CodeHelperError(
+                f"{prefix}auth={provider.auth!r}/token_env_var="
+                f"{provider.token_env_var!r} — a reset provider must carry no "
+                f"credential"
+            )
+        if provider.model_list_api is not ModelListAPI.NONE:
+            raise CodeHelperError(
+                f"{prefix}model_list_api={provider.model_list_api.value!r} — "
+                f"a reset provider has no endpoint to list models from"
+            )
 
 
 def _validate_registries() -> None:
@@ -536,6 +637,19 @@ def compatible_providers(agent: Agent) -> list[Provider]:
     combination that would only fail later.
     """
     return [p for p in PROVIDERS if p.shapes & agent.shapes]
+
+
+def switchable_providers() -> list[Provider]:
+    """Providers reachable by ``switch`` — the ANTHROPIC_SETTINGS mechanism.
+
+    The ``switch`` analogue of :func:`compatible_providers`. Deliberately NOT
+    routed through :func:`resolve_shape`: that function answers "can a
+    wrapper be generated", and ``ANTHROPIC_SETTINGS`` is on no ``Agent``, so
+    the intersection there is empty by construction (see the shape's
+    docstring). Keeping the two resolvers separate is what guarantees adding
+    this shape cannot perturb wrapper generation.
+    """
+    return [p for p in PROVIDERS if ConfigShape.ANTHROPIC_SETTINGS in p.shapes]
 
 
 def with_base_url(provider: Provider, base_url: str | None) -> Provider:

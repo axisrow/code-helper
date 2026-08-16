@@ -30,7 +30,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-__all__ = ["atomic_write", "read_text_or_none", "remove_file"]
+__all__ = ["atomic_write", "read_text_or_none", "remove_file", "rotate_backups"]
 
 
 def remove_file(path: str | Path) -> None:
@@ -147,6 +147,38 @@ def atomic_write(path: str | Path, data: bytes | str, mode: int | None = None) -
         # mode=None over an existing file → restore its prior mode (the temp's
         # mode would otherwise stick).
         os.chmod(str(dest), prior_mode)
+
+
+def rotate_backups(slots: tuple[Path, Path, Path], *, current: str) -> None:
+    """FIFO-rotate 3 backup slots, then archive ``current`` into slot 1.
+
+    2->3 (oldest lost), 1->2, current->1. Runs via :func:`atomic_write` for
+    every slot so the crash-safety guarantee is uniform across the whole
+    rotation, not just the final write. A slot that doesn't exist is simply
+    skipped (no error) — the ring degrades gracefully on a fresh install.
+    Takes the three slot paths directly (not a ``Paths`` + accessor name) so
+    the SAME rotation logic serves every backup ring this project has: Codex's
+    ``config.toml``, its model catalog, and Claude's ``settings.json``
+    (``services/codex_default.py``, ``services/claude_settings.py``) — each
+    just resolves its own three ``Path``s and calls this.
+
+    ``current`` is passed in by the caller (the same text it already read and
+    diffed/confirmed against) rather than re-read from disk here: re-reading
+    would both waste an I/O round-trip and open a TOCTOU gap — on a real
+    interactive confirm, the file on disk could have changed between the
+    earlier read and this call, and archiving that different, unreviewed
+    content into slot 1 while writing the patched version (derived from the
+    ORIGINAL read) would silently discard whatever changed in between.
+    """
+    slot3, slot2, slot1 = slots
+    body2 = read_text_or_none(slot2)
+    if body2 is not None:
+        atomic_write(slot3, body2, mode=None)
+    body1 = read_text_or_none(slot1)
+    if body1 is not None:
+        atomic_write(slot2, body1, mode=None)
+
+    atomic_write(slot1, current, mode=None)
 
 
 def read_text_or_none(path: str | Path) -> str | None:

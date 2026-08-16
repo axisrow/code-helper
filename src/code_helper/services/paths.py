@@ -54,6 +54,12 @@ class Paths:
     #: truth: a token is baked into each generated script (``0o700``), and
     #: deleting this dir does not break any installed wrapper.
     config_dir: Path
+    #: ``~/.claude`` — Claude Code's own config dir. This tool never owns any
+    #: file here; the ONLY file it touches is ``settings.json``, and only via
+    #: the ``switch`` command's in-place patch of the ``env`` block
+    #: (``services/claude_settings.py``) — never a replacement. Mirrors
+    #: ``codex_dir``'s "we patch, we never own" contract exactly.
+    claude_dir: Path
 
     @classmethod
     def from_home(cls, home: str | Path) -> Paths:
@@ -71,6 +77,8 @@ class Paths:
           OPENAI_TOML shape writes profile files here.
         - ``config_dir`` = ``home / ".config" / "code-helper"`` — this tool's
           own config dir (``credentials.json``).
+        - ``claude_dir`` = ``home / ".claude"`` — Claude Code's config dir;
+          the ``switch`` command patches ``settings.json`` here.
 
         ``XDG_CONFIG_HOME`` is intentionally NOT consulted: this method is
         documented as PURE path arithmetic off ``home`` (no IO, no env), and
@@ -82,6 +90,7 @@ class Paths:
             bin_dir=h / ".local" / "bin",
             codex_dir=h / ".codex",
             config_dir=h / ".config" / "code-helper",
+            claude_dir=h / ".claude",
         )
 
     @classmethod
@@ -187,6 +196,30 @@ class Paths:
         if slot not in (1, 2, 3):
             raise CodeHelperError(f"invalid backup slot (must be 1, 2, or 3): {slot!r}")
         return self.codex_dir / f"config.toml.bak{slot}"
+
+    def claude_settings(self) -> Path:
+        """``~/.claude/settings.json`` — Claude Code's OWN global settings.
+
+        Distinct from every other file this project generates: this tool
+        never creates or owns it wholesale, only patches its ``env`` block in
+        place (never a replacement) via ``services/claude_settings.py``'s
+        ``switch`` command — same relationship ``codex_main_config`` has to
+        ``~/.codex/config.toml``. Pure arithmetic, no IO, no existence check —
+        same contract as every other accessor here.
+        """
+        return self.claude_dir / "settings.json"
+
+    def claude_settings_backup(self, slot: int) -> Path:
+        """``~/.claude/settings.json.bak<slot>`` — one of three rotating backups.
+
+        ``slot`` must be 1, 2, or 3 (1 = most recent). ``switch`` rotates
+        these FIFO-style before every real patch: 2→3 (oldest lost), 1→2,
+        current file→1 — identical ring semantics to
+        ``codex_main_config_backup``.
+        """
+        if slot not in (1, 2, 3):
+            raise CodeHelperError(f"invalid backup slot (must be 1, 2, or 3): {slot!r}")
+        return self.claude_dir / f"settings.json.bak{slot}"
 
     def credentials_file(self) -> Path:
         """``~/.config/code-helper/credentials.json`` — the cached token store.

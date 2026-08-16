@@ -45,11 +45,13 @@ from code_helper.cli.requests import (
     EditTokenRequest,
     RemoveRequest,
     SetDefaultRequest,
+    SwitchRequest,
 )
 from code_helper.errors import CodeHelperError
 
 # Modules, not names — see this module's docstring on late binding.
-from code_helper.services import codex_default, models_api, secrets
+from code_helper.services import claude_settings, codex_default, models_api, secrets
+from code_helper.services.claude_settings import current_switch
 from code_helper.services.codex_default import restore_default
 from code_helper.services.model import (
     AGENTS,
@@ -97,6 +99,7 @@ from code_helper.services.wrappers import (
     list_wrappers,
     remove_wrapper,
     spec_from_installed,
+    token_from_installed,
 )
 
 
@@ -117,7 +120,17 @@ def _handle_list_axes(what: str) -> int:
     if what == "providers":
         for provider in PROVIDERS:
             shapes = ", ".join(sorted(s.value for s in provider.shapes))
-            print(f"{provider.name:10} {provider.description:24} [{shapes}]")
+            # A provider whose ONLY shape is ANTHROPIC_SETTINGS can never
+            # back a generated wrapper (no Agent declares that shape — see
+            # ConfigShape.ANTHROPIC_SETTINGS) — every `add`/`matrix` cell for
+            # it is a blank "—" by design, which reads as a bug without this
+            # label. Data-driven off provider.shapes, not provider.name.
+            tag = (
+                " (switch-only)"
+                if provider.shapes == {ConfigShape.ANTHROPIC_SETTINGS}
+                else ""
+            )
+            print(f"{provider.name:10} {provider.description:24} [{shapes}]{tag}")
         return 0
 
     # Resolve every cell first: the column has to be as wide as the widest
@@ -210,16 +223,20 @@ def _confirm_overwrite(path) -> bool:
 
 
 def _confirm_set_default(path, preview: str) -> bool:
-    """Ask before ``set-default`` patches/restores a real file — TTY-gated.
+    """Ask before patching/restoring a real foreign config file — TTY-gated.
 
-    Deliberately NOT :func:`_confirm_overwrite`: that prompt's wording ("was
-    not created by code-helper") is misleading here — ``set-default``'s target
-    is ALWAYS foreign by definition (Codex's own config), so that phrasing
-    would fire on every single successful use rather than flag anything
-    unusual. This prompt instead shows the diff/preview so the user can see
-    exactly what is about to change before confirming. Same off-a-TTY
-    fail-fast contract as ``_confirm_overwrite`` (no stdin read, so a scripted
-    run without ``--force`` fails immediately with the hint, never hangs).
+    Shared by both ``set-default`` (Codex's ``config.toml``) and ``switch``
+    (Claude's ``settings.json``) — same target-is-foreign-by-definition
+    situation, same diff-first prompt. Deliberately NOT :func:`_confirm_overwrite`:
+    that prompt's wording ("was not created by code-helper") is misleading
+    here — the target is ALWAYS foreign by definition, so that phrasing would
+    fire on every single successful use rather than flag anything unusual.
+    This prompt instead shows the diff/preview so the user can see exactly
+    what is about to change before confirming. Same off-a-TTY fail-fast
+    contract as ``_confirm_overwrite`` (no stdin read, so a scripted run
+    without ``--force`` fails immediately with the hint, never hangs). For
+    ``switch``, ``preview`` has already had any token value redacted by
+    ``claude_settings._redacted_preview`` before it reaches this function.
     """
     if not sys.stdin.isatty():
         return False
@@ -871,6 +888,194 @@ def _handle_set_default(args: argparse.Namespace | SetDefaultRequest) -> int:
     return 0
 
 
+def _switch_resolve_token(provider, req: SwitchRequest, paths) -> str:
+    """The token for a `switch --provider ...` (explicit-axes) invocation.
+
+    Mirrors ``_add_resolve_token`` exactly, but works off a bare
+    :class:`~code_helper.services.model.Provider` rather than a
+    :class:`~code_helper.services.spec.WrapperSpec` — `switch` never builds
+    one (see ``_handle_switch``'s docstring on why). An `env_reset` provider
+    never reaches this: :func:`_handle_switch` returns before calling it.
+    """
+    if provider.auth != "secret":
+        return provider.auth_value
+    resolved = secrets.resolve_token(
+        env_var=provider.token_env_var,
+        prompt=f"{provider.name} token ({provider.token_env_var}): ",
+        paths=paths,
+        provider_name=provider.name,
+        profile_name=req.profile,
+        base_url_policy=provider.base_url_policy,
+    )
+    return resolved.value
+
+
+def _switch_axes_from_wrapper(req: SwitchRequest, paths):
+    """Resolve ``(provider, tier_models, token, subagent_model)`` from an
+    already-installed wrapper — the ``--from-wrapper`` fast path.
+
+    Guaranteed to reach the SAME backend that wrapper's own script would:
+    ``tier_models``/``base_url`` are recovered from the rendered body
+    (``wrappers.spec_from_installed``) and the token from the same file
+    (``wrappers.token_from_installed``) — zero prompts, zero re-derivation.
+
+    Raises:
+        CodeHelperError: no wrapper by that name, or it is not an
+            ``anthropic-env`` wrapper (an ``ollama-launch``/``openai-toml``
+            wrapper carries no tier models to lift — `switch` only ever
+            drives the ANTHROPIC_SETTINGS mechanism).
+    """
+    if not req.from_wrapper:
+        raise CodeHelperError(
+            "internal error: _switch_axes_from_wrapper called with no "
+            "--from-wrapper name"
+        )  # pragma: no cover — _handle_switch only calls this when truthy
+    name: str = req.from_wrapper
+    spec = spec_from_installed(paths, name)
+    if spec is None:
+        raise CodeHelperError(
+            f"no installed wrapper named {name!r} — see `code-helper list`"
+        )
+    if spec.shape is not ConfigShape.ANTHROPIC_ENV:
+        raise CodeHelperError(
+            f"wrapper {name!r} is a {spec.shape.value} wrapper — "
+            f"`switch --from-wrapper` needs an anthropic-env one (see "
+            f"`code-helper list`)"
+        )
+    token = ""
+    if spec.auth == "secret":
+        token = token_from_installed(paths, name, spec.provider.name) or ""
+        if not token:
+            raise CodeHelperError(
+                f"could not recover a token from wrapper {name!r} "
+                f"— re-install it or use --provider/--model instead"
+            )
+    elif spec.auth == "literal":
+        token = spec.auth_value
+    return spec.provider, spec.tier_models, token, spec.subagent_model
+
+
+def _switch_axes_from_flags(req: SwitchRequest, paths):
+    """Resolve ``(provider, tier_models, token, subagent_model)`` from the
+    explicit ``--provider``/``--model``/``--haiku``/... flags."""
+    from code_helper.services.spec import TierModels
+
+    provider_name = req.provider
+    if provider_name is None:
+        raise CodeHelperError(
+            "give a provider — `switch <provider>`, `switch --provider P "
+            "--model M`, or `switch --from-wrapper NAME`"
+        )
+    provider = with_auth(
+        with_base_url(get_provider(provider_name), req.base_url), req.auth == "secret"
+    )
+
+    if provider.env_reset:
+        return provider, None, "", None
+
+    if req.haiku or req.sonnet or req.opus:
+        if not (req.haiku and req.sonnet and req.opus):
+            raise CodeHelperError(
+                "--haiku/--sonnet/--opus must be given together (or use "
+                "--model for all three)"
+            )
+        tier_models = TierModels(haiku=req.haiku, sonnet=req.sonnet, opus=req.opus)
+    elif req.model:
+        tier_models = TierModels.uniform(req.model)
+    else:
+        raise CodeHelperError(
+            "a model is required — pass --model, or --haiku/--sonnet/--opus, "
+            "or --from-wrapper"
+        )
+
+    token = _switch_resolve_token(provider, req, paths)
+    return provider, tier_models, token, req.subagent_model
+
+
+def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
+    """Live-patch Claude Code's OWN ``~/.claude/settings.json`` ``env`` block.
+
+    Unlike ``add``/``set-default``, this never builds a ``WrapperSpec`` —
+    ``build_spec`` requires a valid alias and carries install semantics
+    (file name, mode, ownership marker) meaningless for a settings.json
+    patch. It reuses ``TierModels`` (the value type both mechanisms share)
+    directly, via ``claude_settings.apply_switch``.
+
+    Distinct from ``set-default``: that command persists a PREFERENCE
+    (patches Codex's OWN ``~/.codex/config.toml``, applies at Codex's next
+    launch); this command changes what an ALREADY RUNNING ``claude`` does on
+    its NEXT PROMPT — no restart, because Claude Code re-reads
+    ``settings.json`` between prompts. See ``services/claude_settings.py``'s
+    module docstring for the mechanism and its caveats (process-env vs
+    settings.json precedence inside a wrapper session; the token now lives
+    in a typically-``0o644``, often-synced file).
+    """
+    req = (
+        args if isinstance(args, SwitchRequest) else SwitchRequest.from_namespace(args)
+    )
+    paths = Paths.default()
+
+    if req.status:
+        live = current_switch(paths)
+        print(live if live is not None else "native (no override in settings.json)")
+        return 0
+
+    if req.restore and (
+        req.provider
+        or req.from_wrapper
+        or req.model
+        or req.haiku
+        or req.sonnet
+        or req.opus
+        or req.subagent_model
+        or req.base_url
+        or req.auth
+    ):
+        raise CodeHelperError(
+            "--restore cannot be combined with a provider or model flags"
+        )
+    if req.slot is not None and not req.restore:
+        raise CodeHelperError("--slot only applies together with --restore")
+    if req.provider and req.from_wrapper:
+        raise CodeHelperError("give either a provider or --from-wrapper, not both")
+
+    if req.restore:
+        slot = req.slot or 1
+        wrote = claude_settings.restore_settings(
+            paths,
+            slot=slot,
+            dry_run=req.dry_run,
+            force=req.force,
+            confirm=_confirm_set_default,
+        )
+        if not wrote:
+            print("no changes")
+        return 0
+
+    if req.from_wrapper:
+        provider, tier_models, token, subagent_model = _switch_axes_from_wrapper(
+            req, paths
+        )
+    else:
+        provider, tier_models, token, subagent_model = _switch_axes_from_flags(
+            req, paths
+        )
+
+    wrote = claude_settings.apply_switch(
+        paths,
+        provider=provider,
+        tier_models=tier_models,
+        token=token,
+        subagent_model=subagent_model,
+        dry_run=req.dry_run,
+        force=req.force,
+        confirm=_confirm_set_default,
+    )
+    if not wrote:
+        print("no changes")
+    return 0
+
+
 def _handle_tui(args: argparse.Namespace) -> int:
     """``tui`` subcommand (and bare ``code-helper``) → the arrow-key menu.
 
@@ -1098,6 +1303,108 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the confirmation prompt",
     )
     p_set_default.set_defaults(func=_handle_set_default)
+
+    p_switch = subparsers.add_parser(
+        "switch",
+        help="live-patch Claude Code's own ~/.claude/settings.json — changes "
+        "an ALREADY RUNNING claude's backend on its next prompt, no restart "
+        "(distinct from set-default, which persists a preference for the "
+        "NEXT launch)",
+        parents=[sub_flags],
+    )
+    p_switch.add_argument(
+        "provider_positional",
+        metavar="provider",
+        nargs="?",
+        default=None,
+        help="provider to switch to, e.g. zai, or native to clear the "
+        "override (see `code-helper list providers`); sugar for --provider",
+    )
+    # No argparse mutually-exclusive group — same reasoning as set-default's:
+    # the handler validates the combinations explicitly for a clearer error.
+    p_switch.add_argument(
+        "--from-wrapper",
+        default=None,
+        help="lift the model/token straight off an already-installed "
+        "anthropic-env wrapper (e.g. glm) — zero prompts, same backend that "
+        "wrapper's own script reaches",
+    )
+    p_switch.add_argument(
+        "--provider",
+        default=None,
+        help="model backend (see `code-helper list providers`); alternative "
+        "to the positional form",
+    )
+    p_switch.add_argument(
+        "--model",
+        default=None,
+        help="model name for all three tiers (haiku/sonnet/opus)",
+    )
+    p_switch.add_argument(
+        "--haiku",
+        default=None,
+        help="haiku-tier model — must be given together with --sonnet/--opus",
+    )
+    p_switch.add_argument(
+        "--sonnet",
+        default=None,
+        help="sonnet-tier model — must be given together with --haiku/--opus",
+    )
+    p_switch.add_argument(
+        "--opus",
+        default=None,
+        help="opus-tier model — must be given together with --haiku/--sonnet",
+    )
+    p_switch.add_argument(
+        "--subagent-model",
+        default=None,
+        help="CLAUDE_CODE_SUBAGENT_MODEL override (omit to leave it unset)",
+    )
+    p_switch.add_argument(
+        "--base-url",
+        default=None,
+        help="backend URL for a provider with no address in the registry "
+        "(e.g. litellm: http://localhost:4000); a bare host/IP like "
+        "78.47.183.125 is auto-completed",
+    )
+    p_switch.add_argument(
+        "--auth",
+        default=None,
+        choices=["secret"],
+        help="override a provider's default auth mode to a secret token; "
+        "only for providers that declare it overridable",
+    )
+    p_switch.add_argument(
+        "--profile",
+        default=None,
+        help="token profile to use (e.g. work or personal)",
+    )
+    p_switch.add_argument(
+        "--restore",
+        action="store_true",
+        default=False,
+        help="restore settings.json's env block from a backup slot instead of patching",
+    )
+    p_switch.add_argument(
+        "--slot",
+        type=int,
+        default=None,
+        choices=[1, 2, 3],
+        help="backup slot for --restore (1=newest, default: 1)",
+    )
+    p_switch.add_argument(
+        "--status",
+        action="store_true",
+        default=False,
+        help="print the currently-active switch and exit (writes nothing)",
+    )
+    p_switch.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="skip the confirmation prompt",
+    )
+    p_switch.set_defaults(func=_handle_switch)
 
     p_tui = subparsers.add_parser(
         "tui",

@@ -55,18 +55,20 @@ def test_registry_has_claude_and_codex():
 
 @pytest.mark.unit
 def test_registry_has_ollama_and_zai_and_litellm():
-    assert {p.name for p in PROVIDERS} == {"ollama", "zai", "litellm"}
+    assert {p.name for p in PROVIDERS} == {"ollama", "zai", "litellm", "native"}
 
 
 @pytest.mark.unit
 def test_ollama_declares_three_shapes():
     """One provider, three connection mechanisms: direct HTTP (deepseek),
-    `ollama launch` (glm-ollama), and a Codex TOML profile (codex × ollama)."""
+    `ollama launch` (glm-ollama), and a Codex TOML profile (codex × ollama) —
+    plus ANTHROPIC_SETTINGS, so a live claude session can `switch` to it too."""
     ollama = get_provider("ollama")
     assert ollama.shapes == {
         ConfigShape.ANTHROPIC_ENV,
         ConfigShape.OLLAMA_LAUNCH,
         ConfigShape.OPENAI_TOML,
+        ConfigShape.ANTHROPIC_SETTINGS,
     }
     assert ollama.wire_api == "responses"
 
@@ -131,7 +133,11 @@ def test_litellm_declares_both_shapes():
     say so honestly, the way test_ollama_declares_three_shapes does for
     ollama's three mechanisms."""
     litellm = get_provider("litellm")
-    assert litellm.shapes == {ConfigShape.ANTHROPIC_ENV, ConfigShape.OPENAI_TOML}
+    assert litellm.shapes == {
+        ConfigShape.ANTHROPIC_ENV,
+        ConfigShape.OPENAI_TOML,
+        ConfigShape.ANTHROPIC_SETTINGS,
+    }
     assert litellm.wire_api == "chat"
     assert litellm.base_url_policy is BaseUrlPolicy.REQUIRED
     assert litellm.base_url == ""
@@ -588,5 +594,116 @@ def test_fixed_auth_policy_without_token_env_var_is_accepted():
         auth_value="x",
         auth_policy=AuthPolicy.FIXED,
         token_env_var="",
+    )
+    m._validate_provider(ok)  # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# ANTHROPIC_SETTINGS / env_reset — the `switch` mechanism
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_anthropic_settings_shape_on_no_agent():
+    """No Agent may declare ANTHROPIC_SETTINGS — this is the guard that makes
+    wrapper generation provably immune to this shape's existence, rather than
+    relying on _SHAPE_PRIORITY ordering to keep it out of the way."""
+    from code_helper.services.model import AGENTS
+
+    assert all(ConfigShape.ANTHROPIC_SETTINGS not in a.shapes for a in AGENTS)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("agent_name", "provider_name", "expected"),
+    [
+        ("claude", "zai", ConfigShape.ANTHROPIC_ENV),
+        ("claude", "ollama", ConfigShape.ANTHROPIC_ENV),
+        ("claude", "litellm", ConfigShape.ANTHROPIC_ENV),
+        ("codex", "ollama", ConfigShape.OPENAI_TOML),
+        ("codex", "litellm", ConfigShape.OPENAI_TOML),
+    ],
+)
+def test_resolve_shape_unchanged_for_existing_pairs(
+    agent_name, provider_name, expected
+):
+    """Pin today's resolve_shape output for every pre-existing pairing —
+    adding ANTHROPIC_SETTINGS to ollama/zai/litellm and env_reset to `native`
+    must not perturb any of these."""
+    shape = resolve_shape(get_agent(agent_name), get_provider(provider_name))
+    assert shape is expected
+
+
+@pytest.mark.unit
+def test_claude_native_pairing_is_incompatible():
+    """`native` presents only ANTHROPIC_SETTINGS, which no Agent consumes —
+    so it can never back a generated wrapper, only a live `switch`."""
+    with pytest.raises(CodeHelperError, match="no common configuration mechanism"):
+        resolve_shape(get_agent("claude"), get_provider("native"))
+
+
+@pytest.mark.unit
+def test_switchable_providers_includes_native_and_the_settings_providers():
+    from code_helper.services.model import switchable_providers
+
+    assert {p.name for p in switchable_providers()} == {
+        "ollama",
+        "zai",
+        "litellm",
+        "native",
+    }
+
+
+@pytest.mark.unit
+def test_env_reset_provider_rejects_a_base_url():
+    import code_helper.services.model as m
+
+    bad = Provider(
+        name="bad-reset",
+        shapes=frozenset({ConfigShape.ANTHROPIC_SETTINGS}),
+        base_url="http://x",
+        env_reset=True,
+    )
+    with pytest.raises(CodeHelperError, match="env_reset=True"):
+        m._validate_provider(bad)
+
+
+@pytest.mark.unit
+def test_env_reset_provider_rejects_a_credential():
+    import code_helper.services.model as m
+
+    bad = Provider(
+        name="bad-reset",
+        shapes=frozenset({ConfigShape.ANTHROPIC_SETTINGS}),
+        auth="secret",
+        token_env_var="BAD_API_KEY",
+        env_reset=True,
+    )
+    with pytest.raises(CodeHelperError, match="env_reset=True"):
+        m._validate_provider(bad)
+
+
+@pytest.mark.unit
+def test_env_reset_provider_rejects_a_model_list_api():
+    import code_helper.services.model as m
+
+    bad = Provider(
+        name="bad-reset",
+        shapes=frozenset({ConfigShape.ANTHROPIC_SETTINGS}),
+        model_list_api=ModelListAPI.OPENAI_V1,
+        env_reset=True,
+    )
+    with pytest.raises(CodeHelperError, match="env_reset=True"):
+        m._validate_provider(bad)
+
+
+@pytest.mark.unit
+def test_env_reset_provider_with_no_address_or_credential_is_accepted():
+    import code_helper.services.model as m
+
+    ok = Provider(
+        name="ok-reset",
+        shapes=frozenset({ConfigShape.ANTHROPIC_SETTINGS}),
+        env_reset=True,
     )
     m._validate_provider(ok)  # must not raise

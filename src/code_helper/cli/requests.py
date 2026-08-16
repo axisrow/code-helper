@@ -29,7 +29,15 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 
-__all__ = ["AddRequest", "EditTokenRequest", "RemoveRequest", "SetDefaultRequest"]
+from code_helper.errors import CodeHelperError
+
+__all__ = [
+    "AddRequest",
+    "EditTokenRequest",
+    "RemoveRequest",
+    "SetDefaultRequest",
+    "SwitchRequest",
+]
 
 
 def _g(args: argparse.Namespace, name: str, default: object = None) -> object:
@@ -190,6 +198,73 @@ class SetDefaultRequest:
             restore=bool(_g(args, "restore", False)),
             slot=_g(args, "slot"),
             catalog_json=_g(args, "catalog_json"),
+            dry_run=bool(_g(args, "dry_run", False)),
+            force=bool(_g(args, "force", False)),
+            debug=bool(_g(args, "debug", False)),
+        )
+
+
+@dataclass(frozen=True)
+class SwitchRequest:
+    """Inputs to ``_handle_switch`` (the ``switch`` subcommand and TUI ``w``).
+
+    Live-patches ``~/.claude/settings.json`` — a DIFFERENT file from
+    ``set-default``'s ``~/.codex/config.toml`` — so a currently RUNNING
+    ``claude`` picks up the new backend on its next prompt, no restart.
+
+    ``provider`` is the positional-or-flag axis (``switch zai`` and
+    ``switch --provider zai`` mean the same thing — the handler rejects
+    giving both). ``from_wrapper`` is the no-prompts fast path: lift the
+    model/token straight off an already-installed ``anthropic-env`` wrapper,
+    guaranteeing the same backend that wrapper's own script would reach.
+    ``model``/``haiku``/``sonnet``/``opus``/``subagent_model`` are the
+    explicit-axes path, mutually exclusive with ``from_wrapper``.
+    """
+
+    provider: str | None
+    from_wrapper: str | None
+    model: str | None
+    haiku: str | None
+    sonnet: str | None
+    opus: str | None
+    subagent_model: str | None
+    base_url: str | None
+    auth: str | None
+    profile: str | None
+    restore: bool
+    slot: int | None
+    status: bool
+    dry_run: bool
+    force: bool
+    debug: bool
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> SwitchRequest:
+        # `provider_positional` (the `switch <name>` form) and `--provider`
+        # are two argparse destinations for the same axis. Checked HERE,
+        # while both raw values are still visible — merging them with a bare
+        # `or` first (as build_spec-style requests usually do) would make
+        # `switch zai --provider zai` look like a single value and silently
+        # swallow the conflict.
+        positional = _g(args, "provider_positional")
+        flag = _g(args, "provider")
+        if positional and flag:
+            raise CodeHelperError("give either a provider or --provider, not both")
+        provider = positional or flag
+        return cls(
+            provider=provider,
+            from_wrapper=_g(args, "from_wrapper"),
+            model=_g(args, "model"),
+            haiku=_g(args, "haiku"),
+            sonnet=_g(args, "sonnet"),
+            opus=_g(args, "opus"),
+            subagent_model=_g(args, "subagent_model"),
+            base_url=_g(args, "base_url"),
+            auth=_g(args, "auth"),
+            profile=_g(args, "profile"),
+            restore=bool(_g(args, "restore", False)),
+            slot=_g(args, "slot"),
+            status=bool(_g(args, "status", False)),
             dry_run=bool(_g(args, "dry_run", False)),
             force=bool(_g(args, "force", False)),
             debug=bool(_g(args, "debug", False)),
