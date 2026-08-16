@@ -182,7 +182,8 @@ def read_settings(paths: Paths) -> tuple[str, dict]:
     ``codex_default``'s own ``read_text_or_none(...) or ""`` convention.
 
     Raises:
-        CodeHelperError: the file exists but does not parse as JSON, or
+        CodeHelperError: the file exists but is unreadable (permission
+            denied, undecodable as UTF-8), does not parse as JSON, or
             parses to something other than a JSON object. REFUSING here
             (rather than silently treating a broken file as empty) is the
             whole safety story: starting from ``{}`` would replace a
@@ -190,9 +191,23 @@ def read_settings(paths: Paths) -> tuple[str, dict]:
             config and hooks in it — with a two-key file. This tool never
             repairs the file; it tells the user to fix or move it.
     """
-    raw = read_text_or_none(paths.claude_settings())
-    if raw is None:
+    settings_path = paths.claude_settings()
+    # `read_text_or_none` folds "missing" and "exists but unreadable"
+    # (permission denied, binary/non-UTF-8) into the same `None` — by
+    # design, for callers that treat both as "not ours, leave it alone".
+    # THIS caller may not: a MISSING file is a fresh install (safe to start
+    # from `{}`), but an EXISTING, unreadable file is exactly the
+    # corrupt-but-recoverable case the docstring above promises to refuse,
+    # not silently overwrite. `Path.exists()` disambiguates the two.
+    if not settings_path.exists():
         return "", {}
+    raw = read_text_or_none(settings_path)
+    if raw is None:
+        raise CodeHelperError(
+            f"{settings_path} exists but could not be read (permission denied "
+            f"or not valid UTF-8) — refusing to touch it; fix permissions or "
+            f"move the file, then retry"
+        )
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -563,6 +578,25 @@ def restore_settings(
     if backup_body is None:
         raise CodeHelperError(f"no backup found at {backup_path}; nothing to restore")
 
+    # A backup is never written by anything but rotate_backups (this
+    # module's own prior writes), but it CAN be hand-corrupted or truncated
+    # on disk afterward. Validate it the same way read_settings validates a
+    # live settings.json — restoring a malformed file would leave Claude
+    # Code unable to load its config, the exact failure this command exists
+    # to recover FROM, not cause.
+    try:
+        backup_parsed = json.loads(backup_body)
+    except json.JSONDecodeError as exc:
+        raise CodeHelperError(
+            f"{backup_path} is not valid JSON ({exc}) — refusing to restore "
+            f"a corrupted backup"
+        ) from exc
+    if not isinstance(backup_parsed, dict):
+        raise CodeHelperError(
+            f"{backup_path} does not contain a JSON object at its top level "
+            f"— refusing to restore it"
+        )
+
     settings_path = paths.claude_settings()
     current = read_text_or_none(settings_path) or ""
 
@@ -573,12 +607,16 @@ def restore_settings(
     # both `current` and `backup_body` may legitimately hold a live
     # ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY, and this preview goes to
     # stdout / an interactive confirm prompt exactly like a switch's does.
+    # `backup_parsed` is already validated above; `current` may still be
+    # unparseable (it is NOT validated — a corrupt live file is
+    # read_settings/apply_switch's problem, restore's job is only to not
+    # WRITE a corrupt one), so its parse is still guarded.
     preview = diff_preview(current, backup_body)
     try:
         credential_values = _credential_values(json.loads(current) if current else {})
-        credential_values |= _credential_values(json.loads(backup_body))
     except json.JSONDecodeError:
-        credential_values = set()  # unparseable text can't be key-scanned; leave as-is
+        credential_values = set()  # unparseable current text can't be key-scanned
+    credential_values |= _credential_values(backup_parsed)
     for value in credential_values:
         preview = preview.replace(value, _redact(value))
 

@@ -374,6 +374,32 @@ def test_apply_switch_corrupt_json_refused_and_file_unchanged(tmp_path):
 
 
 @pytest.mark.unit
+def test_apply_switch_unreadable_file_refused_not_treated_as_missing(tmp_path):
+    # Regression: read_settings's `raw is None` branch treats a MISSING file
+    # and an UNREADABLE one (permission-denied, binary/non-UTF-8) the same
+    # way — "", {} — the fresh-install case. With --force that silently
+    # replaces a permission-denied-but-real settings.json (root-owned, a
+    # read-only mount, ...) with a brand-new two-key file, exactly the data
+    # loss the module's own docstring says read_settings refuses to allow.
+    paths = Paths.from_home(tmp_path)
+    paths.claude_dir.mkdir(parents=True)
+    settings = paths.claude_settings()
+    settings.write_bytes(b"\xff\xfe\x00\x01not valid utf-8 or json")
+    before = settings.read_bytes()
+
+    with pytest.raises(CodeHelperError):
+        apply_switch(
+            paths,
+            provider=ZAI,
+            tier_models=TierModels.uniform("glm-5.2"),
+            token="sk-test",
+            force=True,
+        )
+
+    assert settings.read_bytes() == before
+
+
+@pytest.mark.unit
 def test_apply_switch_dry_run_writes_nothing(tmp_path, capsys):
     paths = Paths.from_home(tmp_path)
     _write(paths, {"env": dict(_FOREIGN_ENV)})
@@ -779,6 +805,22 @@ def test_restore_settings_refuses_when_file_changed_since_it_was_read(tmp_path):
         restore_settings(paths, slot=1, confirm=_concurrent_editor)
 
     assert _read(paths)["env"]["IS_DEMO"] == "0"
+
+
+@pytest.mark.unit
+def test_restore_settings_refuses_a_malformed_backup(tmp_path):
+    # Regression: restore_settings wrote backup_body verbatim without ever
+    # parsing it — a truncated/hand-corrupted .bakN file could be restored
+    # straight into settings.json, leaving Claude Code unable to load its
+    # config. Mirror read_settings's own JSON-object validation here.
+    paths = Paths.from_home(tmp_path)
+    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    paths.claude_settings_backup(1).write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(CodeHelperError, match="not valid JSON"):
+        restore_settings(paths, slot=1, force=True)
+
+    assert _read(paths)["env"] == _FOREIGN_ENV
 
 
 @pytest.mark.unit
