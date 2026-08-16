@@ -569,7 +569,18 @@ def restore_settings(
     if current == backup_body:
         return False
 
+    # Same credential-aware redaction as apply_switch's _redacted_preview:
+    # both `current` and `backup_body` may legitimately hold a live
+    # ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY, and this preview goes to
+    # stdout / an interactive confirm prompt exactly like a switch's does.
     preview = diff_preview(current, backup_body)
+    try:
+        credential_values = _credential_values(json.loads(current) if current else {})
+        credential_values |= _credential_values(json.loads(backup_body))
+    except json.JSONDecodeError:
+        credential_values = set()  # unparseable text can't be key-scanned; leave as-is
+    for value in credential_values:
+        preview = preview.replace(value, _redact(value))
 
     if dry_run:
         print(preview or "(no textual change)")
@@ -580,6 +591,17 @@ def restore_settings(
         raise CodeHelperError(
             f"about to restore {settings_path} from {backup_path} — refusing "
             f"without confirmation (use --force)"
+        )
+
+    # Re-read immediately before writing — same stale-snapshot guard as
+    # apply_switch: a concurrent switch/restore or hand-edit during the
+    # confirm prompt must not be silently clobbered.
+    current_now = read_text_or_none(settings_path) or ""
+    if current_now != current:
+        raise CodeHelperError(
+            f"{settings_path} changed since it was read — refusing to "
+            f"restore over a concurrent change (a concurrent switch or "
+            f"hand-edit may have run; re-run to restore over the current file)"
         )
 
     atomic_write(settings_path, backup_body, mode=0o600)

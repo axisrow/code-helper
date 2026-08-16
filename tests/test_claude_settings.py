@@ -726,6 +726,62 @@ def test_restore_settings_confirm_refused_leaves_file_untouched(tmp_path):
 
 
 @pytest.mark.unit
+def test_restore_settings_dry_run_redacts_credentials(tmp_path, capsys):
+    # Regression: restore_settings built its preview with plain diff_preview,
+    # unlike apply_switch's _redacted_preview — printing both the CURRENT and
+    # the BACKUP ANTHROPIC_AUTH_TOKEN verbatim into --dry-run / confirm
+    # output.
+    paths = Paths.from_home(tmp_path)
+    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    apply_switch(
+        paths,
+        provider=ZAI,
+        tier_models=TierModels.uniform("glm-5.2"),
+        token="sk-BACKUP-token-value",
+        force=True,
+    )
+    apply_switch(
+        paths,
+        provider=ZAI,
+        tier_models=TierModels.uniform("glm-5.2"),
+        token="sk-CURRENT-token-value",
+        force=True,
+    )
+
+    restore_settings(paths, slot=1, dry_run=True)
+
+    out = capsys.readouterr().out
+    assert "sk-BACKUP-token-value" not in out
+    assert "sk-CURRENT-token-value" not in out
+
+
+@pytest.mark.unit
+def test_restore_settings_refuses_when_file_changed_since_it_was_read(tmp_path):
+    # Regression: restore_settings read `current`, asked for confirmation,
+    # then wrote `backup_body` unconditionally — a concurrent switch/restore
+    # or hand-edit landing during the confirm prompt was silently clobbered,
+    # the same race apply_switch already guards against.
+    paths = Paths.from_home(tmp_path)
+    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    apply_switch(
+        paths,
+        provider=ZAI,
+        tier_models=TierModels.uniform("glm-5.2"),
+        token="sk-test",
+        force=True,
+    )
+
+    def _concurrent_editor(_path, _preview):
+        _write(paths, {"env": {**_FOREIGN_ENV, "IS_DEMO": "0"}})
+        return True
+
+    with pytest.raises(CodeHelperError, match="changed since it was read"):
+        restore_settings(paths, slot=1, confirm=_concurrent_editor)
+
+    assert _read(paths)["env"]["IS_DEMO"] == "0"
+
+
+@pytest.mark.unit
 def test_restore_settings_missing_slot_raises(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write(paths, {"env": dict(_FOREIGN_ENV)})
