@@ -62,6 +62,8 @@ __all__ = [
     "patch_config_toml",
     "diff_preview",
     "apply_set_default",
+    "clear_default",
+    "current_default",
     "restore_default",
 ]
 
@@ -617,6 +619,201 @@ def _commit_catalog_write(plan: _CatalogPlan) -> bool:
     atomic_write(plan.catalog_path, plan.body, mode=None)
     print(f"wrote {plan.catalog_path}")
     return True
+
+
+def clear_config_toml(original: str, provider_table: str | None) -> str:
+    """``original`` with this command's managed region removed. Pure, no IO.
+
+    The textual inverse of :func:`patch_config_toml`: drops the three
+    :data:`_TOP_LEVEL_KEYS` lines and, when ``provider_table`` names one, the
+    whole ``[model_providers.<name>]`` block. Everything else — comments,
+    key order, unrelated tables, the user's own ``[model_providers.*]``
+    entries — is left byte-for-byte alone, because this is the user's own
+    hand-maintained file and only the region this tool wrote is ours to take
+    back.
+
+    ``provider_table`` is ``None`` when ``model_provider`` names a provider
+    NOT in this tool's registry (see :func:`current_default`) — i.e. this
+    file's ``model``/``model_provider``/``model_catalog_json`` were not
+    necessarily ever written by ``set-default``. Removing them anyway would
+    be exactly the kind of foreign-config damage this function's own
+    docstring promises never to do, so ``None`` here means "not proven
+    ours" and the top-level keys are left untouched too, not just the table.
+    """
+    if not provider_table:
+        return original
+    text = original
+    for key in _TOP_LEVEL_KEYS:
+        # Consume the trailing newline with the line so removal does not
+        # leave a blank gap where the key used to be.
+        text = re.sub(rf"^{re.escape(key)}\s*=.*(?:\n|$)", "", text, flags=re.MULTILINE)
+    if provider_table:
+        header = re.compile(
+            rf"^\[model_providers\.{re.escape(provider_table)}\]\s*$", re.MULTILINE
+        )
+        match = header.search(text)
+        if match:
+            # The table body runs to the next table header, or to EOF.
+            nxt = _ANY_TABLE_HEADER_RE.search(text, match.end())
+            text = text[: match.start()] + text[nxt.start() if nxt else len(text) :]
+    return text
+
+
+def _verify_cleared(original: str, cleared: str, provider_table: str | None) -> None:
+    """Refuse before writing if clearing removed more than the managed region.
+
+    The mirror of :func:`_verify_patch_applied`, and mandatory for the same
+    reason: these are line-anchored regexes running over the user's own file,
+    so the only honest proof that nothing else moved is a structural one.
+    Asserts the managed keys/table are gone from the result AND that
+    everything outside the managed region parses identically before and
+    after.
+    """
+    tomllib = _require_tomllib()
+    try:
+        data = tomllib.loads(cleared)
+    except ValueError as exc:
+        raise CodeHelperError(
+            f"internal error: config.toml does not parse as TOML after "
+            f"clearing — refusing to write; this is a code-helper bug, "
+            f"please report it: {exc}"
+        ) from None
+
+    leftover = [key for key in _TOP_LEVEL_KEYS if key in data]
+    providers = data.get("model_providers")
+    if provider_table and isinstance(providers, dict) and provider_table in providers:
+        leftover.append(f"model_providers.{provider_table}")
+    if leftover:
+        raise CodeHelperError(
+            f"internal error: clearing config.toml left managed keys behind "
+            f"({', '.join(leftover)}) — refusing to write; this is a "
+            f"code-helper bug, please report it"
+        )
+
+    if not original.strip():
+        return
+    # A DefaultPatch is only needed here for its provider_table field — the
+    # comparison is "everything outside the managed region", the same notion
+    # _verify_patch_applied uses, so the helper is reused rather than
+    # restating which keys are managed.
+    probe = DefaultPatch(
+        model="",
+        provider_table=provider_table or "",
+        display_name="",
+        base_url="",
+        wire_api="",
+        catalog_json="",
+    )
+    if _without_managed_region(
+        tomllib.loads(original), probe
+    ) != _without_managed_region(data, probe):
+        raise CodeHelperError(
+            "internal error: clearing config.toml appears to have altered "
+            "content outside the managed keys/table — refusing to write; "
+            "this is a code-helper bug, please report it"
+        )
+
+
+def clear_default(
+    paths: Paths,
+    *,
+    dry_run: bool = False,
+    force: bool = False,
+    confirm=None,
+) -> bool:
+    """Remove this tool's override from ``config.toml`` — codex's "native".
+
+    The codex counterpart of ``switch``'s ``native`` provider: where claude's
+    ``env_reset`` clears the managed ``env`` block from ``settings.json``,
+    this drops the managed keys and provider table from ``config.toml``, so
+    Codex falls back to whatever it did before ``set-default`` ever ran.
+
+    Deliberately NOT ``restore_default``: restore rolls the file back to a
+    backup SNAPSHOT, undoing unrelated hand-edits made since. This removes
+    only the region this tool owns and leaves every other edit in place —
+    the difference between "undo my last change" and "stop overriding".
+
+    Takes the same write path as :func:`apply_set_default` — gate on
+    confirm/force, rotate backups, ``atomic_write`` — so a clear is exactly
+    as recoverable as a set.
+
+    Returns:
+        True if anything was written (or would be, under ``dry_run``);
+        False when there was no managed region to remove.
+    """
+    config_path = paths.codex_main_config()
+    original = read_text_or_none(config_path) or ""
+    if not original.strip():
+        print("no changes to config.toml")
+        return False
+    _verify_toml_or_refuse(original, context=str(config_path))
+
+    cleared = clear_config_toml(original, current_default(paths))
+    if cleared == original:
+        print("no changes to config.toml")
+        return False
+    _verify_cleared(original, cleared, current_default(paths))
+
+    preview = diff_preview(original, cleared)
+    if dry_run:
+        print(preview or "(no textual change)")
+        print(f"would write {config_path}")
+        return True
+
+    if not force and not (confirm and confirm(config_path, preview)):
+        raise CodeHelperError(
+            f"about to patch {config_path} — refusing without confirmation "
+            f"(use --force, or re-run interactively)"
+        )
+
+    _rotate_backups(_config_backup_slots(paths), current=original)
+    atomic_write(config_path, cleared, mode=None)
+    print(f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})")
+    return True
+
+
+def current_default(paths: Paths) -> str | None:
+    """Which provider ``config.toml``'s ``model_provider`` names, or ``None``.
+
+    The ``set-default`` counterpart of ``claude_settings.current_switch``, and
+    it holds the same posture: read-only, **never raises** — a missing,
+    unreadable, or unparseable file reads as "no override applied", mirroring
+    ``state.load_state``. Deliberately derives the answer from the FILE
+    ITSELF rather than from ``state.json``, for the reason spelled out in
+    ``current_switch``'s docstring: a second source of truth for "what is
+    active" goes stale the moment the user hand-edits the config.
+
+    Unlike ``current_switch`` — which has to match a live ``base_url`` back to
+    a provider and admits it cannot tell two providers sharing one address
+    apart — this resolves by KEY NAME: ``_patch_top_level`` writes
+    ``model_provider = "<provider.name>"`` verbatim, so the file already
+    carries the provider's identity and no address-matching heuristic is
+    needed. A name that matches no registry entry (hand-written, or from a
+    provider since removed) reads as ``None`` rather than being echoed back,
+    so every non-``None`` return is a real ``PROVIDERS`` name.
+
+    Uses ``tomllib`` directly rather than ``_require_tomllib``: that helper
+    refuses loudly because ``set-default`` is about to WRITE, and a missing
+    verifier there would mean writing unverified. This function only reads,
+    and its whole contract is to degrade to ``None`` instead of raising.
+    """
+    from code_helper.services.model import PROVIDERS
+
+    text = read_text_or_none(paths.codex_main_config())
+    if not text:
+        return None
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - py3.11+ is the floor
+        return None
+    try:
+        data = tomllib.loads(text)
+    except ValueError:
+        return None
+    name = data.get("model_provider")
+    if not isinstance(name, str):
+        return None
+    return name if any(p.name == name for p in PROVIDERS) else None
 
 
 def apply_set_default(

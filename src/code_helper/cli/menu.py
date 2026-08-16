@@ -20,7 +20,9 @@ mirroring how :func:`code_helper.services.secrets.resolve_token` injects
 from __future__ import annotations
 
 import getpass
+import inspect
 import os
+import re
 import shutil
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -204,6 +206,16 @@ def _translate_escape(read_more: Callable[[float], str | None]) -> str:
         params += b
     if final in _ARROW_FINAL:
         return _ARROW_FINAL[final]
+    if final == "Z" and not params:
+        # Shift+Tab (back-tab) — CSI Z, the ONE escape a terminal sends that
+        # is neither an arrow nor a `~`-form key. Deliberately checked here
+        # rather than added to `_ARROW_FINAL`: that table is shared with the
+        # SS3 branch above (`ESC O Z` is not back-tab and must stay "OTHER")
+        # and with `_read_line_raw`'s `_MOVES`, which has no entry for a
+        # back-tab and would silently ignore a movement name it cannot
+        # resolve. The `not params` guard keeps a parameterized `ESC [ 1 Z`
+        # from being read as the bare back-tab it is not.
+        return "BACK_TAB"
     if final == "~":
         return _TILDE_FINAL.get(params, "OTHER")
     return "OTHER"
@@ -225,7 +237,15 @@ _CHAR_KEYS = {
     "g": "HOME",
     "G": "END",
 }
-_PASSTHROUGH = "aedtcs?"
+#: Characters `select_from_menu` hands to `on_key` verbatim. A key bound in a
+#: caller's `on_key` but MISSING here is silently dead — `_translate_char`
+#: reports it as "OTHER" and the binding never fires. That is not
+#: hypothetical: `w` (the old switch screen) was bound in the TUI, documented
+#: in its help text, and listed in `keymap._LAYOUTS`, yet never worked,
+#: because it was never added to this string. `tests/test_tui.py` now pins
+#: every main-screen binding against `_translate_char` so the two cannot
+#: drift apart again.
+_PASSTHROUGH = "aedtps?"
 
 
 def _translate_char(first: str) -> str:
@@ -409,8 +429,8 @@ def _default_read_key() -> str:
 
 
 def _normalize(
-    items: Sequence[str | tuple[str, str | Callable[[], str]] | Section],
-) -> list[tuple[str, str | Callable[[], str]] | Section]:
+    items: Sequence[str | tuple[str, str | Callable[..., str]] | Section],
+) -> list[tuple[str, str | Callable[..., str]] | Section]:
     """Normalize ``items`` to ``(value, label)`` pairs (``Section`` pass-through).
 
     A plain ``str`` item is both its own value and label — this is what keeps
@@ -423,8 +443,18 @@ def _normalize(
     ]
 
 
+#: Matches only the SGR form (`\x1b[<params>m`) the chipset itself emits —
+#: not a general ANSI parser, and it must not grow into one; see ``_fit``.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _visible_len(line: str) -> int:
+    """The printed width of ``line`` with SGR escape sequences stripped."""
+    return len(_ANSI_RE.sub("", line))
+
+
 def _fit(line: str, width: int) -> str:
-    """Truncate ``line`` to ``width`` columns, marking the cut with ``…``.
+    """Truncate ``line`` to ``width`` VISIBLE columns, marking the cut with ``…``.
 
     A line longer than the terminal is wrapped by the terminal driver into
     two or more PHYSICAL rows, which the in-place redraw's ``frame_lines``
@@ -433,12 +463,48 @@ def _fit(line: str, width: int) -> str:
     down the screen. Truncating every printed row to the terminal's actual
     width is what keeps one call to ``print_fn`` equal to one physical row —
     a real bug, not a cosmetic one; see ``menu.py`` module docs / CLAUDE.md.
+
+    Rows may carry SGR escape sequences (the chipset's reverse/bold
+    highlighting) — invisible bytes that must not count against the visible
+    width, and must never be sliced in half. This walks the string copying
+    escape sequences through untouched, counts width only for the visible
+    characters they wrap, and — if the cut lands while a span is still open —
+    appends a reset so the highlight never bleeds into the rest of the row.
     """
-    if width <= 0 or len(line) <= width:
+    if width <= 0:
+        return line
+    # An SGR sequence only ever makes the raw string LONGER than its visible
+    # width, never shorter — so if the raw length already fits, the visible
+    # length trivially fits too. This lets the common case (a short line, no
+    # truncation) skip `_visible_len`'s regex scan entirely.
+    if len(line) <= width or _visible_len(line) <= width:
         return line
     if width == 1:
         return "…"
-    return line[: width - 1] + "…"
+    budget = width - 1
+    out: list[str] = []
+    open_span = False
+    # A capturing split interleaves plain-text runs with the codes that
+    # separate them (codes land at odd indices) — one pass, no separate
+    # branch for the trailing run after the last match. `_ANSI_RE` itself
+    # has no capture group (split would then discard the codes), so wrap it
+    # here rather than changing the pattern `_visible_len` also uses.
+    for i, chunk in enumerate(re.split(f"({_ANSI_RE.pattern})", line)):
+        if i % 2:  # an escape sequence — copy through untouched, uncounted
+            if budget <= 0:
+                break
+            out.append(chunk)
+            open_span = chunk != "\033[0m"
+            continue
+        for ch in chunk:
+            if budget <= 0:
+                break
+            out.append(ch)
+            budget -= 1
+    out.append("…")
+    if open_span:
+        out.append("\033[0m")
+    return "".join(out)
 
 
 class _MenuState:
@@ -496,7 +562,7 @@ class _MenuState:
 
 
 def _build_menu_state(
-    items: Sequence[str | tuple[str, str | Callable[[], str]] | Section],
+    items: Sequence[str | tuple[str, str | Callable[..., str]] | Section],
     *,
     hint: str | None | Callable[[], str],
     unnumbered: frozenset[str],
@@ -569,7 +635,38 @@ def _viewport(state: _MenuState) -> tuple[int, list]:
     return first, visible
 
 
-def _row_text(entry, index: int, cursor_pair: int, state: _MenuState) -> str:
+def _wants_row_state(label: Callable[..., str]) -> bool:
+    """Whether ``label`` declares the ``selected``/``ansi`` keyword params.
+
+    Checked via the signature rather than calling and catching ``TypeError``
+    on mismatch — a ``TypeError`` raised from INSIDE a nullary label's own
+    body (a real bug) would otherwise be swallowed and silently retried as
+    ``label()``, masking the bug instead of surfacing it.
+    """
+    params = inspect.signature(label).parameters
+    return "selected" in params and "ansi" in params
+
+
+def _call_label(label: Callable[..., str], *, selected: bool, ansi: bool) -> str:
+    """Call a label, passing row state to it when it wants that.
+
+    Most labels are nullary (``lambda: "text"``) and stay exactly that. A
+    label that wants to know whether ITS OWN row carries the cursor (the
+    chipset row does — see ``TuiSession._chip_row``) declares
+    ``selected``/``ansi`` keyword params and gets them here, the only call
+    site ``label()`` has in the project.
+    """
+    if _wants_row_state(label):
+        return label(selected=selected, ansi=ansi)
+    return label()
+
+
+def _row_text(
+    entry: tuple[str, str | Callable[..., str]] | Section,
+    index: int,
+    cursor_pair: int,
+    state: _MenuState,
+) -> str:
     """One menu line, before it is fitted to the terminal width.
 
     A :class:`Section` renders as its bare text (never selected, never
@@ -579,8 +676,13 @@ def _row_text(entry, index: int, cursor_pair: int, state: _MenuState) -> str:
     if isinstance(entry, Section):
         return entry.text() if callable(entry.text) else entry.text
     value, label = entry
-    label_text = label() if callable(label) else label
-    marker = ">" if index == cursor_pair else " "
+    selected = index == cursor_pair
+    label_text = (
+        _call_label(label, selected=selected, ansi=state.redraw)
+        if callable(label)
+        else label
+    )
+    marker = ">" if selected else " "
     if not state.digit_of:
         return f"{marker} {label_text}"
     digit = str(state.digit_of[value]) if value in state.digit_of else "·"
@@ -699,7 +801,7 @@ def _dispatch_key(
 
 
 def select_from_menu(
-    items: Sequence[str | tuple[str, str | Callable[[], str]] | Section],
+    items: Sequence[str | tuple[str, str | Callable[..., str]] | Section],
     *,
     prompt: str | Callable[[], str] = "select:",
     hint: str | None | Callable[[], str] = None,

@@ -14,14 +14,17 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from code_helper.services.paths import Paths
 
 __all__ = ["run_tui"]
 
 _ADD = "add"
 _SETTINGS = "settings"
 _PROFILE = "profile"
-_SET_DEFAULT = "set-default"
-_SWITCH = "switch"
 _HELP = "help"
 _QUIT = "quit"
 _BACK = "__back__"
@@ -29,24 +32,83 @@ _NEW_PROFILE = "__new_profile__"
 _USE_PROFILE = "__use_profile__"
 _REPLACE_TOKEN = "__replace_token__"
 
+#: Prefix of a main-screen chipset row's value. The row namespace is what
+#: gives Enter its meaning (``agent:<name>`` applies the highlighted chip,
+#: anything else is a wrapper alias) — the same dispatch-on-prefix idiom
+#: ``token:``/``remove:`` already use, rather than a second mode flag.
+_AGENT_ROW = "agent:"
+
+#: The chip that means "no override" — displayed on every agent row, applied
+#: through that agent's own reset mechanism (see :class:`_AgentBackend`).
+_NATIVE_CHIP = "native"
+
+#: SGR codes for the chip strip: reverse video marks the chip under the
+#: cursor (fzf/less-style), bold marks the chip currently applied when the
+#: cursor is elsewhere. `menu._fit` is ANSI-aware and strips these safely
+#: when a row is truncated to the terminal width.
+_REVERSE = "\033[7m"
+_BOLD = "\033[1m"
+_RESET = "\033[0m"
+
 # profile name, token typed in this flow, old profile name, new old-profile name
 ProfileChoice = tuple[str, str | None, str | None, str | None]
+
+
+@dataclass(frozen=True)
+class _AgentBackend:
+    """How ONE agent's backend is read and applied, as data.
+
+    The main screen shows one chipset row per agent, and the two agents differ
+    along three axes at once: how to read which backend is currently applied,
+    how to apply a wrapper, and how to clear the override. Expressing that as
+    ``if agent.name == "claude"`` is exactly what this project's conventions
+    forbid, so the differences live here as a per-agent record and every
+    consumer is a dict lookup.
+
+    An agent with no entry in :data:`_AGENT_BACKENDS` simply gets no chipset
+    row — the honest degradation when a new agent is added to ``AGENTS``
+    before its backend mechanism exists, and the single place a future agent
+    (Copilot, say) has to be described to gain a fully working row.
+
+    The two apply hooks are :class:`TuiSession` METHOD NAMES, resolved on the
+    session with ``getattr`` at the moment a chip is applied — not function
+    objects captured when this table is built. Capturing the functions would
+    freeze whatever they were at import time, so a test that patches
+    ``TuiSession._apply_switch_wrapper`` would silently keep calling the
+    original; a name stays honest about the fact that the session is what
+    ultimately does the work.
+
+    Attributes:
+        read_applied: ``(paths) -> provider name | None``. MUST never raise —
+            it runs once per main-loop iteration on the UI path, where an
+            unreadable config means "nothing applied", not a crash.
+        apply_wrapper: Method name taking ``(spec)`` — point the agent at an
+            installed wrapper's backend.
+        apply_native: Method name taking no arguments — clear the override.
+        lifecycle: When the change takes effect, rendered at the end of the
+            row. The claude/codex difference (a running session vs. the next
+            launch) is real and must be visible, not implied.
+    """
+
+    read_applied: Callable[[Paths], str | None]
+    apply_wrapper: str
+    apply_native: str
+    lifecycle: str
 
 
 def _hint(
     numbered_count: int,
     *,
     exit_word: str,
-    tab_provider: str | None = None,
+    chips: bool = False,
     has_token_key: bool = False,
 ) -> str:
     """Return the uniform navigation hint for a menu.
 
-    ``tab_provider``, when given, names the provider Tab would cycle — e.g.
-    ``"zai"`` renders ``· Tab: zai profile`` — so the hint says what Tab does
-    rather than just that it does something. It cycles *profiles within one
-    provider*, never providers themselves (that is what the Profile screen is
-    for), and this makes the distinction visible instead of implied.
+    ``chips=True`` is the main screen, whose rows are not a flat list: the
+    agent rows carry a horizontal chip strip that Left/Right moves through
+    and Enter applies. The hint must name that, because a chipset is not
+    discoverable from an Up/Down hint alone.
 
     ``has_token_key=True`` adds ``· t: token`` — the main screen (issue #29)
     binds ``t`` to per-row token rotation, and the hint must say so. It is
@@ -54,6 +116,10 @@ def _hint(
     wrapper, because ``t`` there is a silent no-op (no dead-end screen), and
     hiding the hint only on non-secret rows would make it flicker as the user
     moves the cursor.
+
+    Every key named here MUST actually be reachable — a hint is a promise.
+    See ``menu._PASSTHROUGH`` for the bug this class of drift already caused
+    once, and ``test_tui`` for the pin that now prevents it.
     """
     from code_helper.cli.menu import MAX_DIGIT_ITEMS
 
@@ -61,10 +127,16 @@ def _hint(
     if usable:
         digits = "1" if usable == 1 else f"1-{usable}"
         hint = f"Up/Down · {digits} · Enter select · Esc {exit_word} · Ctrl-C quit"
+    elif chips:
+        # The editing keys are named here rather than left behind `?`: on the
+        # main screen they are the only way to add or change a wrapper, and a
+        # key nobody can see is a key nobody presses. Kept to a single
+        # "a/e/d" cluster and short arrows to stay well inside 80 columns —
+        # `_fit` would otherwise truncate the tail and silently eat the exit
+        # hint, which is exactly the bug a PTY run caught here.
+        hint = f"↑↓ row · ←→ chip · Enter apply · a/e/d edit · ? keys · Esc {exit_word}"
     else:
-        hint = f"Up/Down · Enter default · Tab/1-0 profile · ? keys · Esc {exit_word} · Ctrl-C quit"
-    if tab_provider:
-        hint += f" · Tab: {tab_provider} profile"
+        hint = f"Up/Down · Enter select · Esc {exit_word} · Ctrl-C quit"
     if has_token_key:
         hint += " · t: token"
     return hint
@@ -94,36 +166,48 @@ class TuiSession:
     to pass an argument into a handler any more.
     """
 
-    __slots__ = ("args", "_tab_provider", "_tab_label", "_live_switch")
+    __slots__ = (
+        "args",
+        "_tab_provider",
+        "_tab_label",
+        "_slot_label",
+        "_applied",
+        "_chips",
+        "_chip_index",
+    )
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        # `_resolve_tab_provider` does real I/O (`state.json` + a profile
-        # scan), and `_main_prompt`/`_profile_row_label` are callables
-        # re-evaluated every redraw frame — so they read this cache instead
-        # of re-deriving per frame. Refreshed once per main-loop iteration
-        # and again by `_on_tab` the moment Tab changes the selection.
+        # Every cache below is filled once per main-loop iteration by
+        # `_refresh_active_label`, because each is read from a label callable
+        # that the menu re-evaluates on EVERY redraw frame — including pure
+        # cursor movement. Deriving any of them per frame would put a file
+        # read or a directory scan on the keystroke path.
         self._tab_provider: str | None = None
         self._tab_label: str = ""
-        # Same reasoning as `_tab_provider` above: `current_switch` reads and
-        # JSON-parses settings.json, and `_main_prompt` is a callable
-        # re-evaluated on every redraw frame (including pure cursor
-        # movement) — so this is refreshed once per main-loop iteration
-        # instead of once per frame. See `_refresh_active_label`.
-        self._live_switch: str | None = None
+        #: The profile screen's rendered slot strip.
+        self._slot_label: str = ""
+        #: agent name -> the provider its config currently names, or None.
+        self._applied: dict[str, str | None] = {}
+        #: agent name -> its chip strip (`native` plus installed wrappers).
+        self._chips: dict[str, list] = {}
+        #: agent name -> chip cursor. Ephemeral on purpose: persisting it
+        #: would create a second source of truth about what is selected,
+        #: competing with the config files that actually decide.
+        self._chip_index: dict[str, int] = {}
 
     # --- UI primitives ---------------------------------------------------
 
     def _pick(
         self,
-        items: Sequence[tuple[str, str]],
+        items: Sequence[object],
         prompt: str | Callable[[], str],
         *,
         exit_word: str = "back",
         on_tab: Callable[[], None] | None = None,
         on_token: Callable[[str], None] | None = None,
         on_key: dict[str, Callable[[str], object]] | None = None,
-        tab_provider: str | None = None,
+        chips: bool = False,
         numbered: bool = True,
     ) -> str:
         from code_helper.cli.menu import MenuCancelled, Section, select_from_menu
@@ -131,16 +215,16 @@ class TuiSession:
         numbered_count = sum(
             1
             for entry in items
-            if not isinstance(entry, Section) and entry[0] not in (_BACK, _QUIT)
+            if not isinstance(entry, Section) and entry[0] not in (_BACK, _QUIT)  # type: ignore[index]
         )
         try:
             return select_from_menu(
-                items,
+                items,  # type: ignore[arg-type]
                 prompt=prompt,
                 hint=_hint(
                     numbered_count if numbered else 0,
                     exit_word=exit_word,
-                    tab_provider=tab_provider,
+                    chips=chips,
                     has_token_key=on_token is not None,
                 ),
                 on_tab=on_tab,
@@ -181,6 +265,20 @@ class TuiSession:
         from code_helper.errors import CodeHelperError
 
         class _Tee:
+            """Fan writes out to the real stdout AND a capture buffer.
+
+            Must behave enough like the stream it replaces that code reached
+            through the handler cannot tell the difference. ``isatty`` in
+            particular is not optional: ``menu.read_line`` — which every
+            confirmation prompt goes through — calls it to decide between
+            raw-mode line editing and a plain ``input()``. Without it, any
+            handler that asked for confirmation died with an
+            ``AttributeError`` instead of prompting, which is exactly what
+            happened to ``set-default``'s prompt from inside the TUI. It
+            answers for the REAL terminal (the first stream), because that is
+            where the prompt is actually rendered and read.
+            """
+
             def __init__(self, *streams) -> None:
                 self._streams = streams
 
@@ -192,6 +290,16 @@ class TuiSession:
             def flush(self) -> None:
                 for stream in self._streams:
                     stream.flush()
+
+            def isatty(self) -> bool:
+                return self._streams[0].isatty()
+
+            def fileno(self) -> int:
+                return self._streams[0].fileno()
+
+            @property
+            def encoding(self) -> str:
+                return getattr(self._streams[0], "encoding", "utf-8")
 
         import io
 
@@ -409,24 +517,42 @@ class TuiSession:
         from code_helper.cli.menu import Section
         from code_helper.services.model import AGENTS
         from code_helper.services.wrappers import (
+            column_header,
             describe_all_columns,
             valid_default_wrapper,
         )
 
         specs = self._all_wrapper_specs()
+        # Columns are aligned across ALL agents in one describe_all_columns
+        # call, not one call per agent — a per-agent call would compute its
+        # own name/provider widths from only that agent's wrappers, and the
+        # single header above the first group would then misalign against
+        # every later group whose widths differ.
+        described = describe_all_columns(
+            paths,
+            specs,
+            defaults={
+                agent.name: valid_default_wrapper(paths, agent.name) for agent in AGENTS
+            },
+        )
+        by_name = dict(described)
         rows: list = []
         for agent in AGENTS:
             agent_specs = [s for s in specs if s.agent.name == agent.name]
             if not agent_specs:
                 continue
-            rows.append(Section(agent.name))
+            if not rows:
+                # Once, above the first group: three unlabelled columns read
+                # as noise ("ollama" alone says nothing about being a
+                # provider). Repeating it per agent would be louder than the
+                # data it describes.
+                rows.append(Section(column_header(described)))
+            # The bare agent name would repeat the chipset row verbatim; the
+            # count says what this section actually is — the wrappers behind
+            # those chips.
+            rows.append(Section(f"{agent.name} — {len(agent_specs)} wrappers"))
             rows.extend(
-                (name, "  ".join(columns))
-                for name, columns in describe_all_columns(
-                    paths,
-                    agent_specs,
-                    defaults={agent.name: valid_default_wrapper(paths, agent.name)},
-                )
+                (spec.name, "  ".join(by_name[spec.name])) for spec in agent_specs
             )
         return rows
 
@@ -472,23 +598,54 @@ class TuiSession:
             ),
         )
 
-    def _run_set_default(self, paths) -> None:
-        """Patch ``~/.codex/config.toml`` with codex's default wrapper."""
-        from code_helper.cli.parser import _handle_set_default
-        from code_helper.services.model import BaseUrlPolicy
-        from code_helper.services.wrappers import valid_default_wrapper
+    # --- applying a chip -------------------------------------------------
 
-        alias = valid_default_wrapper(paths, "codex")
-        if alias is None:
-            self._notify(
-                "error: no default wrapper set for codex — pick an installed "
-                "codex wrapper (Enter on its row) first"
-            )
-            return
-        spec = self._resolve_spec(alias)
-        if spec is None:
-            return
+    def _apply_switch_wrapper(self, spec) -> None:
+        """claude: retarget the RUNNING session at ``spec``'s backend."""
+        from code_helper.cli.parser import _handle_switch
+
+        self._run(_handle_switch, self._switch_request(from_wrapper=spec.name))
+
+    def _apply_switch_native(self) -> None:
+        """claude: clear the managed ``env`` block from settings.json."""
+        from code_helper.cli.parser import _handle_switch
+
+        self._run(_handle_switch, self._switch_request(provider=_NATIVE_CHIP))
+
+    def _switch_request(self, *, provider=None, from_wrapper=None):
+        """A :class:`SwitchRequest` carrying only the axis a chip varies.
+
+        Every other field is meaningless from the main screen (no model or
+        token prompts, no restore), so the shared fields are filled once here
+        instead of at each call site — which also keeps the two apply paths
+        from drifting apart if ``SwitchRequest`` grows another field.
+        """
+        from code_helper.cli.requests import SwitchRequest
+
+        return SwitchRequest(
+            provider=provider,
+            from_wrapper=from_wrapper,
+            model=None,
+            haiku=None,
+            sonnet=None,
+            opus=None,
+            subagent_model=None,
+            base_url=None,
+            auth=None,
+            profile=None,
+            restore=False,
+            slot=None,
+            status=False,
+            dry_run=getattr(self.args, "dry_run", False),
+            force=False,
+            debug=getattr(self.args, "debug", False),
+        )
+
+    def _apply_set_default_wrapper(self, spec) -> None:
+        """codex: patch config.toml so the NEXT launch uses ``spec``."""
+        from code_helper.cli.parser import _handle_set_default
         from code_helper.cli.requests import SetDefaultRequest
+        from code_helper.services.model import BaseUrlPolicy
 
         # FIXED providers reject a --base-url even when it equals their own
         # registry default; forward the resolved address only for
@@ -513,89 +670,30 @@ class TuiSession:
             ),
         )
 
-    def _run_switch(self, paths) -> None:
-        """Live-patch ``~/.claude/settings.json`` — the ``w`` screen.
+    def _apply_set_default_native(self) -> None:
+        """codex: remove the managed region from config.toml.
 
-        Distinct from Enter-on-a-wrapper-row (which sets the PERSISTED
-        default for the next launch): this changes an ALREADY RUNNING
-        ``claude``'s backend on its next prompt. Deliberately not merged
-        onto Enter — a single keypress that both records a preference and
-        live-rewrites Claude Code's global config would be a nasty surprise.
-
-        Rows: every installed ``anthropic-env`` claude wrapper (``switch
-        --from-wrapper``, zero prompts), then ``native`` (clears the
-        override). The currently-live entry, if any, carries the same ``●``
-        marker the default-wrapper column uses.
+        Deliberately NOT ``set-default --restore``: restore rolls the file
+        back to a backup snapshot, undoing unrelated hand-edits made since.
+        This removes only the region this tool owns — "stop overriding",
+        not "undo my last change".
         """
-        from code_helper.cli.parser import _handle_switch
-        from code_helper.cli.requests import SwitchRequest
-        from code_helper.services.model import ConfigShape, get_agent, get_provider
-        from code_helper.services.wrappers import is_installed
+        from code_helper.cli.parser import _confirm_set_default
+        from code_helper.services.codex_default import clear_default
+        from code_helper.services.paths import Paths
 
-        claude_wrappers = [
-            (spec.name, spec)
-            for spec in self._all_wrapper_specs()
-            if spec.agent.name == get_agent("claude").name
-            and spec.shape is ConfigShape.ANTHROPIC_ENV
-            and is_installed(paths, spec.name)
-        ]
-
-        # `_refresh_active_label` (run() calls it right before this screen is
-        # reachable) already read this from settings.json this iteration —
-        # reuse it instead of a second file read + JSON parse.
-        live = self._live_switch
-        items: list[tuple[str, str]] = [
-            (
-                f"wrapper:{name}",
-                f"{'● ' if spec.provider.name == live else '  '}{name} "
-                f"— {spec.provider.name}",
-            )
-            for name, spec in claude_wrappers
-        ]
-        native = get_provider("native")
-        items.append(
-            (
-                "provider:native",
-                f"{'● ' if live is None else '  '}native — {native.description}",
-            )
-        )
-        items.append((_BACK, "Back"))
-
-        choice = self._pick(items, "Switch the running claude's backend to:")
-        if choice == _BACK:
-            return
-
-        def switch_request(*, provider=None, from_wrapper=None) -> SwitchRequest:
-            # Both rows below only ever vary `provider`/`from_wrapper` — every
-            # other axis is meaningless from this screen (no model/token
-            # prompts, no restore) — so the 14 shared fields are filled once
-            # here instead of twice, keeping the two call sites from drifting
-            # apart if `SwitchRequest` grows another field later.
-            return SwitchRequest(
-                provider=provider,
-                from_wrapper=from_wrapper,
-                model=None,
-                haiku=None,
-                sonnet=None,
-                opus=None,
-                subagent_model=None,
-                base_url=None,
-                auth=None,
-                profile=None,
-                restore=False,
-                slot=None,
-                status=False,
+        # Reuses the CLI's own confirm — same diff-first prompt, and (the part
+        # a local re-implementation would have silently dropped) the same
+        # off-a-TTY refusal, so a scripted run can never be talked into
+        # patching config.toml through the TUI.
+        self._run(
+            lambda _req: clear_default(
+                Paths.default(),
                 dry_run=getattr(self.args, "dry_run", False),
-                force=False,
-                debug=getattr(self.args, "debug", False),
-            )
-
-        if choice == "provider:native":
-            self._run(_handle_switch, switch_request(provider="native"))
-            return
-
-        alias = choice.removeprefix("wrapper:")
-        self._run(_handle_switch, switch_request(from_wrapper=alias))
+                confirm=_confirm_set_default,
+            ),
+            None,
+        )
 
     def _add_provider_choices(self):
         """Return provider menu rows and their runtime-auth choices.
@@ -808,7 +906,16 @@ class TuiSession:
                 self.args.dry_run = not getattr(self.args, "dry_run", False)
 
     def _run_profile_screen(self) -> None:
-        """Choose the active provider and its active profile (the Tab cycle)."""
+        """Pick the active token profile — the ``p`` screen.
+
+        This is where profile switching lives now. It used to be spread
+        across the main screen as Tab (cycle within the current provider)
+        plus digits 1-0 (jump to a numbered slot), while this screen itself
+        was unreachable — nothing dispatched to it. The chipset needed
+        Left/Right and Shift+Tab for backends, so profile switching moved
+        here WHOLE rather than being split further: Tab and the digit slots
+        work exactly as they did, on the screen that is about profiles.
+        """
         from code_helper.services.paths import Paths
         from code_helper.services.secrets import (
             DEFAULT_PROFILE,
@@ -818,11 +925,20 @@ class TuiSession:
         from code_helper.services.state import set_active_selection
 
         paths = Paths.default()
+        self._refresh_profile_label()
         provider_items = [
             (p.name, f"{p.name} — {p.description}") for p in self._secret_providers()
         ]
+        keys: dict[str, Callable[[str], object]] = {}
+        for i in range(10):
+            keys[f"DIGIT_{i}"] = lambda _value, i=i: self._on_slot(
+                9 if i == 0 else i - 1
+            )
         provider = self._pick(
-            [*provider_items, (_BACK, "Back")], "Active profile provider:"
+            [self._slot_section(), *provider_items, (_BACK, "Back")],
+            "Active profile provider:",
+            on_tab=self._on_tab,
+            on_key=keys,
         )
         if provider == _BACK:
             return
@@ -917,7 +1033,7 @@ class TuiSession:
         stored = valid_active_profile(paths, provider)
         idx = names.index(stored) if stored in names else -1
         set_active_selection(paths, provider, names[(idx + 1) % len(names)])
-        self._refresh_active_label()
+        self._refresh_profile_label()
 
     def _on_slot(self, slot: int) -> None:
         from code_helper.services.paths import Paths
@@ -928,62 +1044,200 @@ class TuiSession:
         if slot < len(slots):
             provider, profile = slots[slot]
             set_active_selection(Paths.default(), provider, profile)
-            self._refresh_active_label()
+            self._refresh_profile_label()
 
     def _slot_section(self):
+        """The profile screen's slot strip — `1 zai/default  2 zai/work`.
+
+        Reads the cache rather than rescanning: this is a callable label, so
+        it is re-evaluated on every redraw frame, and `profile_slots` walks
+        every provider's profiles. `_refresh_profile_label` refills it when a
+        slot actually changes.
+        """
         from code_helper.cli.menu import Section
+
+        return Section(lambda: self._slot_label)
+
+    def _refresh_profile_label(self) -> None:
+        """Refresh only the profile-related caches.
+
+        Split from :meth:`_refresh_active_label` because Tab and the digit
+        slots change a PROFILE, not a backend — re-reading each agent's
+        config file there would be work no keypress on that screen can
+        invalidate.
+        """
         from code_helper.services.paths import Paths
         from code_helper.services.profiles import profile_slots
 
-        def label() -> str:
-            slots = profile_slots(Paths.default())
-            return "  ".join(
-                f"{i + 1} {provider}/{profile}"
-                for i, (provider, profile) in enumerate(slots)
-            )
-
-        return Section(label)
-
-    def _refresh_active_label(self) -> None:
-        """Resolve the active provider and its rendered label, once."""
-        from code_helper.services.claude_settings import current_switch
-        from code_helper.services.paths import Paths
-
         self._tab_provider = self._resolve_tab_provider()
         self._tab_label = self._active_label(self._tab_provider)
-        # Read once per main-loop iteration, not once per redraw frame —
-        # `_main_prompt` (a callable re-evaluated on every keypress,
-        # including pure cursor movement) reads `self._live_switch` instead
-        # of re-deriving it; see `__init__`'s comment on `_live_switch`.
-        self._live_switch = current_switch(Paths.default())
+        self._slot_label = "  ".join(
+            f"{i + 1} {provider}/{profile}"
+            for i, (provider, profile) in enumerate(profile_slots(Paths.default()))
+        )
 
-    def _live_switch_label(self) -> str:
-        """``"Live: zai"`` / ``"Live: native"`` for the header row.
+    def _refresh_active_label(self) -> None:
+        """Refresh every per-iteration cache the main screen reads.
 
-        Reads the cache ``_refresh_active_label`` fills once per main-loop
-        iteration — not the file itself: this is called from ``_main_prompt``,
-        a callable re-evaluated on every redraw frame (including pure cursor
-        movement), so re-reading and re-parsing settings.json there would
-        mean doing that I/O on every keystroke rather than once per screen.
+        Called ONCE per main-loop iteration. Everything filled here does real
+        I/O (a profile scan, plus one config read per agent), and every
+        consumer is a label callable that the menu re-evaluates on EVERY
+        redraw frame — including pure cursor movement. Reading any of it from
+        those callables would turn one screen's worth of I/O into one
+        keystroke's worth.
         """
-        live = self._live_switch
-        return f"Live: {live}" if live else "Live: native"
+        from code_helper.services.paths import Paths
+
+        paths = Paths.default()
+        self._refresh_profile_label()
+        self._applied = {
+            name: backend.read_applied(paths)
+            for name, backend in _AGENT_BACKENDS.items()
+        }
+        self._chips = {name: self._chips_for(name, paths) for name in _AGENT_BACKENDS}
+        # A wrapper can be removed (`d`) or added (`a`) between iterations, so
+        # a chip cursor parked past the end of a now-shorter strip is normal,
+        # not a bug — clamp rather than reset, so an unaffected row keeps its
+        # position.
+        for name, chips in self._chips.items():
+            if self._chip_index.get(name, 0) >= len(chips):
+                self._chip_index[name] = max(0, len(chips) - 1)
+
+    def _chips_for(self, agent_name: str, paths) -> list:
+        """The chip strip for ``agent_name``: native, then its wrappers.
+
+        A chip is an ALREADY-INSTALLED wrapper, never a bare provider: the
+        wrapper is where a backend's model, token and base URL were resolved
+        and frozen when it was created. That is what lets Enter apply a chip
+        with no prompts and no second guess about which model to use — and it
+        is why there is no "provider with no wrapper" chip to explain away.
+        """
+        from code_helper.services.wrappers import is_installed
+
+        return [_NATIVE_CHIP] + [
+            spec
+            for spec in self._all_wrapper_specs()
+            if spec.agent.name == agent_name and is_installed(paths, spec.name)
+        ]
+
+    @staticmethod
+    def _chip_name(chip) -> str:
+        return chip if isinstance(chip, str) else chip.name
+
+    def _chip_is_applied(self, agent_name: str, chip) -> bool:
+        """Whether ``chip`` is the backend currently in the agent's config.
+
+        The applied state is read back as a PROVIDER name (that is what the
+        config file records), while a chip is a wrapper — so a wrapper chip
+        matches when its provider matches. Two wrappers on the same provider
+        are therefore indistinguishable here and the first one is marked; the
+        same honest limitation ``current_switch`` documents for two providers
+        sharing one base URL.
+        """
+        applied = self._applied.get(agent_name)
+        if chip == _NATIVE_CHIP:
+            return applied is None
+        return applied is not None and chip.provider.name == applied
+
+    def _chip_row(self, agent_name: str) -> Callable[..., str]:
+        """A label callable rendering one agent's chip strip.
+
+        Re-evaluated on every redraw frame, so it reads ONLY the caches
+        ``_refresh_active_label`` fills — never the filesystem. Returns one
+        logical line: the menu truncates to the terminal width and counts one
+        row per entry, and a strip that wrapped would desynchronise the
+        in-place frame erase.
+
+        Accepts ``selected``/``ansi`` from ``menu._call_label``: the chip
+        cursor (Left/Right, applied by Enter) is drawn ONLY when this row is
+        the one the list cursor `>` sits on. Without that, every agent row
+        would show its own remembered ``_chip_index`` at once — two (or N)
+        highlighted blocks on screen for a list with a single cursor.
+        """
+
+        def label(*, selected: bool = True, ansi: bool = True) -> str:
+            chips = self._chips.get(agent_name, [])
+            cursor = self._chip_index.get(agent_name, 0)
+            rendered = []
+            for index, chip in enumerate(chips):
+                name = self._chip_name(chip)
+                applied = self._chip_is_applied(agent_name, chip)
+                text = f"✓ {name}" if applied else name
+                if selected and index == cursor:
+                    rendered.append(
+                        f"{_REVERSE}{text}{_RESET}" if ansi else f"[{text}]"
+                    )
+                elif applied:
+                    rendered.append(f"{_BOLD}{text}{_RESET}" if ansi else text)
+                else:
+                    rendered.append(text)
+            return f"{agent_name:<8}{'  '.join(rendered)}"
+
+        return label
+
+    def _chip_move(self, value: str, delta: int) -> None:
+        """Move the focused agent row's chip cursor. Pure in-memory.
+
+        Returns ``None`` so the menu redraws instead of exiting, which is what
+        makes left/right free of I/O: nothing is read or written until Enter
+        applies a chip. A no-op when the row cursor is on a wrapper row.
+        """
+        if not value.startswith(_AGENT_ROW):
+            return None
+        agent_name = value.removeprefix(_AGENT_ROW)
+        chips = self._chips.get(agent_name, [])
+        if chips:
+            current = self._chip_index.get(agent_name, 0)
+            self._chip_index[agent_name] = (current + delta) % len(chips)
+        return None
+
+    def _apply_chip(self, agent_name: str) -> None:
+        """Apply the highlighted chip of ``agent_name`` (Enter on its row).
+
+        The already-applied short-circuit is trusted ONLY for the native
+        chip: ``applied is None`` is an exact, unambiguous read (see
+        ``_chip_is_applied``). A wrapper chip's "applied" is a heuristic —
+        matched by PROVIDER NAME only, because that is all a config file
+        records — so two installed wrappers sharing a provider (different
+        model/profile/token/base-url) are indistinguishable there and the
+        first one is reported applied even when the SECOND is the one
+        actually live. Short-circuiting Enter on that heuristic would make
+        the second wrapper permanently unreachable through the chipset — the
+        exact distinction it exists to expose — so a wrapper chip always
+        re-applies; the backend's own apply path already no-ops safely when
+        the resolved config truly hasn't changed.
+        """
+        chips = self._chips.get(agent_name, [])
+        if not chips:
+            return
+        chip = chips[min(self._chip_index.get(agent_name, 0), len(chips) - 1)]
+        backend = _AGENT_BACKENDS[agent_name]
+        if chip == _NATIVE_CHIP:
+            if self._chip_is_applied(agent_name, chip):
+                self._notify(f"{agent_name} is already on {self._chip_name(chip)}.")
+                return
+            getattr(self, backend.apply_native)()
+        else:
+            getattr(self, backend.apply_wrapper)(chip)
 
     def _main_prompt(self) -> str:
-        """Live main-menu header, showing the active provider/profile."""
-        live_label = self._live_switch_label()
+        """Live main-menu header.
+
+        Deliberately does NOT repeat which backend is applied: the chipset
+        rows say that in place, and a header that restates it is the kind of
+        duplication this screen was redesigned to remove.
+        """
         if self._tab_label:
-            return f"code-helper{' ' * 20}{live_label}{' ' * 8}{self._tab_label}"
-        return f"code-helper{' ' * 28}{live_label}"
+            # Labelled: a bare "zai/axisrow" up here reads as a model or an
+            # endpoint, which is exactly what the rest of the screen is about.
+            return f"code-helper{' ' * 20}profile: {self._tab_label}"
+        return "code-helper"
 
     def _show_help(self) -> None:
         from code_helper.cli.menu import press_any_key
 
-        print(
-            "a add · e edit · d delete · t token · c codex default · w switch live "
-            "· s settings"
-        )
-        print("Tab/1-0 profile · Enter default · Esc back · Ctrl-C quit")
+        print("a add · e edit · d delete · t token · p profiles · s settings")
+        print("Up/Down row · Left/Right chip · Enter apply · Esc quit · Ctrl-C quit")
         press_any_key("Press any key to continue...")
 
     def _profile_row_label(self) -> str:
@@ -993,39 +1247,44 @@ class TuiSession:
 
     def run(self) -> int:
         """The main menu loop — show wrappers + service rows, dispatch."""
-        from code_helper.cli.menu import MenuCancelled
+        from code_helper.cli.menu import MenuCancelled, Section
         from code_helper.services.paths import Paths
         from code_helper.services.state import set_default_wrapper
 
         try:
             while True:
                 self._refresh_active_label()
-                tab_provider = self._tab_provider
                 paths = Paths.default()
                 keys = {
                     "a": lambda _alias: _ADD,
-                    "c": lambda _alias: _SET_DEFAULT,
-                    "w": lambda _alias: _SWITCH,
+                    "p": lambda _alias: _PROFILE,
                     "s": lambda _alias: _SETTINGS,
                     "?": lambda _alias: _HELP,
                     "TOKEN": lambda alias: f"token:{alias}",
                     "e": lambda alias: f"token:{alias}",
                     "d": lambda alias: f"remove:{alias}",
+                    # Left/Right (and Shift+Tab, the same move backwards) only
+                    # ever reposition the chip cursor and return None, so the
+                    # menu redraws without exiting — the whole point of
+                    # applying on Enter is that moving costs no I/O.
+                    "LEFT": lambda value: self._chip_move(value, -1),
+                    "RIGHT": lambda value: self._chip_move(value, +1),
+                    "BACK_TAB": lambda value: self._chip_move(value, -1),
                 }
-                for i in range(10):
-                    keys[f"DIGIT_{i}"] = lambda _alias, i=i: self._on_slot(
-                        9 if i == 0 else i - 1
-                    )
                 choice = self._pick(
                     [
-                        self._slot_section(),
+                        *(
+                            (f"{_AGENT_ROW}{name}", self._chip_row(name))
+                            for name in self._chips
+                        ),
+                        # Separates the chipset from the wrapper list below.
+                        Section(""),
                         *self._wrapper_rows(paths),
                     ],
                     self._main_prompt,
                     exit_word="quit",
-                    on_tab=self._on_tab,
-                    tab_provider=tab_provider,
                     on_key=keys,
+                    chips=True,
                     numbered=False,
                 )
                 if choice in (_BACK, _QUIT):
@@ -1034,10 +1293,8 @@ class TuiSession:
                     self._run_add()
                 elif choice == _PROFILE:
                     self._run_profile_screen()
-                elif choice == _SET_DEFAULT:
-                    self._run_set_default(paths)
-                elif choice == _SWITCH:
-                    self._run_switch(paths)
+                elif choice.startswith(_AGENT_ROW):
+                    self._apply_chip(choice.removeprefix(_AGENT_ROW))
                 elif choice == _SETTINGS:
                     self._run_settings()
                 elif choice == _HELP:
@@ -1090,3 +1347,56 @@ class TuiSession:
             if exc.hard:
                 raise
             return 0
+
+
+#: How each agent's backend is read and applied — the one place the two
+#: agents' differences are written down. Defined after `TuiSession` because
+#: its callables are that class's own methods; keeping it at module level
+#: (rather than as a class attribute) keeps it importable by tests that pin
+#: the table's shape without constructing a session.
+#:
+#: The two mechanisms are genuinely different, not two spellings of one:
+#: claude's `switch` rewrites `~/.claude/settings.json`, which a RUNNING
+#: session re-reads between prompts; codex's `set-default` patches
+#: `~/.codex/config.toml`, which is read at launch. Hence the differing
+#: `lifecycle` strings — the distinction is shown, not hidden.
+_AGENT_BACKENDS: dict[str, _AgentBackend] = {}
+
+
+def _register_agent_backends() -> None:
+    """Populate :data:`_AGENT_BACKENDS`, importing services lazily.
+
+    A function rather than a module-level literal so the service imports stay
+    inside a call — `cli/tui.py` is imported by `__main__` on every run,
+    including `--help`, and the rest of this module already defers its
+    service imports for that reason.
+    """
+    from code_helper.services.claude_settings import current_switch
+    from code_helper.services.codex_default import current_default
+
+    _AGENT_BACKENDS.update(
+        {
+            "claude": _AgentBackend(
+                read_applied=current_switch,
+                apply_wrapper="_apply_switch_wrapper",
+                apply_native="_apply_switch_native",
+                lifecycle="live",
+            ),
+            "codex": _AgentBackend(
+                read_applied=current_default,
+                apply_wrapper="_apply_set_default_wrapper",
+                apply_native="_apply_set_default_native",
+                lifecycle="next launch",
+            ),
+        }
+    )
+    # A method name is only as safe as its spelling: resolve every hook now,
+    # at import, so a typo is an immediate ImportError rather than an
+    # AttributeError the first time someone presses Enter on that row.
+    for backend in _AGENT_BACKENDS.values():
+        for hook in (backend.apply_wrapper, backend.apply_native):
+            if not callable(getattr(TuiSession, hook, None)):
+                raise AttributeError(f"TuiSession has no apply hook {hook!r}")
+
+
+_register_agent_backends()

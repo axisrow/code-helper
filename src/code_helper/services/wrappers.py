@@ -1388,6 +1388,29 @@ def describe_all_columns(
     ]
 
 
+def column_header(rows: Sequence[tuple[str, tuple[str, str, str]]]) -> str:
+    """``WRAPPER  PROVIDER  MODEL``, aligned to ``describe_all_columns``.
+
+    Takes the already-padded rows rather than the specs: every row's column 0
+    and column 1 are ``ljust``-ed to the same width by
+    :func:`describe_all_columns`, so the first row's widths are every row's
+    widths — recomputing a max here would be a second source of truth that
+    silently drifts the moment :func:`describe_wrapper_columns` changes its
+    padding.
+
+    Column 0 carries the two-character ``"● "``/``"  "`` default marker, so
+    the header is indented by the same two spaces; without that the word
+    ``WRAPPER`` would sit two columns left of every name under it.
+    """
+    if not rows:
+        return ""
+    name_col, provider_col, _ = rows[0][1]
+    return (
+        f"{'  WRAPPER'.ljust(len(name_col))}  "
+        f"{'PROVIDER'.ljust(len(provider_col))}  MODEL"
+    )
+
+
 def list_wrappers(paths: Paths, *, print_fn=print) -> None:
     """Print the wrapper registry + whether each is present on disk.
 
