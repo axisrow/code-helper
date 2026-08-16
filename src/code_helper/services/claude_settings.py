@@ -355,11 +355,43 @@ def _redact(value: str) -> str:
     return f"{value[:4]}...{value[-3:]}"
 
 
-def _redacted_preview(original: str, patched: str, token: str) -> str:
-    """:func:`diff_preview` with ``token`` (if non-empty) replaced everywhere."""
+#: Managed keys whose VALUE may itself be a credential, as opposed to a URL
+#: or a model name (``ANTHROPIC_BASE_URL``, the ``*_MODEL`` keys). These are
+#: the values ``_redacted_preview`` must mask — not just the newly supplied
+#: ``token`` — because a PREVIOUS switch may have already left one of these
+#: in ``original``, and a preview is printed to stdout / a confirm prompt.
+_CREDENTIAL_ENV_KEYS: tuple[str, ...] = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+
+
+def _credential_values(parsed: dict) -> set[str]:
+    """Every non-empty value of :data:`_CREDENTIAL_ENV_KEYS` in ``parsed["env"]``."""
+    env = parsed.get("env")
+    if not isinstance(env, dict):
+        return set()
+    return {
+        value
+        for key in _CREDENTIAL_ENV_KEYS
+        if isinstance(value := env.get(key), str) and value
+    }
+
+
+def _redacted_preview(
+    original: str, patched: str, token: str, *, original_parsed: dict, patched_parsed: dict
+) -> str:
+    """:func:`diff_preview` with every credential value replaced everywhere.
+
+    Redacts the newly supplied ``token`` AND every credential already
+    present in ``original_parsed``/``patched_parsed`` (e.g.
+    ``ANTHROPIC_AUTH_TOKEN`` left by a PREVIOUS switch) — not just the one
+    this call is writing. Switching AWAY from a provider whose token is
+    still sitting in ``env`` must not print that old value verbatim.
+    """
     preview = diff_preview(original, patched)
+    values = _credential_values(original_parsed) | _credential_values(patched_parsed)
     if token:
-        preview = preview.replace(token, _redact(token))
+        values.add(token)
+    for value in values:
+        preview = preview.replace(value, _redact(value))
     return preview
 
 
@@ -461,7 +493,9 @@ def apply_switch(
     if patched == original:
         return False
 
-    preview = _redacted_preview(original_text, patched_text, token)
+    preview = _redacted_preview(
+        original_text, patched_text, token, original_parsed=original, patched_parsed=patched
+    )
 
     if dry_run:
         print(preview or "(no textual change)")
@@ -472,6 +506,20 @@ def apply_switch(
         raise CodeHelperError(
             f"about to patch {settings_path} — refusing without confirmation "
             f"(use --force, or re-run interactively)"
+        )
+
+    # Re-read immediately before writing: `original_text` was captured back
+    # at function entry, and an interactive `confirm` prompt (or simply the
+    # gap between read and write) gives a concurrent `switch`/hand-edit a
+    # window to change the file in between. Without this recheck that
+    # concurrent write is silently lost — this refuses instead of clobbering
+    # it, mirroring codex_default's own stale-file guard.
+    current_text = read_text_or_none(settings_path) or ""
+    if current_text != original_text:
+        raise CodeHelperError(
+            f"{settings_path} changed since it was read — refusing to write "
+            f"a patch computed off a stale snapshot (a concurrent switch or "
+            f"hand-edit may have run; re-run to patch the current file)"
         )
 
     if original_text:

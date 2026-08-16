@@ -413,6 +413,33 @@ def test_apply_switch_dry_run_redacts_the_token(tmp_path, capsys):
 
 
 @pytest.mark.unit
+def test_apply_switch_dry_run_redacts_the_previous_token_too(tmp_path, capsys):
+    # Regression: `_redacted_preview` used to replace only the NEW token
+    # being written. Switching AWAY from a provider that already left its
+    # own token in settings.json therefore printed that OLD credential
+    # verbatim in the confirm/--dry-run diff — a real leak into stdout/logs,
+    # not merely a cosmetic gap.
+    paths = Paths.from_home(tmp_path)
+    litellm = with_base_url(LITELLM, "https://litellm.example.com/v1")
+    old_patch = resolve_switch_patch(
+        litellm, tier_models=TierModels.uniform("glm-5.2"), token="sk-OLD-litellm-secret"
+    )
+    _write(paths, {"env": dict(old_patch.env)})
+
+    apply_switch(
+        paths,
+        provider=ZAI,
+        tier_models=TierModels.uniform("glm-5.2"),
+        token="sk-NEW-zai-secret",
+        dry_run=True,
+    )
+
+    out = capsys.readouterr().out
+    assert "sk-OLD-litellm-secret" not in out
+    assert "sk-NEW-zai-secret" not in out
+
+
+@pytest.mark.unit
 def test_apply_switch_confirm_refused_leaves_file_untouched(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write(paths, {"env": dict(_FOREIGN_ENV)})
@@ -445,6 +472,37 @@ def test_apply_switch_force_skips_confirm(tmp_path):
         confirm=_confirm_no,  # must be bypassed by force
     )
     assert changed is True
+
+
+@pytest.mark.unit
+def test_apply_switch_refuses_when_file_changed_since_it_was_read(tmp_path):
+    # Regression: apply_switch reads settings.json, computes a patch off that
+    # snapshot, then (after confirm) writes unconditionally — a second
+    # concurrent switch (or a hand-edit) landing in between was silently
+    # overwritten with no recheck. `confirm` is the one hook that runs AFTER
+    # the read and BEFORE the write, so it doubles here as a way to simulate
+    # a concurrent editor winning the race.
+    paths = Paths.from_home(tmp_path)
+    _write(paths, {"env": dict(_FOREIGN_ENV)})
+
+    def _concurrent_editor(_path, _preview):
+        # Someone else (a second `switch`, or the user by hand) changes the
+        # file after apply_switch already read it but before it writes.
+        _write(paths, {"env": {**_FOREIGN_ENV, "IS_DEMO": "0"}})
+        return True
+
+    with pytest.raises(CodeHelperError, match="changed since it was read"):
+        apply_switch(
+            paths,
+            provider=ZAI,
+            tier_models=TierModels.uniform("glm-5.2"),
+            token="sk-test",
+            confirm=_concurrent_editor,
+        )
+
+    # The concurrent editor's write must survive — apply_switch must NOT
+    # have clobbered it with a patch computed off the stale snapshot.
+    assert _read(paths)["env"]["IS_DEMO"] == "0"
 
 
 @pytest.mark.unit
