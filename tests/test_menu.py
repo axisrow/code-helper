@@ -13,6 +13,8 @@ import pytest
 from code_helper.cli.menu import (
     MenuCancelled,
     Section,
+    _fit,
+    _visible_len,
     press_any_key,
     read_line,
     select_from_menu,
@@ -563,6 +565,58 @@ def test_select_from_menu_callable_prompt_is_re_evaluated_each_frame():
 
 
 @pytest.mark.unit
+def test_select_from_menu_nullary_callable_label_still_works():
+    # Backward compatibility: a plain zero-arg label (the common case) must
+    # keep working unchanged — `_call_label`'s TypeError fallback is what
+    # lets a label opt into `selected`/`ansi` without every existing label
+    # in the project having to grow those params.
+    lines = []
+    select_from_menu(
+        [("a", lambda: "plain label")],
+        read_key=_fake_keys(["ENTER"]),
+        print_fn=lines.append,
+    )
+    assert any("plain label" in line for line in lines)
+
+
+@pytest.mark.unit
+def test_select_from_menu_label_receives_selected_state(monkeypatch):
+    # A label declaring `selected`/`ansi` gets told which row the list
+    # cursor is actually on — not "always selected", which is the bug that
+    # let two chipset rows render as if both carried the cursor at once.
+    seen: list[tuple[bool, bool]] = []
+
+    def label(*, selected: bool, ansi: bool) -> str:
+        seen.append((selected, ansi))
+        return f"row selected={selected}"
+
+    fake = _FakeTTY()
+    monkeypatch.setattr(sys, "stdout", fake)
+    select_from_menu(
+        [("a", label), ("b", "b")],
+        read_key=_fake_keys(["DOWN", "ENTER"]),
+    )
+    # Two frames rendered (initial + after DOWN); the row is selected first,
+    # then not, once the cursor moves to "b".
+    assert seen == [(True, True), (False, True)]
+
+
+@pytest.mark.unit
+def test_select_from_menu_label_gets_ansi_false_when_not_a_tty(monkeypatch):
+    seen: list[bool] = []
+
+    def label(*, selected: bool, ansi: bool) -> str:
+        seen.append(ansi)
+        return "row"
+
+    fake = _FakeTTY()
+    fake.isatty = lambda: False
+    monkeypatch.setattr(sys, "stdout", fake)
+    select_from_menu([("a", label)], read_key=_fake_keys(["ENTER"]))
+    assert seen == [False]
+
+
+@pytest.mark.unit
 def test_select_from_menu_callable_label_reflects_state_change():
     # A callable label that returns different text per call must render the
     # updated text on the redraw frame — the desync symptom from issue #26
@@ -790,3 +844,56 @@ def test_numbered_false_hides_digit_column():
         print_fn=lines.append,
     )
     assert not any("·" in line for line in lines)
+
+
+# --- ANSI-aware `_fit` / `_visible_len` -------------------------------------
+
+
+@pytest.mark.unit
+def test_visible_len_ignores_sgr_wrapper():
+    assert _visible_len("\033[7mglm\033[0m") == len("glm")
+
+
+@pytest.mark.unit
+def test_visible_len_matches_plain_len_without_ansi():
+    assert _visible_len("plain text") == len("plain text")
+
+
+@pytest.mark.unit
+def test_fit_plain_line_unchanged_when_it_fits():
+    assert _fit("short", 10) == "short"
+
+
+@pytest.mark.unit
+def test_fit_plain_line_truncates_like_before():
+    # Regression: no ANSI codes involved, behavior matches the pre-SGR `_fit`.
+    assert _fit("abcdefgh", 5) == "abcd…"
+
+
+@pytest.mark.unit
+def test_fit_line_with_ansi_that_already_fits_is_untouched():
+    line = "\033[7mglm\033[0m"
+    assert _fit(line, 10) == line
+
+
+@pytest.mark.unit
+def test_fit_cuts_inside_an_open_span_appends_reset():
+    # Visible payload is "applied-glm", width 6 lands mid-span (open \033[7m
+    # never closed before the cut) — the reset must be appended so the
+    # highlight does not bleed into the rest of the physical row.
+    line = "\033[7mapplied-glm\033[0m"
+    result = _fit(line, 6)
+    assert result.startswith("\033[7m")
+    assert result.endswith("\033[0m")
+    assert _visible_len(result) <= 6
+
+
+@pytest.mark.unit
+def test_fit_cuts_exactly_at_a_span_boundary_keeps_code_intact():
+    # "hi" (2 visible chars) + full reverse span around "x" (1 visible char)
+    # = width 3 lands exactly on the boundary right after `\033[7m`.
+    line = "hi\033[7mx\033[0m"
+    result = _fit(line, 3)
+    assert result.count("\033[7m") == line.count("\033[7m")
+    # No dangling half-written escape byte sequence.
+    assert result.count("\033[") == result.count("m")

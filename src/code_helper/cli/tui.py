@@ -42,6 +42,14 @@ _AGENT_ROW = "agent:"
 #: through that agent's own reset mechanism (see :class:`_AgentBackend`).
 _NATIVE_CHIP = "native"
 
+#: SGR codes for the chip strip: reverse video marks the chip under the
+#: cursor (fzf/less-style), bold marks the chip currently applied when the
+#: cursor is elsewhere. `menu._fit` is ANSI-aware and strips these safely
+#: when a row is truncated to the terminal width.
+_REVERSE = "\033[7m"
+_BOLD = "\033[1m"
+_RESET = "\033[0m"
+
 # profile name, token typed in this flow, old profile name, new old-profile name
 ProfileChoice = tuple[str, str | None, str | None, str | None]
 
@@ -120,10 +128,13 @@ def _hint(
         digits = "1" if usable == 1 else f"1-{usable}"
         hint = f"Up/Down · {digits} · Enter select · Esc {exit_word} · Ctrl-C quit"
     elif chips:
-        hint = (
-            f"Up/Down row · Left/Right chip · Enter apply · ? keys "
-            f"· Esc {exit_word} · Ctrl-C quit"
-        )
+        # The editing keys are named here rather than left behind `?`: on the
+        # main screen they are the only way to add or change a wrapper, and a
+        # key nobody can see is a key nobody presses. Kept to a single
+        # "a/e/d" cluster and short arrows to stay well inside 80 columns —
+        # `_fit` would otherwise truncate the tail and silently eat the exit
+        # hint, which is exactly the bug a PTY run caught here.
+        hint = f"↑↓ row · ←→ chip · Enter apply · a/e/d edit · ? keys · Esc {exit_word}"
     else:
         hint = f"Up/Down · Enter select · Esc {exit_word} · Ctrl-C quit"
     if has_token_key:
@@ -506,24 +517,42 @@ class TuiSession:
         from code_helper.cli.menu import Section
         from code_helper.services.model import AGENTS
         from code_helper.services.wrappers import (
+            column_header,
             describe_all_columns,
             valid_default_wrapper,
         )
 
         specs = self._all_wrapper_specs()
+        # Columns are aligned across ALL agents in one describe_all_columns
+        # call, not one call per agent — a per-agent call would compute its
+        # own name/provider widths from only that agent's wrappers, and the
+        # single header above the first group would then misalign against
+        # every later group whose widths differ.
+        described = describe_all_columns(
+            paths,
+            specs,
+            defaults={
+                agent.name: valid_default_wrapper(paths, agent.name) for agent in AGENTS
+            },
+        )
+        by_name = dict(described)
         rows: list = []
         for agent in AGENTS:
             agent_specs = [s for s in specs if s.agent.name == agent.name]
             if not agent_specs:
                 continue
-            rows.append(Section(agent.name))
+            if not rows:
+                # Once, above the first group: three unlabelled columns read
+                # as noise ("ollama" alone says nothing about being a
+                # provider). Repeating it per agent would be louder than the
+                # data it describes.
+                rows.append(Section(column_header(described)))
+            # The bare agent name would repeat the chipset row verbatim; the
+            # count says what this section actually is — the wrappers behind
+            # those chips.
+            rows.append(Section(f"{agent.name} — {len(agent_specs)} wrappers"))
             rows.extend(
-                (name, "  ".join(columns))
-                for name, columns in describe_all_columns(
-                    paths,
-                    agent_specs,
-                    defaults={agent.name: valid_default_wrapper(paths, agent.name)},
-                )
+                (spec.name, "  ".join(by_name[spec.name])) for spec in agent_specs
             )
         return rows
 
@@ -1110,7 +1139,7 @@ class TuiSession:
             return applied is None
         return applied is not None and chip.provider.name == applied
 
-    def _chip_row(self, agent_name: str) -> Callable[[], str]:
+    def _chip_row(self, agent_name: str) -> Callable[..., str]:
         """A label callable rendering one agent's chip strip.
 
         Re-evaluated on every redraw frame, so it reads ONLY the caches
@@ -1118,25 +1147,31 @@ class TuiSession:
         logical line: the menu truncates to the terminal width and counts one
         row per entry, and a strip that wrapped would desynchronise the
         in-place frame erase.
+
+        Accepts ``selected``/``ansi`` from ``menu._call_label``: the chip
+        cursor (Left/Right, applied by Enter) is drawn ONLY when this row is
+        the one the list cursor `>` sits on. Without that, every agent row
+        would show its own remembered ``_chip_index`` at once — two (or N)
+        highlighted blocks on screen for a list with a single cursor.
         """
 
-        def label() -> str:
+        def label(*, selected: bool = True, ansi: bool = True) -> str:
             chips = self._chips.get(agent_name, [])
             cursor = self._chip_index.get(agent_name, 0)
             rendered = []
             for index, chip in enumerate(chips):
                 name = self._chip_name(chip)
                 applied = self._chip_is_applied(agent_name, chip)
-                if applied and index == cursor:
-                    rendered.append(f"[*{name}]")
+                text = f"✓ {name}" if applied else name
+                if selected and index == cursor:
+                    rendered.append(
+                        f"{_REVERSE}{text}{_RESET}" if ansi else f"[{text}]"
+                    )
                 elif applied:
-                    rendered.append(f"[{name}]")
-                elif index == cursor:
-                    rendered.append(f"<{name}>")
+                    rendered.append(f"{_BOLD}{text}{_RESET}" if ansi else text)
                 else:
-                    rendered.append(f"( {name} )")
-            lifecycle = _AGENT_BACKENDS[agent_name].lifecycle
-            return f"{agent_name:<8}{'  '.join(rendered)}   {lifecycle}"
+                    rendered.append(text)
+            return f"{agent_name:<8}{'  '.join(rendered)}"
 
         return label
 
@@ -1179,7 +1214,9 @@ class TuiSession:
         duplication this screen was redesigned to remove.
         """
         if self._tab_label:
-            return f"code-helper{' ' * 20}{self._tab_label}"
+            # Labelled: a bare "zai/axisrow" up here reads as a model or an
+            # endpoint, which is exactly what the rest of the screen is about.
+            return f"code-helper{' ' * 20}profile: {self._tab_label}"
         return "code-helper"
 
     def _show_help(self) -> None:
@@ -1196,7 +1233,7 @@ class TuiSession:
 
     def run(self) -> int:
         """The main menu loop — show wrappers + service rows, dispatch."""
-        from code_helper.cli.menu import MenuCancelled
+        from code_helper.cli.menu import MenuCancelled, Section
         from code_helper.services.paths import Paths
         from code_helper.services.state import set_default_wrapper
 
@@ -1226,6 +1263,8 @@ class TuiSession:
                             (f"{_AGENT_ROW}{name}", self._chip_row(name))
                             for name in self._chips
                         ),
+                        # Separates the chipset from the wrapper list below.
+                        Section(""),
                         *self._wrapper_rows(paths),
                     ],
                     self._main_prompt,

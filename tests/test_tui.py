@@ -952,11 +952,12 @@ def test_main_screen_shows_wrappers_grouped_by_agent(monkeypatch):
     assert main(["tui"]) == 0
 
     main_items = captured[0]
-    # Presets (all claude today) appear under a Section("claude") header.
-    # Section defines no __eq__ (it is a render marker, not a value), so match
-    # on `.text` rather than `in`.
+    # Presets (all claude today) appear under a "claude — N wrappers" header
+    # (not the bare word "claude" — that would repeat the chipset row above
+    # it verbatim). Section defines no __eq__ (it is a render marker, not a
+    # value), so match on `.text` rather than `in`.
     section_texts = [e.text for e in main_items if isinstance(e, Section)]
-    assert "claude" in section_texts
+    assert any(text.startswith("claude — ") for text in section_texts)
     # The old indirection is gone.
     assert not any(not isinstance(e, Section) and e[0] == "list" for e in main_items)
     # The service rows are still present below the wrappers.
@@ -1081,7 +1082,7 @@ def test_main_screen_groups_colliding_managed_wrapper_under_installed_agent(
             current = e.text
         elif e[0] not in ("add", "profile", "settings", "quit"):
             section_of[e[0]] = current
-    assert section_of["glm"] == "codex"
+    assert section_of["glm"].startswith("codex — ")
 
 
 @pytest.mark.integration
@@ -1114,31 +1115,64 @@ def test_main_screen_hint_advertises_token_key(monkeypatch):
 # --- the chipset frame ------------------------------------------------------
 
 
-def _chip_rows(items) -> dict[str, str]:
-    """Rendered chipset rows from a captured `items` list, keyed by agent."""
-    from code_helper.cli.menu import Section
+def _chip_rows(items, *, cursor_pair: int = 0, ansi: bool = True) -> dict[str, str]:
+    """Rendered chipset rows from a captured `items` list, keyed by agent.
+
+    Goes through the SAME ``_call_label`` the real menu uses (not a bare
+    ``entry[1]()``) so a test here cannot drift from what a user actually
+    sees — a bare call is what let the two-cursor bug slip past tests once
+    already, since it always renders as if the row were selected.
+    ``cursor_pair`` is the index of the row the list cursor `>` sits on,
+    matching ``menu._row_text``'s ``cursor_pair`` parameter.
+    """
+    from code_helper.cli.menu import Section, _call_label
 
     return {
         entry[0].removeprefix("agent:"): (
-            entry[1]() if callable(entry[1]) else entry[1]
+            _call_label(entry[1], selected=index == cursor_pair, ansi=ansi)
+            if callable(entry[1])
+            else entry[1]
         )
-        for entry in items
+        for index, entry in enumerate(items)
         if not isinstance(entry, Section) and entry[0].startswith("agent:")
     }
 
 
 def _capture_frames(monkeypatch, keys):
-    """Drive the real menu and return each frame's rendered chipset rows."""
+    """Drive the real menu and return each frame's rendered chipset rows.
+
+    Tracks the list cursor's ``selectable`` index the same way
+    ``menu._dispatch_key`` does (UP/DOWN/HOME/END over non-``Section`` rows),
+    so ``_chip_rows`` renders each frame through the real ``selected``/``ansi``
+    contract instead of guessing — a test that always renders "as selected"
+    is exactly how the two-cursor bug passed once already.
+    """
     import code_helper.cli.menu as menu
+    from code_helper.cli.menu import Section
 
     iterator = iter(keys)
     real_select = menu.select_from_menu
     frames: list[dict[str, str]] = []
 
     def _select(items, **kwargs):
+        selectable = [
+            i for i, entry in enumerate(items) if not isinstance(entry, Section)
+        ]
+        index = 0
+
         def _read():
-            frames.append(_chip_rows(items))
-            return next(iterator)
+            nonlocal index
+            frames.append(_chip_rows(items, cursor_pair=selectable[index]))
+            key = next(iterator)
+            if key == "UP":
+                index = (index - 1) % len(selectable)
+            elif key == "DOWN":
+                index = (index + 1) % len(selectable)
+            elif key == "HOME":
+                index = 0
+            elif key == "END":
+                index = len(selectable) - 1
+            return key
 
         return real_select(items, read_key=_read, **kwargs)
 
@@ -1154,22 +1188,62 @@ def test_chipset_shows_one_row_per_agent_with_native_applied(monkeypatch):
     frames = _capture_frames(monkeypatch, ["CANCEL"])
     assert main(["tui"]) == 0
 
+    import code_helper.cli.tui as tui
+
     rows = frames[0]
     assert set(rows) == {"claude", "codex"}
-    # Applied AND highlighted on the focused row; applied-only elsewhere.
-    assert "[*native]" in rows["claude"]
-    assert "[native]" in rows["codex"] or "[*native]" in rows["codex"]
+    # Applied AND highlighted on the focused row (list cursor `>` sits on
+    # claude for this first frame); applied-only, no cursor, elsewhere. Two
+    # highlighted rows at once was the bug — the list has exactly one cursor.
+    assert f"{tui._REVERSE}✓ native{tui._RESET}" in rows["claude"]
+    assert tui._REVERSE not in rows["codex"]
+    assert f"{tui._BOLD}✓ native{tui._RESET}" in rows["codex"]
 
 
 @pytest.mark.integration
-def test_chipset_lifecycle_is_visible_per_agent(monkeypatch):
-    """The two mechanisms differ in WHEN they take effect, and the row says
-    so — a live settings.json patch vs. a config.toml read at next launch."""
+def test_chipset_cursor_moves_with_the_list_not_duplicates(monkeypatch):
+    """Moving the list cursor to codex highlights ONLY codex's chip — claude
+    keeps its `✓` but loses the reverse-video block it had a moment ago."""
+    frames = _capture_frames(monkeypatch, ["DOWN", "CANCEL"])
+    assert main(["tui"]) == 0
+
+    import code_helper.cli.tui as tui
+
+    rows = frames[1]
+    assert f"{tui._REVERSE}✓ native{tui._RESET}" in rows["codex"]
+    assert tui._REVERSE not in rows["claude"]
+
+
+@pytest.mark.integration
+def test_chipset_has_no_cursor_when_list_cursor_is_on_a_wrapper_row(monkeypatch):
+    """Parking the list cursor on a wrapper row below leaves BOTH agent rows
+    with no reverse-video block — the chipset has no cursor of its own."""
+    from code_helper.services.wrappers import install_wrapper
+
+    install_wrapper(Paths.default(), "glm", token="test-token")
+
+    frames = _capture_frames(monkeypatch, ["DOWN", "DOWN", "DOWN", "CANCEL"])
+    assert main(["tui"]) == 0
+
+    import code_helper.cli.tui as tui
+
+    rows = frames[-1]
+    assert tui._REVERSE not in rows["claude"]
+    assert tui._REVERSE not in rows["codex"]
+
+
+@pytest.mark.integration
+def test_chipset_row_has_no_lifecycle_tail(monkeypatch):
+    """The row used to end in a `live`/`next launch` label claiming WHEN a
+    change takes effect. Dropped: the claim needs to be verified against how
+    codex actually reads `config.toml` before it is asserted in the UI again
+    (see `_AgentBackend.lifecycle`, still carried as data but no longer
+    rendered)."""
     frames = _capture_frames(monkeypatch, ["CANCEL"])
     assert main(["tui"]) == 0
 
-    assert frames[0]["claude"].endswith("live")
-    assert frames[0]["codex"].endswith("next launch")
+    assert not frames[0]["claude"].rstrip().endswith(("live", "next launch"))
+    assert not frames[0]["codex"].rstrip().endswith(("live", "next launch"))
 
 
 @pytest.mark.integration
@@ -1197,9 +1271,14 @@ def test_right_moves_the_chip_cursor_and_wraps(monkeypatch):
     frames = _capture_frames(monkeypatch, ["RIGHT", "RIGHT", "CANCEL"])
     assert main(["tui"]) == 0
 
-    assert "[*native]" in frames[0]["claude"]  # cursor on native
-    assert "<glm>" in frames[1]["claude"]  # moved to the wrapper chip
-    assert "[*native]" in frames[2]["claude"]  # wrapped back around
+    import code_helper.cli.tui as tui
+
+    # cursor on native
+    assert f"{tui._REVERSE}✓ native{tui._RESET}" in frames[0]["claude"]
+    # moved to the wrapper chip
+    assert f"{tui._REVERSE}glm{tui._RESET}" in frames[1]["claude"]
+    # wrapped back around
+    assert f"{tui._REVERSE}✓ native{tui._RESET}" in frames[2]["claude"]
 
 
 @pytest.mark.integration
@@ -1264,8 +1343,12 @@ def test_chip_cursor_is_independent_per_agent(monkeypatch):
     frames = _capture_frames(monkeypatch, ["RIGHT", "DOWN", "UP", "CANCEL"])
     assert main(["tui"]) == 0
 
-    assert "<glm>" in frames[1]["claude"]
-    assert "<glm>" in frames[3]["claude"]  # survived the row round-trip
+    import code_helper.cli.tui as tui
+
+    assert f"{tui._REVERSE}glm{tui._RESET}" in frames[1]["claude"]
+    assert (
+        f"{tui._REVERSE}glm{tui._RESET}" in frames[3]["claude"]
+    )  # survived the row round-trip
 
 
 @pytest.mark.integration
@@ -1354,7 +1437,9 @@ def test_a_removed_wrapper_disappears_from_the_strip(monkeypatch):
     monkeypatch.setattr(menu, "select_from_menu", _select)
     assert main(["tui"]) == 0
 
-    assert "<glm>" in frames[1]["claude"]
+    import code_helper.cli.tui as tui
+
+    assert f"{tui._REVERSE}glm{tui._RESET}" in frames[1]["claude"]
 
 
 @pytest.mark.unit
