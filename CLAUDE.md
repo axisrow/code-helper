@@ -2,7 +2,7 @@
 
 Guidance for Claude Code when working in this repository.
 
-`code-helper` — pip-installable Python CLI that generates bash wrapper scripts in `~/.local/bin`, each pointing a coding agent (Claude Code, Codex) at a model backend (Ollama, Z.ai, LiteLLM, …) under a chosen name. A wrapper is a resolved point in **agent × provider × model**.
+`code-helper` — pip-installable Python CLI that generates bash wrapper scripts in `~/.local/bin`, each pointing a coding agent (Claude Code, Codex, and every other CLI integration `ollama launch` supports — OpenCode, Copilot CLI, Droid, Cline, …) at a model backend (Ollama, Z.ai, LiteLLM, …) under a chosen name. A wrapper is a resolved point in **agent × provider × model**.
 
 ## Package Manager
 
@@ -57,7 +57,7 @@ Guidance for Claude Code when working in this repository.
 - `--dry-run` never writes any file.
 - TUI is a mirror of the CLI, not a second implementation — every menu item dispatches into the same `_handle_*` functions; no duplicated validation or state-changing service calls.
 - The TUI main screen is a **chipset**: one selectable row per agent, each a horizontal strip of `native` + that agent's installed wrappers. Up/Down moves rows, Left/Right (and Shift+Tab) moves the chip cursor with NO I/O, Enter applies. Three chip states are distinct: `[applied]`, `<highlighted>`, `( plain )`.
-- Per-agent differences (how "applied" is read, how a chip is applied, when it takes effect) live in `cli/tui.py`'s `_AGENT_BACKENDS` table — never as an `if agent.name == ...` branch. Its apply hooks are METHOD NAMES resolved via `getattr` at apply time, not captured functions, so patching a method actually takes effect. Adding an agent = one `AGENTS` entry + one table entry, nothing else.
+- Per-agent differences (how "applied" is read, how a chip is applied, when it takes effect) live in `cli/tui.py`'s `_AGENT_BACKENDS` table — never as an `if agent.name == ...` branch. Its apply hooks are METHOD NAMES resolved via `getattr` at apply time, not captured functions, so patching a method actually takes effect. An agent with a real live-patchable config (`claude`, `codex`) needs one `AGENTS` entry + one table entry to get a chipset row. A **launch-only** agent (any `ollama launch`-only CLI — OpenCode, Droid, Cline, …) needs only the `AGENTS` entry: `ollama launch` writes that agent's own native config in its own format, which this project does not parse, so it correctly gets no `_AGENT_BACKENDS` entry and no chipset row — `add`/`list`/`remove` still work for it in full, only the chipset's live-toggle convenience is unavailable. This is the honest degradation the `_AgentBackend` docstring describes, not a gap to fill reflexively.
 - A chip is an already-installed WRAPPER, never a bare provider: model, token and base URL were resolved when the wrapper was created, which is what lets Enter apply with no prompts. Creating a pairing is `add`; switching between them is the chipset.
 - Anything a label callable reads MUST be cached and refreshed once per main-loop iteration (`_refresh_active_label`, or `_refresh_profile_label` for profile-only state) — the menu re-evaluates labels on every redraw frame, including pure cursor movement.
 - Every key bound in a screen's `on_key` MUST also be in `menu._PASSTHROUGH`, or it is silently dead: `_translate_char` reports it as `OTHER` and the binding never fires. This shipped once (`w`/switch was bound, documented, and non-functional); `test_tui.py` now pins the main screen's bindings against `_translate_char`.

@@ -236,6 +236,16 @@ class Agent:
     name: str
     #: Executable name. Interpolated into generated scripts unquoted; see
     #: :data:`_BINARY_RE`.
+    #:
+    #: For :attr:`ConfigShape.OLLAMA_LAUNCH` this value does DOUBLE DUTY: it is
+    #: both the executable ``exec``'d directly by other shapes and the
+    #: *integration name* passed as ``ollama launch <this>`` (see
+    #: ``render._render_ollama_launch``). The two happen to coincide for every
+    #: agent in the registry today. If a future agent's ``ollama launch``
+    #: integration name ever diverges from its executable (e.g. VS Code: the
+    #: binary is ``code``, the integration is ``vscode``), the fix is a
+    #: separate ``launch_name`` field defaulting to ``binary`` — not overloading
+    #: this one further.
     binary: str
     #: Config shapes this agent can CONSUME.
     shapes: frozenset[ConfigShape]
@@ -303,6 +313,47 @@ AGENTS: tuple[Agent, ...] = (
         # `codex × z.ai` is (correctly) impossible today.
         shapes=frozenset({ConfigShape.OPENAI_TOML, ConfigShape.OLLAMA_LAUNCH}),
         description="OpenAI Codex CLI",
+    ),
+    # The remaining 13 are every OTHER *CLI* integration `ollama launch`
+    # supports (verified against `ollama launch --help`, ollama 0.32.13) —
+    # GUI/desktop integrations (chatgpt/codex-app, hermes-desktop, vscode)
+    # are deliberately excluded: they have no CLI binary, so `"$@"` in a
+    # generated wrapper would be meaningless for them.
+    #
+    # Every one of these declares ONLY OLLAMA_LAUNCH, never OPENAI_TOML: that
+    # shape means "this agent reads Codex's own `--profile <alias>` TOML
+    # convention" (see render._render_openai_toml), and none of them does —
+    # each has its own native config format that only `ollama launch` itself
+    # knows how to write (verified by hand against `--help` for opencode,
+    # copilot, droid, cline, pi). Reaching a non-Ollama provider (z.ai,
+    # litellm) is therefore correctly impossible for all 13, exactly like
+    # `codex × z.ai` above — do not "fix" that by adding OPENAI_TOML here.
+    #
+    # binary == name for every one of these (there is no GUI/CLI name split
+    # to account for yet — see Agent.binary's docstring), so each is just a
+    # (name, description) pair rather than a hand-repeated Agent(...) call.
+    *(
+        Agent(
+            name=name,
+            binary=name,
+            shapes=frozenset({ConfigShape.OLLAMA_LAUNCH}),
+            description=description,
+        )
+        for name, description in (
+            ("hermes", "Hermes Agent"),
+            ("openclaw", "OpenClaw"),
+            ("opencode", "OpenCode"),
+            ("copilot", "GitHub Copilot CLI"),
+            ("omp", "OMP"),
+            ("droid", "Droid"),
+            ("dsh", "DeepSeek Harness"),
+            ("kimi", "Kimi Code CLI"),
+            ("muse", "Muse Code"),
+            ("pi", "Pi"),
+            ("pool", "Pool"),
+            ("cline", "Cline"),
+            ("qwen", "Qwen Code"),
+        )
     ),
 )
 

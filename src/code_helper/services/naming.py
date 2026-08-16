@@ -30,6 +30,7 @@ import re
 from urllib.parse import urlsplit
 
 from code_helper.errors import CodeHelperError
+from code_helper.services.model import AGENTS
 
 __all__ = [
     "validate_alias",
@@ -49,16 +50,30 @@ MAX_ALIAS_LENGTH = 64
 #: Names that must never become a wrapper, independent of shape:
 #:
 #: - ``code-helper`` — the tool would overwrite its own entry point.
-#: - agent binaries (``claude``, ``codex``) — a wrapper named after the binary
-#:   it execs is an **infinite recursion** whenever ``~/.local/bin`` precedes
-#:   the real binary on ``PATH``: the script re-invokes itself forever. This is
-#:   not hypothetical here — ``~/.local/bin/claude`` is a real, working symlink
-#:   on a typical install, and clobbering it also breaks Claude Code itself.
+#: - every agent's ``binary`` — reserving it protects against two distinct
+#:   hazards, not one:
 #:
-#: Kept as a literal rather than derived from the agent registry so that
-#: importing this module stays dependency-free (and so the reason above is
-#: readable at the point of definition).
-RESERVED_ALIASES = frozenset({"code-helper", "claude", "codex"})
+#:   - For a shape that ``exec``'s the agent by its bare name on ``PATH``
+#:     (:attr:`~code_helper.services.model.ConfigShape.ANTHROPIC_ENV` renders
+#:     ``claude "$@"``; ``OPENAI_TOML`` renders ``exec codex ...``), a wrapper
+#:     named after that same binary is an **infinite recursion** whenever
+#:     ``~/.local/bin`` precedes the real binary on ``PATH``: the script
+#:     re-invokes itself forever. Not hypothetical — ``~/.local/bin/claude``
+#:     is a real, working symlink on a typical install, and clobbering it also
+#:     breaks Claude Code itself.
+#:   - For :attr:`~code_helper.services.model.ConfigShape.OLLAMA_LAUNCH`
+#:     (``exec ollama launch <agent> ...`` — see ``render.py``) there is no
+#:     recursion, since the script execs ``ollama``, never the agent — but a
+#:     wrapper named e.g. ``opencode`` still permanently **shadows** the real
+#:     ``opencode`` on ``PATH`` with one fixed model, silently rather than by
+#:     hanging, which is its own kind of surprising.
+#:
+#: Derived from :data:`~code_helper.services.model.AGENTS` (rather than kept
+#: as a hand-maintained literal) so a future agent added to that registry can
+#: never be forgotten here — the only genuinely NON-agent-derived name is
+#: ``code-helper`` itself.
+_RESERVED_LITERAL = frozenset({"code-helper"})
+RESERVED_ALIASES = _RESERVED_LITERAL | {a.binary for a in AGENTS}
 
 #: Must start alphanumeric (no leading ``-``/``.``), then alphanumerics plus
 #: ``.``/``_``/``-``. Excludes: path separators, whitespace, control bytes,
@@ -106,8 +121,9 @@ def validate_alias(alias: str) -> str:
 
     if alias in RESERVED_ALIASES:
         raise CodeHelperError(
-            f"{alias!r} is a reserved name — a wrapper named after the agent "
-            f"binary it runs would call itself forever"
+            f"{alias!r} is a reserved name — a wrapper named after an agent's "
+            f"own binary would either re-invoke itself forever or permanently "
+            f"shadow the real one on PATH"
         )
 
     return alias

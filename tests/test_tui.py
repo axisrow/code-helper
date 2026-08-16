@@ -1191,12 +1191,32 @@ def test_chipset_shows_one_row_per_agent_with_native_applied(monkeypatch):
     import code_helper.cli.tui as tui
 
     rows = frames[0]
+    # Regression pin, not a stale hardcode: the chipset is built from
+    # `_AGENT_BACKENDS`, not `AGENTS` (15 agents as of the ollama-launch
+    # registry expansion) — a launch-only agent (opencode, droid, …)
+    # deliberately gets NO chipset row (its config lives in a format this
+    # project doesn't parse), so this set must stay exactly the two agents
+    # with a live-patchable config. See test_chipset_row_count_matches_agent_backends.
     assert set(rows) == {"claude", "codex"}
     # Applied AND highlighted on the focused row (list cursor `>` sits on
     # claude for this first frame); applied-only, no cursor, elsewhere. Two
     # highlighted rows at once was the bug — the list has exactly one cursor.
     assert f"{tui._REVERSE}✓ native{tui._RESET}" in rows["claude"]
     assert tui._REVERSE not in rows["codex"]
+
+
+@pytest.mark.integration
+def test_chipset_row_count_matches_agent_backends(monkeypatch):
+    """The chipset's row set IS `_AGENT_BACKENDS`'s key set — stated as an
+    explicit invariant rather than a hardcoded pair, so it stays true no
+    matter how many launch-only agents `AGENTS` grows to."""
+    import code_helper.cli.tui as tui
+
+    frames = _capture_frames(monkeypatch, ["CANCEL"])
+    assert main(["tui"]) == 0
+
+    rows = frames[0]
+    assert set(rows) == set(tui._AGENT_BACKENDS)
     assert f"{tui._BOLD}✓ native{tui._RESET}" in rows["codex"]
 
 

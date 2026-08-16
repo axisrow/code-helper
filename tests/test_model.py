@@ -49,8 +49,45 @@ _OPENAI_ONLY = Provider(
 
 
 @pytest.mark.unit
-def test_registry_has_claude_and_codex():
-    assert {a.name for a in AGENTS} == {"claude", "codex"}
+def test_registry_covers_ollama_launch_integrations():
+    """All 15 CLI integrations `ollama launch` supports are registered.
+
+    Superset (not equality) on the two hand-built agents, plus an exact count
+    for the whole registry — this is the pin that would catch a launch-only
+    agent silently dropped or duplicated, without being so exact it breaks the
+    moment a future agent is added deliberately.
+    """
+    names = {a.name for a in AGENTS}
+    assert {"claude", "codex"} <= names
+    assert len(AGENTS) == 15
+
+
+@pytest.mark.unit
+def test_launch_only_agents_declare_exactly_ollama_launch():
+    """Every agent besides claude/codex is OLLAMA_LAUNCH-only.
+
+    None of them speaks Codex's `--profile <alias>` TOML convention or
+    Claude's `ANTHROPIC_*` env vars — each has its own native config format
+    that only `ollama launch` itself knows how to write. Declaring a second
+    shape for one of them would silently create a wrapper `render.py` cannot
+    actually produce correctly.
+    """
+    for agent in AGENTS:
+        if agent.name in ("claude", "codex"):
+            continue
+        assert agent.shapes == frozenset({ConfigShape.OLLAMA_LAUNCH}), agent.name
+
+
+@pytest.mark.unit
+def test_openai_toml_is_codex_only():
+    """OPENAI_TOML — the `--profile <alias>` mechanism — is codex's alone.
+
+    `_render_openai_toml` (render.py) hard-codes `--profile`, which only codex
+    understands; this is the registry-side invariant that assumption depends
+    on.
+    """
+    declarers = [a.name for a in AGENTS if ConfigShape.OPENAI_TOML in a.shapes]
+    assert declarers == ["codex"]
 
 
 @pytest.mark.unit

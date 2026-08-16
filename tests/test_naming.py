@@ -108,13 +108,32 @@ def test_unsafe_characters_rejected(alias):
 @pytest.mark.unit
 @pytest.mark.parametrize("alias", sorted(RESERVED_ALIASES))
 def test_reserved_names_rejected(alias):
-    """An alias equal to an agent binary would exec itself forever.
+    """Every agent's own binary is a reserved alias, for one of two reasons.
 
-    `~/.local/bin/claude` is also a real symlink on a normal install, so this
-    additionally prevents clobbering a working Claude Code entry point.
+    For a shape that execs the bare binary name (`claude`, `codex`), reusing
+    it as a wrapper name recurses forever — `~/.local/bin/claude` is also a
+    real symlink on a normal install, so this additionally prevents clobbering
+    a working Claude Code entry point. For an `ollama launch`-only agent
+    (`opencode`, `droid`, …, exercised here via the `opencode` case in
+    `RESERVED_ALIASES`), reusing its binary name instead permanently shadows
+    the real one on `PATH` — see `test_reserved_aliases_cover_every_agent_binary`.
     """
     with pytest.raises(CodeHelperError, match="reserved name"):
         validate_alias(alias)
+
+
+@pytest.mark.unit
+def test_reserved_aliases_cover_every_agent_binary():
+    """RESERVED_ALIASES is derived from AGENTS — a future agent can't be forgotten.
+
+    Regression pin: `RESERVED_ALIASES` used to be a hand-maintained literal of
+    just `{"code-helper", "claude", "codex"}`. Deriving it from the registry
+    means a wrapper named `opencode` (etc.) is rejected without anyone having
+    to remember to update this module when `AGENTS` grows.
+    """
+    from code_helper.services.model import AGENTS
+
+    assert {a.binary for a in AGENTS} <= RESERVED_ALIASES
 
 
 # --------------------------------------------------------------------------- #
