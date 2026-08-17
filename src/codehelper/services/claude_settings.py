@@ -34,7 +34,7 @@ token in every diff/preview it produces, but does not eliminate the exposure
 
 Ownership marker: a closed key list, not a comment
 -----------------------------------------------------
-Every other file this project writes carries a ``# code-helper: managed``
+Every other file this project writes carries a ``# codehelper: managed``
 comment as its ownership proof (``render.MARKER_PREFIX``). JSON has no
 comments. Ownership of *individual keys inside someone else's file* is
 instead defined by :data:`MANAGED_ENV_KEYS` — a fixed, closed tuple. Every
@@ -51,12 +51,12 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from code_helper.backends._atomic import atomic_write, read_text_or_none, rotate_backups
-from code_helper.errors import CodeHelperError
-from code_helper.services.model import ConfigShape, Provider
-from code_helper.services.paths import Paths
-from code_helper.services.render import anthropic_base_url
-from code_helper.services.spec import TierModels
+from codehelper.backends._atomic import atomic_write, read_text_or_none, rotate_backups
+from codehelper.errors import CodeHelperError
+from codehelper.services.model import ConfigShape, Provider
+from codehelper.services.paths import Paths
+from codehelper.services.render import anthropic_base_url
+from codehelper.services.spec import TierModels
 
 __all__ = [
     "MANAGED_ENV_KEYS",
@@ -134,14 +134,14 @@ def resolve_switch_patch(
 
     Raises:
         CodeHelperError: ``provider`` does not declare
-            :attr:`~code_helper.services.model.ConfigShape.ANTHROPIC_SETTINGS`
+            :attr:`~codehelper.services.model.ConfigShape.ANTHROPIC_SETTINGS`
             (the error lists the providers that do); or a non-reset provider
             with no ``tier_models``; or a ``BaseUrlPolicy.REQUIRED`` provider
             whose ``base_url`` was never resolved via ``model.with_base_url``
-            — the same invariant :func:`~code_helper.services.spec.build_spec`
+            — the same invariant :func:`~codehelper.services.spec.build_spec`
             enforces, mirrored here for the same reason.
     """
-    from code_helper.services.model import BaseUrlPolicy, switchable_providers
+    from codehelper.services.model import BaseUrlPolicy, switchable_providers
 
     if ConfigShape.ANTHROPIC_SETTINGS not in provider.shapes:
         known = ", ".join(p.name for p in switchable_providers())
@@ -293,43 +293,43 @@ def _verify_patch_applied(original: dict, patched: dict, patch: SettingsPatch) -
 
     Raises:
         CodeHelperError: any of the above fails. Always an internal-error
-            message ("this is a code-helper bug") — a well-formed
+            message ("this is a codehelper bug") — a well-formed
             ``original``/``patch`` pair can never legitimately fail this.
     """
     patched_env = patched.get("env", {})
     if not isinstance(patched_env, dict):
         raise CodeHelperError(
             "internal error: patch_settings produced a non-dict `env` — "
-            "this is a code-helper bug, please report it"
+            "this is a codehelper bug, please report it"
         )
     for key, value in patch.env.items():
         if patched_env.get(key) != value:
             raise CodeHelperError(
                 "internal error: patch_settings failed to apply "
-                f"{key}={value!r} — this is a code-helper bug, please report it"
+                f"{key}={value!r} — this is a codehelper bug, please report it"
             )
     survivors = set(patched_env) & set(MANAGED_ENV_KEYS) - set(patch.env)
     if survivors:
         raise CodeHelperError(
             f"internal error: patch_settings left stale managed key(s) "
-            f"{sorted(survivors)} — this is a code-helper bug, please report it"
+            f"{sorted(survivors)} — this is a codehelper bug, please report it"
         )
     if _without_managed_env(original) != _without_managed_env(patched):
         raise CodeHelperError(
             "internal error: patching settings.json appears to have altered "
             "content outside the managed env keys — refusing to write; this "
-            "is a code-helper bug, please report it"
+            "is a codehelper bug, please report it"
         )
     try:
         if json.loads(json.dumps(patched, ensure_ascii=False)) != patched:
             raise CodeHelperError(
                 "internal error: patched settings.json does not round-trip "
-                "through JSON — this is a code-helper bug, please report it"
+                "through JSON — this is a codehelper bug, please report it"
             )
     except (TypeError, ValueError) as exc:
         raise CodeHelperError(
             f"internal error: patched settings.json is not JSON-serialisable "
-            f"({exc}) — this is a code-helper bug, please report it"
+            f"({exc}) — this is a codehelper bug, please report it"
         ) from exc
 
 
@@ -436,7 +436,7 @@ def current_switch(paths: Paths) -> str | None:
     indistinguishable here — acceptable, and it resolves to whichever
     switchable provider matches first.
     """
-    from code_helper.services.model import switchable_providers
+    from codehelper.services.model import switchable_providers
 
     env = _read_managed_env(paths)
     if env is None:
@@ -539,7 +539,7 @@ def apply_switch(
     Returns:
         True if anything was written (or would be, under ``--dry-run``);
         False on a true no-op (the file already matches the resolved patch)
-        — a no-op consumes no backup slot (see :func:`~code_helper.backends
+        — a no-op consumes no backup slot (see :func:`~codehelper.backends
         ._atomic.rotate_backups`'s ring semantics).
 
     Raises:

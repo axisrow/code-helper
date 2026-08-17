@@ -5,13 +5,13 @@ services/backends layer) into the user-facing contract: a one-line
 ``error: <message>`` on stderr plus exit code 1, with no traceback unless
 ``--debug`` is passed. Unhandled exceptions (real bugs) are not caught —
 Python prints the traceback itself. The error rendering itself lives in
-:func:`code_helper.errors.emit_error`, shared with the TUI loop.
+:func:`codehelper.errors.emit_error`, shared with the TUI loop.
 """
 
 import sys
 
-from code_helper.cli.parser import build_parser
-from code_helper.errors import CodeHelperError, emit_error
+from codehelper.cli.parser import build_parser
+from codehelper.errors import CodeHelperError, emit_error
 
 __all__ = ["main", "CodeHelperError"]
 
@@ -38,7 +38,7 @@ def cli() -> int:
     TUI, and the plain CLI exits cleanly. 130 is the conventional
     SIGINT-terminated code, matching a real Ctrl-C.
     """
-    from code_helper.cli.menu import MenuCancelled
+    from codehelper.cli.menu import MenuCancelled
 
     try:
         return main()

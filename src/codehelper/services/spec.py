@@ -21,15 +21,15 @@ that expands into the same axes. They earn their place because:
 - ``glm`` uses a *different model per tier* (``glm-4.7`` / ``glm-5-turbo`` /
   ``glm-5.2[1m]``); that is not expressible as a single ``--model``, and
   demanding three flags for the common case would be absurd;
-- ``code-helper add glm`` must keep working as one word.
+- ``codehelper add glm`` must keep working as one word.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from code_helper.errors import CodeHelperError
-from code_helper.services.model import (
+from codehelper.errors import CodeHelperError
+from codehelper.services.model import (
     Agent,
     BaseUrlPolicy,
     ConfigShape,
@@ -38,7 +38,7 @@ from code_helper.services.model import (
     get_provider,
     resolve_shape,
 )
-from code_helper.services.naming import validate_alias
+from codehelper.services.naming import validate_alias
 
 __all__ = [
     "WrapperSpec",

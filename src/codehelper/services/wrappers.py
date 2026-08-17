@@ -33,10 +33,10 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import unquote
 
-from code_helper.backends._atomic import atomic_write, read_text_or_none, remove_file
-from code_helper.errors import CodeHelperError
-from code_helper.services.agents import get_agent as get_any_agent
-from code_helper.services.model import (
+from codehelper.backends._atomic import atomic_write, read_text_or_none, remove_file
+from codehelper.errors import CodeHelperError
+from codehelper.services.agents import get_agent as get_any_agent
+from codehelper.services.model import (
     Agent,
     BaseUrlPolicy,
     ConfigShape,
@@ -44,16 +44,16 @@ from code_helper.services.model import (
     get_provider,
     with_base_url,
 )
-from code_helper.services.naming import is_valid_alias_shape
-from code_helper.services.paths import Paths
-from code_helper.services.render import (
+from codehelper.services.naming import is_valid_alias_shape
+from codehelper.services.paths import Paths
+from codehelper.services.render import (
     CATALOG_MANAGED_BY_KEY,
     CATALOG_MANAGED_BY_VALUE,
     MARKER_PREFIX,
     render_legacy_script,
     render_script,
 )
-from code_helper.services.spec import (
+from codehelper.services.spec import (
     PRESETS,
     Preset,
     TierModels,
@@ -658,7 +658,7 @@ def _ownership_full_match(paths: Paths, spec: WrapperSpec, token: str) -> bool:
     The second clause is the migration path. The marker did not exist before
     this branch, so every already-installed wrapper lacks it, and without this
     the guard would classify the tool's own prior output as a third-party file
-    — telling users it "was not created by code-helper" about a file it did
+    — telling users it "was not created by codehelper" about a file it did
     create, and leaving ``edit-token`` (which has no ``--force``) with no way
     forward at all. It is deliberately an EXACT body match against a
     regenerated legacy render, not a heuristic: a file that differs by one
@@ -879,7 +879,7 @@ class _Action(StrEnum):
 #: hint and the "refusing to …" wording cannot drift between code paths.
 _REFUSAL: dict[_Action, str] = {
     _Action.OVERWRITE_FOREIGN: (
-        "{path} exists and was not created by code-helper — "
+        "{path} exists and was not created by codehelper — "
         "refusing to overwrite (use --force)"
     ),
     _Action.DISCARD_SECRET: (
@@ -1023,7 +1023,7 @@ def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_File
     for a secret, else ``0o755``); the profile and catalog are ``0o600``
     owner-only.
     """
-    from code_helper.services.render import openai_catalog_body, openai_toml_body
+    from codehelper.services.render import openai_catalog_body, openai_toml_body
 
     catalog_path = paths.codex_catalog_for(spec.alias)
     config_path = paths.codex_config_for(spec.alias)
@@ -1275,7 +1275,7 @@ def remove_wrapper(
     # NOT retroactively undo the deletion that already happened: the files
     # are gone regardless, so raising here only signals "the pointer may
     # still be stale", which the message says explicitly.
-    from code_helper.services.state import clear_default_wrapper
+    from codehelper.services.state import clear_default_wrapper
 
     try:
         clear_default_wrapper(paths, name)
@@ -1493,7 +1493,7 @@ def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
     never raises: a malformed alias (path separator, ``.``/``..``) degrades to
     ``None`` before any path arithmetic.
     """
-    from code_helper.services.state import default_wrapper
+    from codehelper.services.state import default_wrapper
 
     alias = default_wrapper(paths, agent_name)
     if alias is None:

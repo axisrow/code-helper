@@ -3,7 +3,7 @@
 Every filesystem path the tool touches is resolved from a single injected
 ``home`` through ``Paths.from_home`` — ``~/.local/bin`` (the XDG user-bin dir
 where every generated wrapper script lives), ``~/.codex`` (Codex's config
-dir, written only by the OPENAI_TOML shape), and ``~/.config/code-helper``
+dir, written only by the OPENAI_TOML shape), and ``~/.config/codehelper``
 (this tool's own config dir, where ``credentials.json`` caches provider
 tokens). This is the single source of truth for resolved paths: no other
 module may hard-code those literals.
@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from code_helper.errors import CodeHelperError
+from codehelper.errors import CodeHelperError
 
 
 @dataclass(frozen=True)
@@ -48,7 +48,7 @@ class Paths:
     #: own managed top-level keys and ``[model_providers.X]`` table there —
     #: never a fragment any other command writes.
     codex_dir: Path
-    #: ``~/.config/code-helper`` — this tool's own config dir. Only
+    #: ``~/.config/codehelper`` — this tool's own config dir. Only
     #: ``credentials.json`` (the cached provider-token store — see
     #: ``services/secrets.py``) lives here today. NOT a wrapper/source of
     #: truth: a token is baked into each generated script (``0o700``), and
@@ -75,7 +75,7 @@ class Paths:
           lives. It is typically already on ``PATH``.
         - ``codex_dir`` = ``home / ".codex"`` — Codex's config dir; the
           OPENAI_TOML shape writes profile files here.
-        - ``config_dir`` = ``home / ".config" / "code-helper"`` — this tool's
+        - ``config_dir`` = ``home / ".config" / "codehelper"`` — this tool's
           own config dir (``credentials.json``).
         - ``claude_dir`` = ``home / ".claude"`` — Claude Code's config dir;
           the ``switch`` command patches ``settings.json`` here.
@@ -89,7 +89,7 @@ class Paths:
         return cls(
             bin_dir=h / ".local" / "bin",
             codex_dir=h / ".codex",
-            config_dir=h / ".config" / "code-helper",
+            config_dir=h / ".config" / "codehelper",
             claude_dir=h / ".claude",
         )
 
@@ -132,7 +132,7 @@ class Paths:
         Pure arithmetic (``bin_dir / name``) — no existence check, no IO.
 
         ``name`` must be a single path component. This is a STRUCTURAL guard,
-        independent of :func:`code_helper.services.naming.validate_alias`:
+        independent of :func:`codehelper.services.naming.validate_alias`:
         that function owns the human-facing rules and runs early, this one
         guarantees that no code path — including a future one that forgets to
         validate — can address a file outside ``bin_dir``. The cross-module
@@ -222,7 +222,7 @@ class Paths:
         return self.claude_dir / f"settings.json.bak{slot}"
 
     def credentials_file(self) -> Path:
-        """``~/.config/code-helper/credentials.json`` — the cached token store.
+        """``~/.config/codehelper/credentials.json`` — the cached token store.
 
         A ``{provider_name: {profile_name: token}}`` JSON object: profiles are
         scoped to providers, never wrappers, because one provider may back many
@@ -240,11 +240,11 @@ class Paths:
         return self.config_dir / "credentials.json"
 
     def state_file(self) -> Path:
-        """``~/.config/code-helper/state.json`` — the active-profile pre-selection.
+        """``~/.config/codehelper/state.json`` — the active-profile pre-selection.
 
         A small JSON object holding UI pre-selection state — currently the
         active token profile per provider and the active provider — that must
-        survive across ``code-helper`` runs. Deliberately separate from
+        survive across ``codehelper`` runs. Deliberately separate from
         ``credentials.json``: that file's schema cannot grow without a versioned
         migration (``load_credentials`` treats every top-level key as a provider
         name — see issue #19), while ``state.json`` uses named top-level keys
@@ -255,10 +255,10 @@ class Paths:
         return self.config_dir / "state.json"
 
     def agents_file(self) -> Path:
-        """``~/.config/code-helper/agents.json`` — user-defined agents.
+        """``~/.config/codehelper/agents.json`` — user-defined agents.
 
         A ``{"agents": [{"name", "binary", "description"}, ...]}`` JSON object
-        holding CLI integrations the built-in :data:`~code_helper.services.
+        holding CLI integrations the built-in :data:`~codehelper.services.
         model.AGENTS` registry does not know about (any other ``ollama
         launch``-only integration). Owned and written only by
         ``services/agents.py``, which merges its contents with ``AGENTS`` at

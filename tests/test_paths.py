@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from code_helper.errors import CodeHelperError
-from code_helper.services.paths import Paths
+from codehelper.errors import CodeHelperError
+from codehelper.services.paths import Paths
 
 # Captured at import time, before _isolate_home redirects HOME.
 REAL_HOME = Path(os.environ["HOME"])
@@ -75,7 +75,7 @@ def test_script_for_resolves_under_bin_dir(tmp_path):
 @pytest.mark.unit
 def test_from_home_resolves_config_dir_under_injected_home(tmp_path):
     p = Paths.from_home(tmp_path)
-    assert p.config_dir == tmp_path / ".config" / "code-helper"
+    assert p.config_dir == tmp_path / ".config" / "codehelper"
 
 
 @pytest.mark.unit
@@ -91,7 +91,7 @@ def test_credentials_file_resolves_under_config_dir(tmp_path):
     p = Paths.from_home(tmp_path)
     assert (
         p.credentials_file()
-        == tmp_path / ".config" / "code-helper" / "credentials.json"
+        == tmp_path / ".config" / "codehelper" / "credentials.json"
     )
 
 

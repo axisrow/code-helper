@@ -2,7 +2,7 @@
 
 Like ``config.toml`` in ``test_codex_default.py``, ``settings.json`` here is
 ALWAYS a foreign file by definition — it belongs to Claude Code, not
-code-helper — so this module patches specific ``env`` keys and must leave
+codehelper — so this module patches specific ``env`` keys and must leave
 everything else (foreign env keys, every top-level key) byte-for-byte
 untouched. The single most important test in this file is
 ``test_apply_switch_preserves_foreign_env_keys`` — losing a user's
@@ -17,8 +17,8 @@ import stat
 
 import pytest
 
-from code_helper.errors import CodeHelperError
-from code_helper.services.claude_settings import (
+from codehelper.errors import CodeHelperError
+from codehelper.services.claude_settings import (
     MANAGED_ENV_KEYS,
     SettingsPatch,
     active_switch_env,
@@ -31,16 +31,16 @@ from code_helper.services.claude_settings import (
     resolve_switch_patch,
     restore_settings,
 )
-from code_helper.services.model import (
+from codehelper.services.model import (
     ConfigShape,
     Provider,
     get_agent,
     get_provider,
     with_base_url,
 )
-from code_helper.services.paths import Paths
-from code_helper.services.render import _render_anthropic_env
-from code_helper.services.spec import TierModels, WrapperSpec
+from codehelper.services.paths import Paths
+from codehelper.services.render import _render_anthropic_env
+from codehelper.services.spec import TierModels, WrapperSpec
 
 ZAI = get_provider("zai")
 OLLAMA = get_provider("ollama")

@@ -20,8 +20,8 @@ import json
 
 import pytest
 
-from code_helper.services.paths import Paths
-from code_helper.services.state import (
+from codehelper.services.paths import Paths
+from codehelper.services.state import (
     active_selection,
     default_wrapper,
     load_state,

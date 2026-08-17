@@ -18,11 +18,11 @@ import pathlib
 
 import pytest
 
-from code_helper.errors import CodeHelperError
-from code_helper.services.model import get_provider, with_base_url
-from code_helper.services.paths import Paths
-from code_helper.services.spec import build_spec
-from code_helper.services.wrappers import install_wrapper
+from codehelper.errors import CodeHelperError
+from codehelper.services.model import get_provider, with_base_url
+from codehelper.services.paths import Paths
+from codehelper.services.spec import build_spec
+from codehelper.services.wrappers import install_wrapper
 
 pytestmark = pytest.mark.unit
 

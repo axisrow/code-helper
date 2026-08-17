@@ -13,7 +13,7 @@ mirror rather than introduce a new dependency (``pexpect``) for.
 Each test spawns a tiny driver script (not the full TUI wizard — these tests
 are about the line editor's own raw-mode behavior, independent of what
 ``cli/tui.py`` does with the typed value) that calls
-``code_helper.cli.menu.read_line`` directly under a real PTY.
+``codehelper.cli.menu.read_line`` directly under a real PTY.
 """
 
 from __future__ import annotations
@@ -126,7 +126,7 @@ def pty_session():
 # first answer long enough that a bare "\n" (no carriage return) would leave
 # the cursor mid-line for the second prompt.
 _TWO_PROMPTS = (
-    "from code_helper.cli.menu import read_line\n"
+    "from codehelper.cli.menu import read_line\n"
     "a = read_line('First: ')\n"
     "b = read_line('Second: ')\n"
     "print('GOT:' + a + '|' + b)\n"
@@ -173,7 +173,7 @@ def test_esc_and_ctrl_c_leave_the_cursor_at_column_zero(pty_session):
     exercised, but it shared the same missing-``\\r`` defect.
     """
     script = (
-        "from code_helper.cli.menu import MenuCancelled, read_line\n"
+        "from codehelper.cli.menu import MenuCancelled, read_line\n"
         "try:\n"
         "    read_line('Prompt: ')\n"
         "except MenuCancelled as exc:\n"
@@ -218,7 +218,7 @@ def test_backspace_repaints_the_whole_line_instead_of_backing_up_blindly(
     buffer regardless of where the terminal thinks the cursor is.
     """
     script = (
-        "from code_helper.cli.menu import read_line\n"
+        "from codehelper.cli.menu import read_line\n"
         "v = read_line('P: ')\n"
         "print('GOT:' + repr(v))\n"
     )
@@ -251,7 +251,7 @@ def test_long_input_never_echoes_a_row_wider_than_the_terminal(pty_session):
     not counting the CSI cursor-back move — fits in `columns`.
     """
     script = (
-        "from code_helper.cli.menu import read_line\n"
+        "from codehelper.cli.menu import read_line\n"
         "v = read_line('URL: ')\n"
         "print('LEN:' + str(len(v)))\n"
     )
@@ -290,7 +290,7 @@ def test_left_right_navigate_and_edit_mid_string(pty_session):
     end of the line.
     """
     script = (
-        "from code_helper.cli.menu import read_line\n"
+        "from codehelper.cli.menu import read_line\n"
         "v = read_line('E: ')\n"
         "print('GOT:' + repr(v))\n"
     )
@@ -308,7 +308,7 @@ def test_left_right_navigate_and_edit_mid_string(pty_session):
 def test_secret_input_is_masked_and_never_echoes_the_literal_value(pty_session):
     """A token field must never print the typed characters in the clear."""
     script = (
-        "from code_helper.cli.menu import read_line\n"
+        "from codehelper.cli.menu import read_line\n"
         "v = read_line('Token: ', secret=True)\n"
         "print('GOT:' + repr(v))\n"
     )

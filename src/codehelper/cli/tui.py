@@ -1,4 +1,4 @@
-"""Interactive menu for creating and maintaining code-helper wrappers.
+"""Interactive menu for creating and maintaining codehelper wrappers.
 
 The TUI is deliberately a thin English-only front end over the CLI handlers.
 It owns navigation and collects interactive values; ``parser.py`` remains the
@@ -18,8 +18,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from code_helper.services.paths import Paths
-    from code_helper.services.spec import WrapperSpec
+    from codehelper.services.paths import Paths
+    from codehelper.services.spec import WrapperSpec
 
 __all__ = ["run_tui"]
 
@@ -150,7 +150,7 @@ def _hint(
     See ``menu._PASSTHROUGH`` for the bug this class of drift already caused
     once, and ``test_tui`` for the pin that now prevents it.
     """
-    from code_helper.cli.menu import MAX_DIGIT_ITEMS
+    from codehelper.cli.menu import MAX_DIGIT_ITEMS
 
     usable = min(numbered_count, MAX_DIGIT_ITEMS)
     if usable:
@@ -247,7 +247,7 @@ class TuiSession:
         chips: bool = False,
         numbered: bool = True,
     ) -> str:
-        from code_helper.cli.menu import MenuCancelled, Section, select_from_menu
+        from codehelper.cli.menu import MenuCancelled, Section, select_from_menu
 
         numbered_count = sum(
             1
@@ -278,7 +278,7 @@ class TuiSession:
 
     def _notify(self, text: str) -> None:
         """Show a result until it is acknowledged instead of clearing it."""
-        from code_helper.cli.menu import press_any_key
+        from codehelper.cli.menu import press_any_key
 
         if text:
             print(text)
@@ -299,7 +299,7 @@ class TuiSession:
         """
         import sys
 
-        from code_helper.errors import CodeHelperError
+        from codehelper.errors import CodeHelperError
 
         class _Tee:
             """Fan writes out to the real stdout AND a capture buffer.
@@ -355,7 +355,7 @@ class TuiSession:
         self._notify(buffer.getvalue().rstrip())
 
     def _read_text(self, prompt: str) -> str | None:
-        from code_helper.cli.menu import MenuCancelled, read_line
+        from codehelper.cli.menu import MenuCancelled, read_line
 
         try:
             return read_line(prompt)
@@ -365,7 +365,7 @@ class TuiSession:
             return None
 
     def _read_token(self, prompt: str) -> str | None:
-        from code_helper.cli.menu import MenuCancelled, read_line
+        from codehelper.cli.menu import MenuCancelled, read_line
 
         while True:
             try:
@@ -386,12 +386,12 @@ class TuiSession:
 
     def _recover_default(self, provider_name: str) -> None:
         """Best-effort profile-cache recovery from an installed wrapper."""
-        from code_helper.services.paths import Paths
-        from code_helper.services.secrets import (
+        from codehelper.services.paths import Paths
+        from codehelper.services.secrets import (
             profile_names,
             seed_default_profile,
         )
-        from code_helper.services.wrappers import (
+        from codehelper.services.wrappers import (
             discover_managed,
             token_from_installed,
         )
@@ -409,12 +409,12 @@ class TuiSession:
         self, names: list[str], provider_name: str
     ) -> ProfileChoice | Literal["__back__"] | None:
         """Collect a new profile and token before model discovery."""
-        from code_helper.services.profiles import (
+        from codehelper.services.profiles import (
             NewProfileOutcome,
             classify_new_profile,
             validate_new_profile_name,
         )
-        from code_helper.services.secrets import DEFAULT_PROFILE
+        from codehelper.services.secrets import DEFAULT_PROFILE
 
         if not names:
             token = self._read_token(f"Token for {provider_name}: ")
@@ -469,8 +469,8 @@ class TuiSession:
         A new/replaced token is intentionally kept only on the Namespace until
         the shared handler has installed the wrapper successfully.
         """
-        from code_helper.services.paths import Paths
-        from code_helper.services.secrets import (
+        from codehelper.services.paths import Paths
+        from codehelper.services.secrets import (
             DEFAULT_PROFILE,
             profile_names,
             valid_active_profile,
@@ -530,8 +530,8 @@ class TuiSession:
 
     def _all_wrapper_specs(self):
         """Presets plus managed constructor wrappers, without duplicate names."""
-        from code_helper.services.paths import Paths
-        from code_helper.services.wrappers import (
+        from codehelper.services.paths import Paths
+        from codehelper.services.wrappers import (
             WRAPPERS,
             discover_managed,
             spec_from_installed,
@@ -552,9 +552,9 @@ class TuiSession:
 
     def _wrapper_rows(self, paths) -> list:
         """Menu items for the main screen's wrapper list, grouped by agent."""
-        from code_helper.cli.menu import Section
-        from code_helper.services.agents import all_agents
-        from code_helper.services.wrappers import (
+        from codehelper.cli.menu import Section
+        from codehelper.services.agents import all_agents
+        from codehelper.services.wrappers import (
             column_header,
             describe_all_columns,
             valid_default_wrapper,
@@ -597,9 +597,9 @@ class TuiSession:
 
     def _resolve_spec(self, alias: str) -> WrapperSpec | None:
         """Resolve ``alias`` to a spec — installed wrapper first, else preset."""
-        from code_helper.errors import CodeHelperError
-        from code_helper.services.paths import Paths
-        from code_helper.services.wrappers import get_spec, spec_from_installed
+        from codehelper.errors import CodeHelperError
+        from codehelper.services.paths import Paths
+        from codehelper.services.wrappers import get_spec, spec_from_installed
 
         try:
             return spec_from_installed(Paths.default(), alias) or get_spec(alias)
@@ -611,7 +611,7 @@ class TuiSession:
 
     def _on_token(self, alias: str) -> None:
         """Rotate the token of wrapper ``alias`` (``t`` on the main screen)."""
-        from code_helper.cli.parser import _handle_edit_token
+        from codehelper.cli.parser import _handle_edit_token
 
         spec = self._resolve_spec(alias)
         if spec is None:
@@ -621,7 +621,7 @@ class TuiSession:
         profile = self._select_profile(spec.provider.name, editing=True)
         if profile is None:
             return
-        from code_helper.cli.requests import EditTokenRequest
+        from codehelper.cli.requests import EditTokenRequest
 
         profile_name, profile_token, rename_from, rename_to = profile
         self._run(
@@ -641,8 +641,8 @@ class TuiSession:
 
     def _apply_switch_wrapper(self, spec) -> None:
         """claude: retarget the RUNNING session at ``spec``'s backend."""
-        from code_helper.cli.parser import _handle_switch
-        from code_helper.services.spec import preset_names
+        from codehelper.cli.parser import _handle_switch
+        from codehelper.services.spec import preset_names
 
         source = (
             self._switch_request(from_preset=spec.name)
@@ -653,7 +653,7 @@ class TuiSession:
 
     def _apply_switch_native(self) -> None:
         """claude: clear the managed ``env`` block from settings.json."""
-        from code_helper.cli.parser import _handle_switch
+        from codehelper.cli.parser import _handle_switch
 
         self._run(_handle_switch, self._switch_request(provider=_NATIVE_CHIP))
 
@@ -665,7 +665,7 @@ class TuiSession:
         instead of at each call site — which also keeps the two apply paths
         from drifting apart if ``SwitchRequest`` grows another field.
         """
-        from code_helper.cli.requests import SwitchRequest
+        from codehelper.cli.requests import SwitchRequest
 
         return SwitchRequest(
             provider=provider,
@@ -692,9 +692,9 @@ class TuiSession:
 
     def _apply_set_default_wrapper(self, spec) -> None:
         """codex: patch config.toml so the NEXT launch uses ``spec``."""
-        from code_helper.cli.parser import _handle_set_default
-        from code_helper.cli.requests import SetDefaultRequest
-        from code_helper.services.model import BaseUrlPolicy
+        from codehelper.cli.parser import _handle_set_default
+        from codehelper.cli.requests import SetDefaultRequest
+        from codehelper.services.model import BaseUrlPolicy
 
         # FIXED providers reject a --base-url even when it equals their own
         # registry default; forward the resolved address only for
@@ -727,9 +727,9 @@ class TuiSession:
         This removes only the region this tool owns — "stop overriding",
         not "undo my last change".
         """
-        from code_helper.cli.parser import _confirm_set_default
-        from code_helper.services.codex_default import clear_default
-        from code_helper.services.paths import Paths
+        from codehelper.cli.parser import _confirm_set_default
+        from codehelper.services.codex_default import clear_default
+        from codehelper.services.paths import Paths
 
         # Reuses the CLI's own confirm — same diff-first prompt, and (the part
         # a local re-implementation would have silently dropped) the same
@@ -755,7 +755,7 @@ class TuiSession:
         ``resolve_shape`` would accept for each provider, computed without
         actually calling it per provider.
         """
-        from code_helper.services.model import AuthPolicy, compatible_providers
+        from codehelper.services.model import AuthPolicy, compatible_providers
 
         items: list[tuple[str, str]] = []
         choices = {}
@@ -789,8 +789,8 @@ class TuiSession:
 
     def _choose_add_provider(self, agent):
         """Choose and configure a provider for ``agent``, or ``_BACK``/``None``."""
-        from code_helper.errors import CodeHelperError
-        from code_helper.services.model import BaseUrlPolicy, with_auth, with_base_url
+        from codehelper.errors import CodeHelperError
+        from codehelper.services.model import BaseUrlPolicy, with_auth, with_base_url
 
         items, choices = self._add_provider_choices(agent)
         selection = self._pick(
@@ -829,9 +829,9 @@ class TuiSession:
 
     def _choose_add_model(self, provider, profile_name, profile_token, agent_name: str):
         """Discover and choose a model; ``_BACK`` returns to profile choice."""
-        from code_helper.services.models_api import list_models
-        from code_helper.services.paths import Paths
-        from code_helper.services.secrets import token_for_discovery
+        from codehelper.services.models_api import list_models
+        from codehelper.services.paths import Paths
+        from codehelper.services.secrets import token_for_discovery
 
         discovery_token = profile_token or token_for_discovery(
             Paths.default(), provider, profile_name=profile_name or None
@@ -888,10 +888,10 @@ class TuiSession:
         chipset row's ``a``/``+ add``, or the unscoped wrapper picker), so this
         step never asks "which agent" — it goes straight to the alias.
         """
-        from code_helper.cli.parser import _handle_add
-        from code_helper.cli.requests import AddRequest
-        from code_helper.errors import CodeHelperError
-        from code_helper.services.spec import suggest_alias
+        from codehelper.cli.parser import _handle_add
+        from codehelper.cli.requests import AddRequest
+        from codehelper.errors import CodeHelperError
+        from codehelper.services.spec import suggest_alias
 
         try:
             default_alias = suggest_alias(model, agent_name, profile_name or None)
@@ -1001,8 +1001,8 @@ class TuiSession:
         already answers "wrapper for which agent", so the kind/agent screens
         below are skipped and the flow goes straight to provider selection.
         """
-        from code_helper.services.agents import get_agent
-        from code_helper.services.paths import Paths
+        from codehelper.services.agents import get_agent
+        from codehelper.services.paths import Paths
 
         if agent_name is None:
             kind = self._choose_add_kind()
@@ -1033,8 +1033,8 @@ class TuiSession:
         Returns ``None`` on Esc/Back (caller re-shows the kind screen by
         simply returning, same as every other Back in this flow).
         """
-        from code_helper.services.agents import all_agents
-        from code_helper.services.paths import Paths
+        from codehelper.services.agents import all_agents
+        from codehelper.services.paths import Paths
 
         items = [
             (agent.name, f"{agent.name} — {agent.description}")
@@ -1053,9 +1053,9 @@ class TuiSession:
         this project knows how to read for it — see ``_AgentBackend``'s
         docstring).
         """
-        from code_helper.errors import CodeHelperError
-        from code_helper.services.agents import add_user_agent
-        from code_helper.services.paths import Paths
+        from codehelper.errors import CodeHelperError
+        from codehelper.services.agents import add_user_agent
+        from codehelper.services.paths import Paths
 
         name = (
             self._read_text("Agent name (its executable name on PATH): ") or ""
@@ -1109,13 +1109,13 @@ class TuiSession:
         here WHOLE rather than being split further: Tab and the digit slots
         work exactly as they did, on the screen that is about profiles.
         """
-        from code_helper.services.paths import Paths
-        from code_helper.services.secrets import (
+        from codehelper.services.paths import Paths
+        from codehelper.services.secrets import (
             DEFAULT_PROFILE,
             profile_names,
             valid_active_profile,
         )
-        from code_helper.services.state import set_active_selection
+        from codehelper.services.state import set_active_selection
 
         paths = Paths.default()
         self._refresh_profile_label()
@@ -1166,7 +1166,7 @@ class TuiSession:
         keeps the Profile screen and Tab's fallback scan able to find
         profiles cached under an OVERRIDABLE provider.
         """
-        from code_helper.services.model import PROVIDERS, AuthPolicy
+        from codehelper.services.model import PROVIDERS, AuthPolicy
 
         return [
             p
@@ -1176,9 +1176,9 @@ class TuiSession:
 
     def _resolve_tab_provider(self) -> str | None:
         """Resolve which provider Tab/the header should act on."""
-        from code_helper.services.paths import Paths
-        from code_helper.services.secrets import profile_names
-        from code_helper.services.state import active_selection
+        from codehelper.services.paths import Paths
+        from codehelper.services.secrets import profile_names
+        from codehelper.services.state import active_selection
 
         paths = Paths.default()
         selection = active_selection(paths)
@@ -1193,8 +1193,8 @@ class TuiSession:
 
     def _tab_profile(self, provider: str) -> str | None:
         """The profile Tab currently shows/would land on for ``provider``."""
-        from code_helper.services.paths import Paths
-        from code_helper.services.secrets import profile_names, valid_active_profile
+        from codehelper.services.paths import Paths
+        from codehelper.services.secrets import profile_names, valid_active_profile
 
         paths = Paths.default()
         stored = valid_active_profile(paths, provider)
@@ -1212,9 +1212,9 @@ class TuiSession:
 
     def _on_tab(self) -> None:
         """Cycle the active profile of the current provider on Tab."""
-        from code_helper.services.paths import Paths
-        from code_helper.services.secrets import profile_names, valid_active_profile
-        from code_helper.services.state import set_active_selection
+        from codehelper.services.paths import Paths
+        from codehelper.services.secrets import profile_names, valid_active_profile
+        from codehelper.services.state import set_active_selection
 
         paths = Paths.default()
         provider = self._tab_provider
@@ -1229,9 +1229,9 @@ class TuiSession:
         self._refresh_profile_label()
 
     def _on_slot(self, slot: int) -> None:
-        from code_helper.services.paths import Paths
-        from code_helper.services.profiles import profile_slots
-        from code_helper.services.state import set_active_selection
+        from codehelper.services.paths import Paths
+        from codehelper.services.profiles import profile_slots
+        from codehelper.services.state import set_active_selection
 
         slots = profile_slots(Paths.default())
         if slot < len(slots):
@@ -1247,7 +1247,7 @@ class TuiSession:
         every provider's profiles. `_refresh_profile_label` refills it when a
         slot actually changes.
         """
-        from code_helper.cli.menu import Section
+        from codehelper.cli.menu import Section
 
         return Section(lambda: self._slot_label)
 
@@ -1259,8 +1259,8 @@ class TuiSession:
         config file there would be work no keypress on that screen can
         invalidate.
         """
-        from code_helper.services.paths import Paths
-        from code_helper.services.profiles import profile_slots
+        from codehelper.services.paths import Paths
+        from codehelper.services.profiles import profile_slots
 
         self._tab_provider = self._resolve_tab_provider()
         self._tab_label = self._active_label(self._tab_provider)
@@ -1279,7 +1279,7 @@ class TuiSession:
         those callables would turn one screen's worth of I/O into one
         keystroke's worth.
         """
-        from code_helper.services.paths import Paths
+        from codehelper.services.paths import Paths
 
         paths = Paths.default()
         self._refresh_profile_label()
@@ -1287,7 +1287,7 @@ class TuiSession:
             name: backend.read_applied(paths)
             for name, backend in _AGENT_BACKENDS.items()
         }
-        from code_helper.services.claude_settings import active_switch_env
+        from codehelper.services.claude_settings import active_switch_env
 
         self._claude_active_env = active_switch_env(paths)
         self._chips = {name: self._chips_for(name, paths) for name in _AGENT_BACKENDS}
@@ -1311,8 +1311,8 @@ class TuiSession:
         wrappers yet) so that row always has a visible way to get its first
         one instead of reading as empty/broken.
         """
-        from code_helper.services.spec import PRESETS, spec_from_preset
-        from code_helper.services.wrappers import discover_managed, spec_from_installed
+        from codehelper.services.spec import PRESETS, spec_from_preset
+        from codehelper.services.wrappers import discover_managed, spec_from_installed
 
         presets = [
             spec_from_preset(preset) for preset in PRESETS if preset.agent == agent_name
@@ -1369,7 +1369,7 @@ class TuiSession:
         ``_refresh_active_label``, so this reads only the cache — never the
         filesystem on a redraw frame.
         """
-        from code_helper.services.claude_settings import matches_switch_spec
+        from codehelper.services.claude_settings import matches_switch_spec
 
         return matches_switch_spec(self._claude_active_env, chip)
 
@@ -1475,11 +1475,11 @@ class TuiSession:
         if self._tab_label:
             # Labelled: a bare "zai/axisrow" up here reads as a model or an
             # endpoint, which is exactly what the rest of the screen is about.
-            return f"code-helper{' ' * 20}profile: {self._tab_label}"
-        return "code-helper"
+            return f"codehelper{' ' * 20}profile: {self._tab_label}"
+        return "codehelper"
 
     def _show_help(self) -> None:
-        from code_helper.cli.menu import press_any_key
+        from codehelper.cli.menu import press_any_key
 
         print("a add (agent row: scoped to it) · t/e token · d delete")
         print("+ add agent: new CLI integration · + add wrapper: any agent")
@@ -1494,9 +1494,9 @@ class TuiSession:
 
     def run(self) -> int:
         """The main menu loop — show wrappers + service rows, dispatch."""
-        from code_helper.cli.menu import MenuCancelled, Section
-        from code_helper.services.paths import Paths
-        from code_helper.services.state import set_default_wrapper
+        from codehelper.cli.menu import MenuCancelled, Section
+        from codehelper.services.paths import Paths
+        from codehelper.services.state import set_default_wrapper
 
         try:
             while True:
@@ -1571,8 +1571,8 @@ class TuiSession:
                 elif choice.startswith("token:"):
                     self._on_token(choice.removeprefix("token:"))
                 elif choice.startswith("remove:"):
-                    from code_helper.cli.parser import _handle_remove
-                    from code_helper.cli.requests import RemoveRequest
+                    from codehelper.cli.parser import _handle_remove
+                    from codehelper.cli.requests import RemoveRequest
 
                     # `force` stays False: removing an unmanaged file is an
                     # explicit-command-line decision, never a keypress.
@@ -1590,7 +1590,7 @@ class TuiSession:
                     # agent. `set_default_wrapper` is the raw store (#28);
                     # `choice` came from `_wrapper_rows`, which only yields
                     # real aliases, so the write is always of a real alias.
-                    from code_helper.services.wrappers import is_installed, is_managed
+                    from codehelper.services.wrappers import is_installed, is_managed
 
                     spec = self._resolve_spec(choice)
                     if spec is None:
@@ -1606,7 +1606,7 @@ class TuiSession:
                         # "succeed" here and silently vanish on the very
                         # next read.
                         self._notify(
-                            f"{choice} is not a code-helper-managed wrapper "
+                            f"{choice} is not a codehelper-managed wrapper "
                             "— cannot set it as default."
                         )
                         continue
@@ -1640,8 +1640,8 @@ def _register_agent_backends() -> None:
     including `--help`, and the rest of this module already defers its
     service imports for that reason.
     """
-    from code_helper.services.claude_settings import current_switch
-    from code_helper.services.codex_default import current_default
+    from codehelper.services.claude_settings import current_switch
+    from codehelper.services.codex_default import current_default
 
     _AGENT_BACKENDS.update(
         {

@@ -26,7 +26,7 @@ classifiers = [
 dependencies = []
 
 [project.scripts]
-code-helper = "code_helper.__main__:cli"
+codehelper = "codehelper.__main__:cli"
 
 [project.optional-dependencies]
 dev = [
@@ -40,10 +40,10 @@ dev = [
 Homepage = "https://github.com/axisrow/code-helper"
 
 [tool.hatch.version]
-path = "src/code_helper/__init__.py"
+path = "src/codehelper/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/code_helper"]
+packages = ["src/codehelper"]
 
 [tool.ruff]
 line-length = 88

@@ -36,25 +36,25 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from code_helper.backends._atomic import atomic_write, read_text_or_none
-from code_helper.backends._atomic import rotate_backups as _rotate_backups
-from code_helper.errors import CodeHelperError
-from code_helper.services.model import (
+from codehelper.backends._atomic import atomic_write, read_text_or_none
+from codehelper.backends._atomic import rotate_backups as _rotate_backups
+from codehelper.errors import CodeHelperError
+from codehelper.services.model import (
     Agent,
     BaseUrlPolicy,
     ConfigShape,
     Provider,
     resolve_shape,
 )
-from code_helper.services.paths import Paths
-from code_helper.services.render import (
+from codehelper.services.paths import Paths
+from codehelper.services.render import (
     CATALOG_MANAGED_BY_KEY,
     openai_base_url,
     openai_catalog_body,
     toml_string,
 )
-from code_helper.services.spec import build_spec
-from code_helper.services.wrappers import _ownership_catalog_marker
+from codehelper.services.spec import build_spec
+from codehelper.services.wrappers import _ownership_catalog_marker
 
 __all__ = [
     "DefaultPatch",
@@ -192,7 +192,7 @@ def _first_real_table_boundary(text: str) -> int | None:
     the managed keys into the middle of the array literal, producing invalid
     TOML — caught by ``_verify_patch_applied`` before any write (so nothing
     was ever corrupted), but with a confusing "internal error, this is a
-    code-helper bug" message for what is actually a legitimate, if unusual,
+    codehelper bug" message for what is actually a legitimate, if unusual,
     TOML layout. This walks line-by-line, tracking a running bracket depth
     (via :data:`_STRING_OR_COMMENT_RE` to ignore brackets inside strings/
     comments), and only accepts a ``^\\[`` candidate when the depth entering
@@ -449,7 +449,7 @@ def _verify_patch_applied(original: str, patched: str, patch: DefaultPatch) -> N
     except ValueError as exc:
         raise CodeHelperError(
             f"internal error: the patched config.toml does not parse as TOML "
-            f"— refusing to write; this is a code-helper bug, please report "
+            f"— refusing to write; this is a codehelper bug, please report "
             f"it: {exc}"
         ) from None
 
@@ -472,7 +472,7 @@ def _verify_patch_applied(original: str, patched: str, patch: DefaultPatch) -> N
     if actual != expected or table_actual != table_expected:
         raise CodeHelperError(
             "internal error: the patched config.toml does not contain the "
-            "expected values — refusing to write; this is a code-helper bug, "
+            "expected values — refusing to write; this is a codehelper bug, "
             "please report it"
         )
 
@@ -486,7 +486,7 @@ def _verify_patch_applied(original: str, patched: str, patch: DefaultPatch) -> N
             raise CodeHelperError(
                 "internal error: patching config.toml appears to have altered "
                 "content outside the managed keys/table — refusing to write; "
-                "this is a code-helper bug, please report it"
+                "this is a codehelper bug, please report it"
             )
 
 
@@ -600,7 +600,7 @@ def _gate_catalog_write(
         if not (confirm and confirm(catalog_path, catalog_preview)):
             if foreign:
                 raise CodeHelperError(
-                    f"{catalog_path} exists and was not created by code-helper "
+                    f"{catalog_path} exists and was not created by codehelper "
                     f"(missing {CATALOG_MANAGED_BY_KEY!r} marker) — refusing to "
                     f"overwrite (use --force)"
                 )
@@ -684,7 +684,7 @@ def _verify_cleared(original: str, cleared: str, provider_table: str | None) -> 
     except ValueError as exc:
         raise CodeHelperError(
             f"internal error: config.toml does not parse as TOML after "
-            f"clearing — refusing to write; this is a code-helper bug, "
+            f"clearing — refusing to write; this is a codehelper bug, "
             f"please report it: {exc}"
         ) from None
 
@@ -696,7 +696,7 @@ def _verify_cleared(original: str, cleared: str, provider_table: str | None) -> 
         raise CodeHelperError(
             f"internal error: clearing config.toml left managed keys behind "
             f"({', '.join(leftover)}) — refusing to write; this is a "
-            f"code-helper bug, please report it"
+            f"codehelper bug, please report it"
         )
 
     if not original.strip():
@@ -719,7 +719,7 @@ def _verify_cleared(original: str, cleared: str, provider_table: str | None) -> 
         raise CodeHelperError(
             "internal error: clearing config.toml appears to have altered "
             "content outside the managed keys/table — refusing to write; "
-            "this is a code-helper bug, please report it"
+            "this is a codehelper bug, please report it"
         )
 
 
@@ -806,7 +806,7 @@ def current_default(paths: Paths) -> str | None:
     verifier there would mean writing unverified. This function only reads,
     and its whole contract is to degrade to ``None`` instead of raising.
     """
-    from code_helper.services.model import PROVIDERS
+    from codehelper.services.model import PROVIDERS
 
     text = read_text_or_none(paths.codex_main_config())
     if not text:

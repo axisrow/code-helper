@@ -1,7 +1,7 @@
-"""Argparse parser builder for the ``code-helper`` CLI.
+"""Argparse parser builder for the ``codehelper`` CLI.
 
 The dispatch contract: each subcommand registers a handler via
-``set_defaults(func=...)``, and :func:`code_helper.__main__.main` calls
+``set_defaults(func=...)``, and :func:`codehelper.__main__.main` calls
 ``args.func(args)``. Handlers are THIN SHELLS — resolve ``Paths.default()``,
 delegate to a service, return its int. They do NOT catch/print/exit: a
 :class:`CodeHelperError` propagates to :func:`main`, which formats it as
@@ -10,9 +10,9 @@ one-line stderr + exit 1 (full traceback under ``--debug``).
 The subcommands: ``list`` (registry + install state), ``add <name>``
 (install/update a wrapper, optionally ``--model``), ``edit-token [<name>]``
 (rotate a secret-auth wrapper's token; an arrow-key menu picks the wrapper
-when ``<name>`` is omitted, via :mod:`code_helper.cli.menu``), and ``tui``
+when ``<name>`` is omitted, via :mod:`codehelper.cli.menu``), and ``tui``
 (single-pass arrow-key menu over the three commands above, via
-:mod:`code_helper.cli.tui`). A bare ``code-helper`` (no subcommand) also
+:mod:`codehelper.cli.tui`). A bare ``codehelper`` (no subcommand) also
 opens the TUI — it is the discoverable default for a new user, while every
 subcommand remains fully scriptable on its own.
 
@@ -24,14 +24,14 @@ is a DAG (``cli`` → ``services`` → ``backends``), so nothing here needs to b
 deferred to break a cycle. Two deliberate exceptions remain, both about
 LATE BINDING rather than cycles:
 
-* :mod:`code_helper.cli.menu` is imported inside the handlers that use it,
+* :mod:`codehelper.cli.menu` is imported inside the handlers that use it,
   because the test suite patches ``menu.select_from_menu`` / ``menu.read_line``
   by name;
 * ``models_api``, ``codex_default`` and ``secrets`` are imported as MODULES and
   called through the module, for the same reason.
 
 A ``from … import name`` in either case would bind the original function at
-import time and no patch would ever be seen. :mod:`code_helper.cli.tui` stays
+import time and no patch would ever be seen. :mod:`codehelper.cli.tui` stays
 local as well — it imports this module back, so that one IS a cycle.
 """
 
@@ -40,22 +40,22 @@ import os
 import sys
 from dataclasses import replace
 
-from code_helper.cli.requests import (
+from codehelper.cli.requests import (
     AddRequest,
     EditTokenRequest,
     RemoveRequest,
     SetDefaultRequest,
     SwitchRequest,
 )
-from code_helper.errors import CodeHelperError
+from codehelper.errors import CodeHelperError
 
 # Modules, not names — see this module's docstring on late binding.
-from code_helper.services import claude_settings, codex_default, models_api, secrets
-from code_helper.services.agents import all_agents, load_user_agents_strict
-from code_helper.services.agents import get_agent as get_any_agent
-from code_helper.services.claude_settings import current_switch
-from code_helper.services.codex_default import restore_default
-from code_helper.services.model import (
+from codehelper.services import claude_settings, codex_default, models_api, secrets
+from codehelper.services.agents import all_agents, load_user_agents_strict
+from codehelper.services.agents import get_agent as get_any_agent
+from codehelper.services.claude_settings import current_switch
+from codehelper.services.codex_default import restore_default
+from codehelper.services.model import (
     PROVIDERS,
     ConfigShape,
     get_agent,
@@ -64,13 +64,13 @@ from code_helper.services.model import (
     with_auth,
     with_base_url,
 )
-from code_helper.services.paths import Paths
-from code_helper.services.profiles import (
+from codehelper.services.paths import Paths
+from codehelper.services.profiles import (
     NewProfileOutcome,
     classify_new_profile,
     validate_new_profile_name,
 )
-from code_helper.services.secrets import (
+from codehelper.services.secrets import (
     DEFAULT_PROFILE,
     SOURCE_ENV,
     SOURCE_PROMPT,
@@ -83,14 +83,14 @@ from code_helper.services.secrets import (
     token_for_discovery,
     valid_active_profile,
 )
-from code_helper.services.spec import (
+from codehelper.services.spec import (
     build_spec,
     get_preset,
     spec_from_preset,
     suggest_alias,
 )
-from code_helper.services.state import active_selection
-from code_helper.services.wrappers import (
+from codehelper.services.state import active_selection
+from codehelper.services.wrappers import (
     WRAPPERS,
     describe_all,
     discover_managed,
@@ -198,7 +198,7 @@ def _ask_yes_no(prompt: str) -> bool:
     "decline this prompt" — the same hard/soft split every other TUI reader
     makes (see ``TuiSession._read_text``).
     """
-    from code_helper.cli.menu import MenuCancelled, read_line
+    from codehelper.cli.menu import MenuCancelled, read_line
 
     try:
         answer = read_line(prompt)
@@ -220,7 +220,7 @@ def _confirm_overwrite(path) -> bool:
     if not sys.stdin.isatty():
         return False
     return _ask_yes_no(
-        f"{path} exists and was not created by code-helper. Overwrite? [y/N] "
+        f"{path} exists and was not created by codehelper. Overwrite? [y/N] "
     )
 
 
@@ -230,7 +230,7 @@ def _confirm_set_default(path, preview: str) -> bool:
     Shared by both ``set-default`` (Codex's ``config.toml``) and ``switch``
     (Claude's ``settings.json``) — same target-is-foreign-by-definition
     situation, same diff-first prompt. Deliberately NOT :func:`_confirm_overwrite`:
-    that prompt's wording ("was not created by code-helper") is misleading
+    that prompt's wording ("was not created by codehelper") is misleading
     here — the target is ALWAYS foreign by definition, so that phrasing would
     fire on every single successful use rather than flag anything unusual.
     This prompt instead shows the diff/preview so the user can see exactly
@@ -256,7 +256,7 @@ def _read_profile_name(prompt: str) -> str | None:
     text prompt always matches the soft path instead, so ``MenuCancelled``
     is caught regardless of its ``hard`` flag.
     """
-    from code_helper.cli.menu import MenuCancelled, read_line
+    from codehelper.cli.menu import MenuCancelled, read_line
 
     try:
         return read_line(prompt)
@@ -336,7 +336,7 @@ def _add_resolve_spec(req, paths, agent, provider, profile_name):
 
     if not req.model:
         raise CodeHelperError(
-            f"--model is required (try: code-helper add --agent {agent.name} "
+            f"--model is required (try: codehelper add --agent {agent.name} "
             f"--provider {provider.name} --list-models)"
         )
     shape = _parse_shape(req.shape)
@@ -378,7 +378,7 @@ def _add_spec_from_preset(req, paths, profile_name):
             raise unknown_preset from None
         raise CodeHelperError(
             f"unknown wrapper name: {req.name} — {req.name} is an agent; "
-            f"try: code-helper add --agent {req.name} --provider ollama "
+            f"try: codehelper add --agent {req.name} --provider ollama "
             f"--model <model>"
         ) from None
     if profile_name is None:
@@ -582,12 +582,12 @@ def _edit_token_resolve_profile(
     cancel (Esc at the menu, Ctrl-C at a name prompt), signalling the caller
     to print "cancelled" and exit 0.
 
-    The new-profile naming decision is owned by :mod:`code_helper.services.profiles`
+    The new-profile naming decision is owned by :mod:`codehelper.services.profiles`
     (issue #37, P1.2): this function maps the classifier's outcome to the
     CLI's raises (lowercase messages, SAME and COLLISION_NEW merged). See
     ``_new_profile`` in ``cli/tui.py`` for the TUI's own mapping.
     """
-    from code_helper.cli.menu import MenuCancelled, select_from_menu
+    from codehelper.cli.menu import MenuCancelled, select_from_menu
 
     names = list(profile_names(paths, provider_name))
     if not names:
@@ -653,7 +653,7 @@ def _edit_token_spec(paths, name: str | None):
     soft cancel at that menu, signalling the caller to print "cancelled" and
     exit 0; a hard cancel (Ctrl-C) propagates.
     """
-    from code_helper.cli.menu import MenuCancelled, select_from_menu
+    from codehelper.cli.menu import MenuCancelled, select_from_menu
 
     def _resolve(alias: str):
         return spec_from_installed(paths, alias) or get_spec(alias)
@@ -687,7 +687,7 @@ def _edit_token_spec(paths, name: str | None):
             # "leave the TUI" rather than "command succeeded, pause and
             # show the menu again" — see cli/tui.py's top-level catch.
             # The plain CLI path has no such catch either, so Ctrl-C at
-            # `code-helper edit-token`'s picker behaves like Ctrl-C
+            # `codehelper edit-token`'s picker behaves like Ctrl-C
             # anywhere else in the CLI: an uncaught KeyboardInterrupt.
             raise
         return None
@@ -718,7 +718,7 @@ def _handle_edit_token(args: argparse.Namespace | EditTokenRequest) -> int:
     """Interactively rotate the token of a secret-auth wrapper.
 
     Unlike ``add``, this always prompts via ``getpass`` directly — it never
-    calls :func:`code_helper.services.secrets.resolve_token`, which would
+    calls :func:`codehelper.services.secrets.resolve_token`, which would
     silently return an existing ``token_env_var`` value OR a cached
     ``credentials.json`` value instead of the NEW one the user is trying to
     type in. The freshly typed token is cached AFTER the install succeeds, so
@@ -910,8 +910,8 @@ def _switch_resolve_token(
     """The token for a `switch --provider ...` (explicit-axes) invocation.
 
     Mirrors ``_add_resolve_token`` exactly, but works off a bare
-    :class:`~code_helper.services.model.Provider` rather than a
-    :class:`~code_helper.services.spec.WrapperSpec` — `switch` never builds
+    :class:`~codehelper.services.model.Provider` rather than a
+    :class:`~codehelper.services.spec.WrapperSpec` — `switch` never builds
     one (see ``_handle_switch``'s docstring on why). An `env_reset` provider
     never reaches this: :func:`_handle_switch` returns before calling it.
 
@@ -968,7 +968,7 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
     spec = spec_from_installed(paths, name)
     if spec is None:
         raise CodeHelperError(
-            f"no installed wrapper named {name!r} — see `code-helper list`"
+            f"no installed wrapper named {name!r} — see `codehelper list`"
         )
     if spec.agent.name != "claude":
         raise CodeHelperError(
@@ -1020,7 +1020,7 @@ def _switch_axes_from_preset(req: SwitchRequest, paths):
 def _switch_axes_from_flags(req: SwitchRequest, paths):
     """Resolve ``(provider, tier_models, token, subagent_model)`` from the
     explicit ``--provider``/``--model``/``--haiku``/... flags."""
-    from code_helper.services.spec import TierModels
+    from codehelper.services.spec import TierModels
 
     provider_name = req.provider
     if provider_name is None:
@@ -1151,18 +1151,18 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
 
 
 def _handle_tui(args: argparse.Namespace) -> int:
-    """``tui`` subcommand (and bare ``code-helper``) → the arrow-key menu.
+    """``tui`` subcommand (and bare ``codehelper``) → the arrow-key menu.
 
-    Thin shell: delegate to :func:`code_helper.cli.tui.run_tui`, which
+    Thin shell: delegate to :func:`codehelper.cli.tui.run_tui`, which
     dispatches into the same ``_handle_*`` functions as the CLI subcommands.
     """
-    from code_helper.cli.tui import run_tui
+    from codehelper.cli.tui import run_tui
 
     return run_tui(args)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the root ``code-helper`` argparse parser.
+    """Build the root ``codehelper`` argparse parser.
 
     The root parser owns the global flags (``--debug`` / ``--dry-run``) and
     the subcommand dispatch table.
@@ -1187,7 +1187,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser = argparse.ArgumentParser(
-        prog="code-helper",
+        prog="codehelper",
         description="Manage generated Claude Code wrapper scripts in ~/.local/bin.",
         parents=[sub_flags],
     )
@@ -1226,17 +1226,17 @@ def build_parser() -> argparse.ArgumentParser:
         "name",
         nargs="?",
         default=None,
-        help="preset name (see `code-helper list`); omit when using --agent",
+        help="preset name (see `codehelper list`); omit when using --agent",
     )
     p_add.add_argument(
         "--agent",
         default=None,
-        help="agent to run, e.g. claude or codex (see `code-helper list agents`)",
+        help="agent to run, e.g. claude or codex (see `codehelper list agents`)",
     )
     p_add.add_argument(
         "--provider",
         default=None,
-        help="model backend (see `code-helper list providers`)",
+        help="model backend (see `codehelper list providers`)",
     )
     p_add.add_argument(
         "--model",
@@ -1278,7 +1278,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         default=False,
-        help="overwrite a file code-helper did not create",
+        help="overwrite a file codehelper did not create",
     )
     p_add.add_argument(
         "--list-models",
@@ -1339,12 +1339,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_set_default.add_argument(
         "--agent",
         default=None,
-        help="agent to default onto, e.g. codex (see `code-helper list agents`)",
+        help="agent to default onto, e.g. codex (see `codehelper list agents`)",
     )
     p_set_default.add_argument(
         "--provider",
         default=None,
-        help="model backend (see `code-helper list providers`)",
+        help="model backend (see `codehelper list providers`)",
     )
     p_set_default.add_argument(
         "--model",
@@ -1392,7 +1392,7 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=None,
         help="provider to switch to, e.g. zai, or native to clear the "
-        "override (see `code-helper list providers`); sugar for --provider",
+        "override (see `codehelper list providers`); sugar for --provider",
     )
     # No argparse mutually-exclusive group — same reasoning as set-default's:
     # the handler validates the combinations explicitly for a clearer error.
@@ -1406,7 +1406,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_switch.add_argument(
         "--provider",
         default=None,
-        help="model backend (see `code-helper list providers`); alternative "
+        help="model backend (see `codehelper list providers`); alternative "
         "to the positional form",
     )
     p_switch.add_argument(
@@ -1482,7 +1482,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_tui = subparsers.add_parser(
         "tui",
-        help="open the arrow-key menu (also the bare `code-helper` default)",
+        help="open the arrow-key menu (also the bare `codehelper` default)",
         parents=[sub_flags],
     )
     p_tui.set_defaults(func=_handle_tui)

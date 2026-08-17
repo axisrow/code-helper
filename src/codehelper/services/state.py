@@ -1,7 +1,7 @@
 """Persistent UI pre-selection state (issue #23).
 
 Holds the TUI's active token-profile pre-selection — which profile is selected
-by default for ``add``/``edit-token`` — in ``~/.config/code-helper/state.json``.
+by default for ``add``/``edit-token`` — in ``~/.config/codehelper/state.json``.
 This is deliberately a SEPARATE module and file from ``services/secrets.py``:
 
 - ``secrets.py`` is built around ``credentials.json`` and holds TOKENS. Its
@@ -13,7 +13,7 @@ This is deliberately a SEPARATE module and file from ``services/secrets.py``:
   loses a pre-selection at worst, never a token — unlike
   :func:`secrets._locked_update`, whose serialization protects the only
   persistent copy of a credential. Write is a plain read-modify-write through
-  :func:`code_helper.backends._atomic.atomic_write`.
+  :func:`codehelper.backends._atomic.atomic_write`.
 
 **Schema: a single pointer, ``{"active": {"provider": ..., "profile": ...}}``.**
 An earlier version stored ``active_provider`` and ``active_profiles`` (a
@@ -54,8 +54,8 @@ from __future__ import annotations
 
 import json
 
-from code_helper.backends._atomic import atomic_write
-from code_helper.services.paths import Paths
+from codehelper.backends._atomic import atomic_write
+from codehelper.services.paths import Paths
 
 __all__ = [
     "load_state",

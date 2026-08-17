@@ -13,28 +13,28 @@ import stat
 
 import pytest
 
-from code_helper.errors import CodeHelperError
-from code_helper.services.model import (
+from codehelper.errors import CodeHelperError
+from codehelper.services.model import (
     ConfigShape,
     ModelListAPI,
     Provider,
     get_provider,
     with_base_url,
 )
-from code_helper.services.paths import Paths
-from code_helper.services.render import (
+from codehelper.services.paths import Paths
+from codehelper.services.render import (
     anthropic_base_url,
     openai_catalog_body,
     openai_toml_body,
     render_script,
 )
-from code_helper.services.spec import (
+from codehelper.services.spec import (
     WrapperSpec,
     build_spec,
     get_preset,
     spec_from_preset,
 )
-from code_helper.services.wrappers import (
+from codehelper.services.wrappers import (
     WRAPPERS,
     discover_managed,
     get_spec,
@@ -450,7 +450,7 @@ def test_spec_from_installed_reconstructs_a_user_agent_wrapper(tmp_path):
     its marker. Reconstruction must resolve it through the MERGED registry
     (built-ins + user agents), not the built-in-only lookup — otherwise the
     wrapper is invisible to the TUI's list/remove/token actions."""
-    from code_helper.services.agents import add_user_agent, get_agent
+    from codehelper.services.agents import add_user_agent, get_agent
 
     paths = Paths.from_home(tmp_path)
     add_user_agent(paths, "myagent", "myagent", "a real CLI")
@@ -471,12 +471,12 @@ def test_reserved_named_managed_wrapper_stays_discoverable_and_removable(tmp_pat
     NEW creation (``validate_alias`` at the install boundary); it must never
     strand a pre-existing managed file on PATH with no way to list or remove
     it."""
-    from code_helper.services.wrappers import remove_wrapper
+    from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
     paths.bin_dir.mkdir(parents=True, exist_ok=True)
     paths.script_for("opencode").write_text(
-        "# code-helper: managed wrapper\n#!/bin/sh\n", encoding="utf-8"
+        "# codehelper: managed wrapper\n#!/bin/sh\n", encoding="utf-8"
     )
     assert is_managed(paths, "opencode") is True
     assert "opencode" in discover_managed(paths)
@@ -499,7 +499,7 @@ def test_valid_default_wrapper_none_when_unset(tmp_path):
 @pytest.mark.integration
 def test_valid_default_wrapper_none_for_uninstalled_preset(tmp_path):
     """A preset name alone must not create a selectable default ghost."""
-    from code_helper.services.state import set_default_wrapper
+    from codehelper.services.state import set_default_wrapper
 
     paths = Paths.from_home(tmp_path)
     set_default_wrapper(paths, "claude", "glm")
@@ -509,7 +509,7 @@ def test_valid_default_wrapper_none_for_uninstalled_preset(tmp_path):
 @pytest.mark.integration
 def test_valid_default_wrapper_returns_a_managed_alias(tmp_path):
     """An ad-hoc managed wrapper (no preset) is live via ``discover_managed``."""
-    from code_helper.services.state import set_default_wrapper
+    from codehelper.services.state import set_default_wrapper
 
     paths = Paths.from_home(tmp_path)
     install_wrapper(
@@ -523,7 +523,7 @@ def test_valid_default_wrapper_returns_a_managed_alias(tmp_path):
 def test_valid_default_wrapper_none_for_a_stale_alias(tmp_path):
     """A saved alias that is neither a preset nor on disk is stale — readers
     must fall back to None instead of highlighting a ghost wrapper."""
-    from code_helper.services.state import set_default_wrapper
+    from codehelper.services.state import set_default_wrapper
 
     paths = Paths.from_home(tmp_path)
     set_default_wrapper(paths, "claude", "ghost")
@@ -535,7 +535,7 @@ def test_valid_default_wrapper_none_for_an_unmanaged_file(tmp_path):
     """A bare file on disk without our marker is NOT a managed wrapper — the
     live check goes through ``discover_managed`` (which requires the marker),
     not bare ``script_for(name).exists()``."""
-    from code_helper.services.state import set_default_wrapper
+    from codehelper.services.state import set_default_wrapper
 
     paths = Paths.from_home(tmp_path)
     paths.bin_dir.mkdir(parents=True, exist_ok=True)
@@ -549,7 +549,7 @@ def test_valid_default_wrapper_rejects_a_wrong_agent_preset(tmp_path):
     """A preset alias belongs to a specific agent — ``valid_default_wrapper``
     for a different agent must not return it, or a per-agent consumer would
     apply a wrapper that launches the wrong agent/config shape."""
-    from code_helper.services.state import set_default_wrapper
+    from codehelper.services.state import set_default_wrapper
 
     paths = Paths.from_home(tmp_path)
     set_default_wrapper(paths, "codex", "glm")  # glm is a claude preset
@@ -561,8 +561,8 @@ def test_valid_default_wrapper_installed_wrapper_wins_over_same_named_preset(tmp
     """A managed wrapper on disk takes precedence over a same-named preset —
     the on-disk wrapper's agent is authoritative, not the preset's. Otherwise a
     claude consumer could be handed a wrapper that actually launches codex."""
-    from code_helper.services.spec import build_spec
-    from code_helper.services.state import set_default_wrapper
+    from codehelper.services.spec import build_spec
+    from codehelper.services.state import set_default_wrapper
 
     paths = Paths.from_home(tmp_path)
     # Install a codex wrapper named "glm" (collides with the claude preset).
@@ -582,7 +582,7 @@ def test_valid_default_wrapper_installed_wrapper_wins_over_same_named_preset(tmp
 def test_valid_default_wrapper_none_for_a_malformed_alias(tmp_path):
     """A hand-edited/corrupt state entry with a path separator must degrade to
     None, never raise — the read path is contractually non-raising."""
-    from code_helper.services.state import set_default_wrapper
+    from codehelper.services.state import set_default_wrapper
 
     paths = Paths.from_home(tmp_path)
     set_default_wrapper(paths, "claude", "../x")
@@ -687,7 +687,7 @@ def test_list_wrappers_reports_installed_and_not_installed(tmp_path):
 # CLI: `add` / `list` through main([...]).
 # --------------------------------------------------------------------------- #
 
-from code_helper.__main__ import main  # noqa: E402
+from codehelper.__main__ import main  # noqa: E402
 
 
 @pytest.mark.integration
@@ -783,7 +783,7 @@ def test_openai_toml_body_carries_marker_model_base_url_wire_api():
     spec = _toml_spec(model="glm-5.2:cloud")
     body = openai_toml_body(spec, "/home/u/.codex/glm-5-codex.model.json")
     # Marker on line 1 — what the ownership guard keys off.
-    assert body.startswith("# code-helper: managed wrapper")
+    assert body.startswith("# codehelper: managed wrapper")
     assert 'model = "glm-5.2:cloud"' in body  # `:` and `.` => must be quoted
     # Data-driven: table key + model_provider derive from spec.provider.name,
     # not a hardcoded "ollama-launch" — that is what makes a second
@@ -827,7 +827,7 @@ def test_openai_toml_wrapper_body_is_unchanged_for_a_literal_provider():
     body = render_script(spec, "")
     assert body == (
         "#!/bin/bash\n"
-        "# code-helper: managed wrapper (agent=codex, provider=ollama, "
+        "# codehelper: managed wrapper (agent=codex, provider=ollama, "
         "shape=openai-toml)\n"
         "exec codex --profile 'glm-5-codex' \"$@\"\n"
     )
@@ -971,7 +971,7 @@ def test_install_openai_toml_force_overwrites_foreign_config(tmp_path):
     config.write_text("# foreign\n", encoding="utf-8")
 
     assert install_wrapper(paths, spec, force=True) is True
-    assert config.read_text(encoding="utf-8").startswith("# code-helper:")
+    assert config.read_text(encoding="utf-8").startswith("# codehelper:")
 
 
 @pytest.mark.integration
@@ -1345,8 +1345,8 @@ def test_spec_from_installed_falls_back_to_the_default_for_overridable(
     """
     from dataclasses import replace
 
-    import code_helper.services.model as model_mod
-    from code_helper.services.model import BaseUrlPolicy
+    import codehelper.services.model as model_mod
+    from codehelper.services.model import BaseUrlPolicy
 
     ollama = get_provider("ollama")
     patched = replace(ollama, base_url_policy=BaseUrlPolicy.OVERRIDABLE)
@@ -1427,7 +1427,7 @@ def test_edit_token_preserves_the_base_url(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     import getpass
 
-    from code_helper.__main__ import main
+    from codehelper.__main__ import main
 
     paths = Paths.from_home(tmp_path)
     provider = with_base_url(get_provider("litellm"), "http://h:4000/v1")
@@ -1672,7 +1672,7 @@ def test_install_openai_toml_skip_still_cleans_orphaned_siblings_and_reports_it(
     # from an install that predates this cleanup, or a partial failure) with
     # no matching catalog — the wrapper slot for a second install of the SAME
     # launcher_spec is now byte-identical (SKIP).
-    from code_helper.services.render import openai_toml_body
+    from codehelper.services.render import openai_toml_body
 
     stray_profile = paths.codex_config_for(alias)
     stray_profile.write_text(
@@ -1715,7 +1715,7 @@ def test_openai_catalog_body_carries_managed_by_marker():
     """M4: the catalog's own JSON body proves authorship without its sibling."""
     import json
 
-    from code_helper.services.render import (
+    from codehelper.services.render import (
         CATALOG_MANAGED_BY_KEY,
         CATALOG_MANAGED_BY_VALUE,
     )
@@ -1777,7 +1777,7 @@ def test_validate_registries_rejects_openai_toml_provider_without_wire_api():
     runtime — the whole point of the shape being a data-driven extension
     point.
     """
-    import code_helper.services.model as model_mod
+    import codehelper.services.model as model_mod
 
     bad_provider = Provider(
         name="bad-openai",
@@ -1817,7 +1817,7 @@ def test_toml_profile_data_fallback_scopes_base_url_to_its_own_table(
     """
     import builtins
 
-    import code_helper.services.wrappers as wrappers_mod
+    import codehelper.services.wrappers as wrappers_mod
 
     real_import = builtins.__import__
 
@@ -1863,7 +1863,7 @@ def test_toml_profile_data_fallback_scopes_base_url_to_its_own_table(
 def test_all_has_no_duplicate_entries():
     """``__all__`` is the module's public-API list; a duplicate is dead
     weight from an edit, never intentional (a name is exported once)."""
-    import code_helper.services.wrappers as wrappers_mod
+    import codehelper.services.wrappers as wrappers_mod
 
     assert len(wrappers_mod.__all__) == len(set(wrappers_mod.__all__))
 
@@ -1874,7 +1874,7 @@ def test_describe_wrapper_marker_preserves_state_column_alignment():
     field must shrink by the marker's width — otherwise the install-state
     column shifts right by two on the marked row and the three menus that
     share this format string drift apart on layout."""
-    from code_helper.services.wrappers import describe_wrapper
+    from codehelper.services.wrappers import describe_wrapper
 
     spec = build_spec(
         agent="claude", provider="ollama", model="qwen3.5:9b", alias="glm"
@@ -1894,8 +1894,8 @@ def test_describe_wrapper_marker_preserves_state_column_alignment():
 
 @pytest.mark.integration
 def test_remove_wrapper_removes_owned_siblings_and_clears_default(tmp_path):
-    from code_helper.services.state import default_wrapper, set_default_wrapper
-    from code_helper.services.wrappers import remove_wrapper
+    from codehelper.services.state import default_wrapper, set_default_wrapper
+    from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
     spec = build_spec(agent="codex", provider="ollama", model="remove-me")
@@ -1913,7 +1913,7 @@ def test_remove_wrapper_removes_owned_siblings_and_clears_default(tmp_path):
 def test_remove_wrapper_asks_confirm_before_unlinking(tmp_path):
     """``confirm`` is called with the full target list before anything is
     touched; declining leaves every file in place."""
-    from code_helper.services.wrappers import remove_wrapper
+    from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
     spec = build_spec(agent="codex", provider="ollama", model="remove-me")
@@ -1941,7 +1941,7 @@ def test_remove_wrapper_asks_confirm_before_unlinking(tmp_path):
 def test_remove_wrapper_force_bypasses_confirm(tmp_path):
     """``force`` is "I already know what I'm removing" — it skips the
     prompt entirely, same contract as ``install_wrapper``'s ``force``."""
-    from code_helper.services.wrappers import remove_wrapper
+    from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
     spec = build_spec(agent="codex", provider="ollama", model="remove-me")
@@ -1957,7 +1957,7 @@ def test_remove_wrapper_force_bypasses_confirm(tmp_path):
 @pytest.mark.integration
 def test_remove_wrapper_dry_run_never_asks_confirm(tmp_path):
     """Dry-run never mutates anything, so there is nothing to confirm."""
-    from code_helper.services.wrappers import remove_wrapper
+    from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
     spec = build_spec(agent="codex", provider="ollama", model="remove-me")
@@ -1972,7 +1972,7 @@ def test_remove_wrapper_dry_run_never_asks_confirm(tmp_path):
 
 @pytest.mark.integration
 def test_remove_wrapper_refuses_foreign_file_without_force(tmp_path):
-    from code_helper.services.wrappers import remove_wrapper
+    from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
     paths.bin_dir.mkdir(parents=True)
@@ -1991,8 +1991,8 @@ def test_remove_wrapper_survives_a_failed_sibling_unlink(tmp_path, monkeypatch):
     the default is only cleared once every unlink has actually succeeded."""
     from pathlib import Path
 
-    from code_helper.services.state import default_wrapper, set_default_wrapper
-    from code_helper.services.wrappers import remove_wrapper
+    from codehelper.services.state import default_wrapper, set_default_wrapper
+    from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
     spec = build_spec(agent="codex", provider="ollama", model="remove-me")
@@ -2038,9 +2038,9 @@ def test_remove_wrapper_reports_but_does_not_undo_a_failed_default_clear(
     files are gone regardless — that cannot be undone — so the failure must
     be reported (not swallowed as success) without claiming the deletion
     itself didn't happen."""
-    import code_helper.services.state as state
-    from code_helper.services.state import set_default_wrapper
-    from code_helper.services.wrappers import remove_wrapper
+    import codehelper.services.state as state
+    from codehelper.services.state import set_default_wrapper
+    from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
     spec = build_spec(agent="codex", provider="ollama", model="remove-me")
