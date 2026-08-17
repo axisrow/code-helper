@@ -35,6 +35,7 @@ from urllib.parse import unquote
 
 from code_helper.backends._atomic import atomic_write, read_text_or_none, remove_file
 from code_helper.errors import CodeHelperError
+from code_helper.services.agents import get_agent as get_any_agent
 from code_helper.services.model import (
     Agent,
     BaseUrlPolicy,
@@ -334,9 +335,20 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     if provider_obj is None:
         return None
 
+    # Resolve the agent through the MERGED registry (built-ins + user-defined
+    # agents), not model.get_agent's built-in-only lookup: a wrapper created
+    # for a user-defined agent records that agent's name in its marker, and
+    # build_spec would otherwise reject it as unknown, hiding the wrapper from
+    # the TUI's list/remove/token actions. Pass the resolved Agent object so
+    # build_spec skips its own string resolution.
+    try:
+        agent_obj = get_any_agent(paths, fields["agent"])
+    except CodeHelperError:
+        return None
+
     try:
         return build_spec(
-            agent=fields["agent"],
+            agent=agent_obj,
             provider=provider_obj,
             model=model,
             alias=name,

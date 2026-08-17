@@ -64,6 +64,7 @@ from code_helper.services.paths import Paths
 
 __all__ = [
     "load_user_agents",
+    "load_user_agents_strict",
     "all_agents",
     "get_agent",
     "add_user_agent",
@@ -159,16 +160,22 @@ def load_user_agents(paths: Paths) -> tuple[Agent, ...]:
     return _entries_to_agents(entries)
 
 
-def _load_user_agents_strict(paths: Paths) -> tuple[Agent, ...]:
-    """Read ``agents.json`` for MUTATION, failing closed on a corrupt file.
+def load_user_agents_strict(paths: Paths) -> tuple[Agent, ...]:
+    """Read ``agents.json`` for MUTATION, failing closed on ANY corruption.
 
-    The permissive :func:`load_user_agents` (never raises, degrades to empty)
-    is right for listing/UI, but wrong as the read side of a read-modify-write:
-    a malformed file would read as "no agents" and the next add would overwrite
-    every prior entry with just the new one — silent, irreversible deletion.
-    This strict variant raises on a file that cannot be parsed, so a corrupt
-    registry is surfaced instead of destroyed. A MISSING file is fine (a fresh
+    The permissive :func:`load_user_agents` (never raises, degrades to empty,
+    skips bad entries) is right for listing/UI, but wrong as the read side of
+    a read-modify-write: a malformed file would read as "no agents" and the
+    next add would overwrite every prior entry with just the new one — silent,
+    irreversible deletion. This strict variant raises on a file that cannot be
+    parsed AND on any individual invalid/duplicate entry, so a corrupt registry
+    is surfaced instead of destroyed. A MISSING file is fine (a fresh
     registry); an unreadable one is not (we cannot know what it holds).
+
+    The per-entry strictness matters as much as the file shape: a mutation
+    that serializes only the surviving entries would silently drop a malformed
+    entry on the next write — data loss dressed up as cleanup. Fail closed
+    instead, and let the user repair the file.
     """
     path = paths.agents_file()
     try:
@@ -186,7 +193,34 @@ def _load_user_agents_strict(paths: Paths) -> tuple[Agent, ...]:
     entries = data.get("agents")
     if not isinstance(entries, list):
         raise CodeHelperError("agents registry is corrupt: expected an 'agents' list")
-    return _entries_to_agents(entries)
+
+    agents: list[Agent] = []
+    seen_names: set[str] = set()
+    for raw_entry in entries:
+        parsed = _parse_entry(raw_entry)
+        if parsed is None:
+            raise CodeHelperError("agents registry contains an invalid entry")
+        try:
+            validate_agent_binary(parsed.name)
+            validate_agent_binary(parsed.binary)
+        except CodeHelperError:
+            raise CodeHelperError(
+                f"agents registry contains an invalid entry: {parsed.name!r}"
+            ) from None
+        if parsed.name in seen_names:
+            raise CodeHelperError(
+                f"agents registry contains a duplicate entry: {parsed.name!r}"
+            )
+        seen_names.add(parsed.name)
+        agents.append(
+            Agent(
+                name=parsed.name,
+                binary=parsed.binary,
+                shapes=frozenset({ConfigShape.OLLAMA_LAUNCH}),
+                description=parsed.description,
+            )
+        )
+    return tuple(agents)
 
 
 def all_agents(paths: Paths) -> tuple[Agent, ...]:
@@ -260,7 +294,7 @@ def add_user_agent(
         try:
             # Strict read: a corrupt registry must fail closed here, not read
             # as "no agents" and be overwritten with just the new entry.
-            user_agents = _load_user_agents_strict(paths)
+            user_agents = load_user_agents_strict(paths)
             existing = AGENTS + user_agents
             existing_names = {a.name for a in existing}
             existing_binaries = {a.binary for a in existing}

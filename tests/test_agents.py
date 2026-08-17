@@ -276,10 +276,11 @@ def test_add_user_agent_fails_closed_on_a_non_dict_registry(tmp_path):
 
 
 @pytest.mark.unit
-def test_add_user_agent_preserves_valid_entries_alongside_a_bad_one(tmp_path):
-    """A stray bad ENTRY (not a corrupt file) must not block the add nor cost
-    the user the valid entries — only a file that cannot be parsed fails
-    closed."""
+def test_add_user_agent_fails_closed_on_a_bad_entry(tmp_path):
+    """A stray bad ENTRY must fail the mutation closed, not be silently dropped
+    on the next write — serializing only the surviving entries would be data
+    loss dressed up as cleanup. The permissive reader still skips it for
+    display; the mutation path refuses."""
     paths = _paths(tmp_path)
     _write_agents_file(
         paths,
@@ -292,9 +293,10 @@ def test_add_user_agent_preserves_valid_entries_alongside_a_bad_one(tmp_path):
             }
         ),
     )
-    add_user_agent(paths, "myagent")
-    names = {a.name for a in load_user_agents(paths)}
-    assert names == {"good-agent", "myagent"}
+    with pytest.raises(CodeHelperError, match="invalid entry"):
+        add_user_agent(paths, "myagent")
+    # The file is untouched — the bad entry is not silently deleted.
+    assert "not-a-dict" in paths.agents_file().read_text(encoding="utf-8")
 
 
 @pytest.mark.unit
@@ -358,4 +360,37 @@ def test_wrapper_alias_cannot_shadow_a_user_agent_binary():
         debug=False,
     )
     with pytest.raises(CodeHelperError, match="reserved"):
+        _handle_add(req)
+
+
+@pytest.mark.integration
+def test_wrapper_alias_check_fails_closed_on_a_corrupt_registry(tmp_path):
+    """The alias-reservation check must NOT read a corrupt registry as "no
+    user agents" and let a wrapper silently shadow a real binary. A corrupt
+    agents.json fails the add closed even when the agent itself is a built-in
+    (so it resolves fine) and only the alias collides with a user binary."""
+    from code_helper.cli.parser import _handle_add
+    from code_helper.cli.requests import AddRequest
+
+    paths = _paths(tmp_path)
+    _write_agents_file(paths, "{not valid json")
+    req = AddRequest(
+        name=None,
+        agent="claude",
+        provider="ollama",
+        model="model-x",
+        alias="mytool",
+        shape=None,
+        base_url=None,
+        auth=None,
+        profile=None,
+        profile_token=None,
+        profile_rename_from=None,
+        profile_rename_to=None,
+        list_models=False,
+        dry_run=True,
+        force=False,
+        debug=False,
+    )
+    with pytest.raises(CodeHelperError, match="corrupt"):
         _handle_add(req)

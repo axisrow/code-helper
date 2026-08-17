@@ -445,6 +445,26 @@ def test_discover_managed_finds_ad_hoc_wrappers(tmp_path):
 
 
 @pytest.mark.integration
+def test_spec_from_installed_reconstructs_a_user_agent_wrapper(tmp_path):
+    """A wrapper created for a user-defined agent records that agent's name in
+    its marker. Reconstruction must resolve it through the MERGED registry
+    (built-ins + user agents), not the built-in-only lookup — otherwise the
+    wrapper is invisible to the TUI's list/remove/token actions."""
+    from code_helper.services.agents import add_user_agent, get_agent
+
+    paths = Paths.from_home(tmp_path)
+    add_user_agent(paths, "myagent", "myagent", "a real CLI")
+    agent = get_agent(paths, "myagent")
+    spec = build_spec(agent=agent, provider="ollama", model="qwen3.5:9b")
+    install_wrapper(paths, spec)
+
+    rebuilt = spec_from_installed(paths, spec.alias)
+    assert rebuilt is not None
+    assert rebuilt.agent.name == "myagent"
+    assert rebuilt.provider.name == "ollama"
+
+
+@pytest.mark.integration
 def test_reserved_named_managed_wrapper_stays_discoverable_and_removable(tmp_path):
     """A wrapper whose name became reserved (e.g. ``opencode`` after the agent
     registry grew) must remain discoverable and removable. Reservation gates

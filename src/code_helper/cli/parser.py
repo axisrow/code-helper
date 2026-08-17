@@ -51,7 +51,7 @@ from code_helper.errors import CodeHelperError
 
 # Modules, not names — see this module's docstring on late binding.
 from code_helper.services import claude_settings, codex_default, models_api, secrets
-from code_helper.services.agents import all_agents, load_user_agents
+from code_helper.services.agents import all_agents, load_user_agents_strict
 from code_helper.services.agents import get_agent as get_any_agent
 from code_helper.services.claude_settings import current_switch
 from code_helper.services.codex_default import restore_default
@@ -544,7 +544,9 @@ def _handle_add(args: argparse.Namespace | AddRequest) -> int:
     # too, and a wrapper named after it would shadow the real executable on
     # PATH exactly as a built-in one would — so reject it here, at the single
     # boundary every wrapper creation flows through, before any token prompt.
-    user_binaries = {a.binary for a in load_user_agents(paths)}
+    # The STRICT read: a corrupt registry must fail closed, not read as "no
+    # user agents" and let a wrapper silently shadow a real binary.
+    user_binaries = {a.binary for a in load_user_agents_strict(paths)}
     if spec.alias in user_binaries:
         raise CodeHelperError(
             f"{spec.alias!r} is a reserved name — a wrapper named after a "
