@@ -90,8 +90,7 @@ def test_config_dir_never_references_real_home(tmp_path):
 def test_credentials_file_resolves_under_config_dir(tmp_path):
     p = Paths.from_home(tmp_path)
     assert (
-        p.credentials_file()
-        == tmp_path / ".config" / "codehelper" / "credentials.json"
+        p.credentials_file() == tmp_path / ".config" / "codehelper" / "credentials.json"
     )
 
 
