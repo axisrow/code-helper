@@ -113,14 +113,18 @@ def test_switch_native_never_reads_env_or_prompts(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_switch_native_zai_native_round_trip(tmp_path, monkeypatch):
-    """native -> zai(glm) -> native must leave every managed key blanked,
-    including CLAUDE_CODE_SUBAGENT_MODEL, which the glm preset never sets in
-    the first place — regression coverage for #60's audit scope beyond the
-    ANTHROPIC_* keys the original deepseek->native bug was found in."""
-    monkeypatch.setenv("ZAI_API_KEY", "sk-zai-secret")
+    """zai(glm) -> native must blank every managed key the zai switch itself
+    set, without adding CLAUDE_CODE_SUBAGENT_MODEL — the glm preset never
+    sets it, so there is no stale process value for native to reset — the
+    same "don't add keys nobody set" invariant this cycle's own #61 review
+    caught. Regression coverage for #60's audit scope beyond the ANTHROPIC_*
+    keys the original deepseek->native bug was found in.
 
-    assert main(["switch", "native", "--force"]) == 0
-    assert all(v == "" for v in _settings(tmp_path)["env"].values())
+    Starts from a zai switch, not a pristine file: `switch native` on a
+    settings.json with no managed override is a no-op (nothing to reset),
+    so a leading `native --force` on a fresh tmp_path would write nothing
+    and leave no settings.json to read."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-zai-secret")
 
     assert _handle_switch(_preset_request("glm")) == 0
     env = _settings(tmp_path)["env"]
@@ -130,7 +134,8 @@ def test_switch_native_zai_native_round_trip(tmp_path, monkeypatch):
 
     assert main(["switch", "native", "--force"]) == 0
     final_env = _settings(tmp_path)["env"]
-    assert all(final_env[key] == "" for key in MANAGED_ENV_KEYS)
+    assert all(final_env[key] == "" for key in MANAGED_ENV_KEYS if key in env)
+    assert "CLAUDE_CODE_SUBAGENT_MODEL" not in final_env
 
 
 @pytest.mark.integration

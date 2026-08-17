@@ -130,6 +130,32 @@ def test_resolve_switch_patch_native_ignores_models_and_token():
 
 
 @pytest.mark.unit
+def test_resolve_switch_patch_native_blanks_only_keys_present_in_current_env():
+    """Native must stay a no-op on a settings.json with no managed override.
+
+    Blanking every MANAGED_ENV_KEYS key unconditionally would turn `switch
+    native` on an already-native file into a write that adds keys nobody set
+    — the opposite of "native means clear the override". Only keys already
+    present in the live env need the explicit-empty treatment; a key that
+    was never set has no stale process value to reset.
+    """
+    patch = resolve_switch_patch(
+        NATIVE,
+        tier_models=None,
+        token="",
+        current_env={"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"},
+    )
+    assert patch.env == {"ANTHROPIC_BASE_URL": ""}
+
+
+@pytest.mark.unit
+def test_resolve_switch_patch_native_with_no_current_env_blanks_nothing():
+    patch = resolve_switch_patch(NATIVE, tier_models=None, token="", current_env={})
+    assert patch.env == {}
+    assert not patch.is_reset
+
+
+@pytest.mark.unit
 def test_resolve_switch_patch_base_url_matches_the_renderer():
     """switch and a generated wrapper for the same provider must agree on
     ANTHROPIC_BASE_URL — both derive it via render.anthropic_base_url."""
@@ -607,6 +633,7 @@ def test_apply_switch_native_explicitly_blanks_managed_keys(tmp_path):
         provider=ZAI,
         tier_models=TierModels.uniform("glm-5.2"),
         token="sk-test",
+        subagent_model="glm-5.2",  # populate every managed key, not just base_url/token
         force=True,
     )
     assert _read(paths)["env"].get("ANTHROPIC_BASE_URL")
@@ -618,6 +645,23 @@ def test_apply_switch_native_explicitly_blanks_managed_keys(tmp_path):
     assert {key: result["env"].get(key) for key in MANAGED_ENV_KEYS} == {
         key: "" for key in MANAGED_ENV_KEYS
     }
+
+
+@pytest.mark.unit
+def test_apply_switch_native_on_a_pristine_file_is_a_no_op(tmp_path):
+    """switch native must not touch a settings.json with no managed override.
+
+    Blanking keys that were never set would add codehelper-managed entries
+    to a file it never touched — the opposite of "native means clear the
+    override".
+    """
+    paths = Paths.from_home(tmp_path)
+    _write(paths, {"env": dict(_FOREIGN_ENV)})
+
+    changed = apply_switch(paths, provider=NATIVE, force=True)
+
+    assert changed is False
+    assert _read(paths)["env"] == _FOREIGN_ENV
 
 
 @pytest.mark.unit
