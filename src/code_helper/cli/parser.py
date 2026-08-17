@@ -904,7 +904,9 @@ def _handle_set_default(args: argparse.Namespace | SetDefaultRequest) -> int:
     return 0
 
 
-def _switch_resolve_token(provider, req: SwitchRequest, paths) -> str:
+def _switch_resolve_token(
+    provider, req: SwitchRequest, paths, *, non_interactive: bool = False
+) -> str:
     """The token for a `switch --provider ...` (explicit-axes) invocation.
 
     Mirrors ``_add_resolve_token`` exactly, but works off a bare
@@ -912,9 +914,24 @@ def _switch_resolve_token(provider, req: SwitchRequest, paths) -> str:
     :class:`~code_helper.services.spec.WrapperSpec` — `switch` never builds
     one (see ``_handle_switch``'s docstring on why). An `env_reset` provider
     never reaches this: :func:`_handle_switch` returns before calling it.
+
+    ``non_interactive=True`` is the chip hot-apply path (``from_preset``): a
+    token is taken from env/cache or the switch FAILS CLEANLY — it never
+    prompts, because a prompt inside the running menu would swallow the
+    user's keystrokes and block the very no-prompt apply the chip promises.
     """
     if provider.auth != "secret":
         return provider.auth_value
+    kwargs = {}
+    if non_interactive:
+
+        def _no_prompt(_prompt: str) -> str:
+            raise CodeHelperError(
+                f"no {provider.name} token available for a non-interactive "
+                f"switch — set {provider.token_env_var} or cache one first"
+            )
+
+        kwargs["getpass_fn"] = _no_prompt
     resolved = secrets.resolve_token(
         env_var=provider.token_env_var,
         prompt=f"{provider.name} token ({provider.token_env_var}): ",
@@ -922,6 +939,7 @@ def _switch_resolve_token(provider, req: SwitchRequest, paths) -> str:
         provider_name=provider.name,
         profile_name=req.profile,
         base_url_policy=provider.base_url_policy,
+        **kwargs,
     )
     return resolved.value
 
@@ -973,6 +991,11 @@ def _switch_axes_from_preset(req: SwitchRequest, paths):
     named ``deepseek`` must never make the DeepSeek chip disappear or fail.
     ``ollama-launch`` presets are converted to Ollama's Anthropic-compatible
     live-settings form; that is the only way to retarget an existing process.
+
+    A preset, unlike an installed wrapper, freezes no token — so the token is
+    resolved NON-interactively (env/cache or a clean error): a chip press is a
+    no-prompt hot-apply, and a hidden prompt inside the running menu would
+    swallow keystrokes.
     """
     if not req.from_preset:
         raise CodeHelperError("internal error: missing preset for chipset switch")
@@ -983,7 +1006,7 @@ def _switch_axes_from_preset(req: SwitchRequest, paths):
     return (
         provider,
         tier_models,
-        _switch_resolve_token(provider, req, paths),
+        _switch_resolve_token(provider, req, paths, non_interactive=True),
         subagent_model,
     )
 

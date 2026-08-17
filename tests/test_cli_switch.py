@@ -131,6 +131,36 @@ def test_chip_preset_glm_ollama_applies_live_ollama_settings(tmp_path):
 
 
 @pytest.mark.integration
+def test_chip_preset_glm_never_prompts_for_a_token(tmp_path, monkeypatch):
+    """A token-bearing preset chip (glm / Z.ai) must resolve its token
+    non-interactively: a prompt inside the running menu would swallow the
+    user's keystrokes, breaking the no-prompt hot-apply a chip promises."""
+    import code_helper.services.secrets as secrets
+    from code_helper.cli.parser import _switch_axes_from_preset
+    from code_helper.errors import CodeHelperError
+
+    seen = {}
+    cached = {"value": "sk-cached", "source": "cache"}
+
+    def fake_resolve_token(*, env_var, prompt, paths, provider_name, **kwargs):
+        seen["env_var"] = env_var
+        seen["getpass_fn"] = kwargs.get("getpass_fn")
+        seen["prompt"] = prompt
+        # Simulate a cache hit so the spy never actually prompts.
+        return type("R", (), cached)()
+
+    monkeypatch.setattr(secrets, "resolve_token", fake_resolve_token)
+
+    _switch_axes_from_preset(_preset_request("glm"), Paths.from_home(tmp_path))
+    assert seen["env_var"] == "ZAI_API_KEY"
+    # A chip press must never block on a hidden token prompt: resolve_token
+    # must be handed a getpass_fn that raises rather than reads stdin.
+    assert seen["getpass_fn"] is not None
+    with pytest.raises(CodeHelperError):
+        seen["getpass_fn"](seen["prompt"])
+
+
+@pytest.mark.integration
 def test_switch_status_never_writes(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("ZAI_API_KEY", "sk-env")
     main(["switch", "zai", "--model", "glm-5.2", "--force"])
