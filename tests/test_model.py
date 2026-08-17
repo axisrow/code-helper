@@ -91,8 +91,33 @@ def test_openai_toml_is_codex_only():
 
 
 @pytest.mark.unit
-def test_registry_has_ollama_and_zai_and_litellm():
-    assert {p.name for p in PROVIDERS} == {"ollama", "zai", "litellm", "native"}
+def test_registry_has_builtin_providers():
+    assert {p.name for p in PROVIDERS} == {
+        "ollama",
+        "zai",
+        "litellm",
+        "gemini",
+        "native",
+    }
+
+
+@pytest.mark.unit
+def test_gemini_is_openai_only_and_uses_documented_conventions():
+    gemini = get_provider("gemini")
+    assert gemini.shapes == {ConfigShape.OPENAI_TOML}
+    assert gemini.base_url == (
+        "https://generativelanguage.googleapis.com/v1beta/openai/"
+    )
+    assert gemini.auth == "secret"
+    assert gemini.token_env_var == "GEMINI_API_KEY"
+    assert gemini.model_list_api is ModelListAPI.OPENAI_V1
+    assert gemini.wire_api == "chat"
+
+
+@pytest.mark.unit
+def test_claude_gemini_has_no_common_configuration_mechanism():
+    with pytest.raises(CodeHelperError, match="no common configuration"):
+        resolve_shape(get_agent("claude"), get_provider("gemini"))
 
 
 @pytest.mark.unit
@@ -269,6 +294,7 @@ def test_compatible_providers_for_codex_excludes_zai():
     assert {p.name for p in compatible_providers(get_agent("codex"))} == {
         "ollama",
         "litellm",
+        "gemini",
     }
 
 
@@ -659,6 +685,7 @@ def test_anthropic_settings_shape_on_no_agent():
         ("claude", "litellm", ConfigShape.ANTHROPIC_ENV),
         ("codex", "ollama", ConfigShape.OPENAI_TOML),
         ("codex", "litellm", ConfigShape.OPENAI_TOML),
+        ("codex", "gemini", ConfigShape.OPENAI_TOML),
     ],
 )
 def test_resolve_shape_unchanged_for_existing_pairs(

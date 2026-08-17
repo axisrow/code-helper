@@ -477,6 +477,20 @@ PROVIDERS: tuple[Provider, ...] = (
         description="LiteLLM proxy (user-supplied base URL)",
     ),
     Provider(
+        name="gemini",
+        # Gemini's documented compatibility surface is OpenAI chat
+        # completions only.  It does not expose Claude's Anthropic Messages
+        # protocol, so claude x gemini must remain incompatible by the normal
+        # shape intersection rather than a provider-name special case.
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        auth="secret",
+        token_env_var="GEMINI_API_KEY",
+        model_list_api=ModelListAPI.OPENAI_V1,
+        wire_api="chat",
+        description="Google Gemini (OpenAI-compatible)",
+    ),
+    Provider(
         name="native",
         # "native", not "anthropic": this entry does not represent a backend
         # (an address to send requests to) — it represents the ABSENCE of
