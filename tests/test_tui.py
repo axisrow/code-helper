@@ -436,10 +436,13 @@ def test_t_rotates_token_for_secret_wrapper_from_main_screen(monkeypatch):
     secrets.save_credential(paths, "zai", "sk-old", "default")
     assert main(["add", "glm", "--profile", "default"]) == 0
     # Main screen rows: the two chipset rows (claude, codex) come first, then
-    # the wrapper list [deepseek, glm, glm-ollama] under Section("claude").
-    # Three DOWNs reach glm; `t` opens its token profile picker, ENTER picks
-    # the first profile (default), the getpass stub supplies the new token.
-    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "DOWN", "TOKEN", "ENTER", "CANCEL"])
+    # the `+ add agent` action row, then the wrapper list [deepseek, glm,
+    # glm-ollama] under Section("claude"). Four DOWNs reach glm; `t` opens its
+    # token profile picker, ENTER picks the first profile (default), the
+    # getpass stub supplies the new token.
+    _real_menu_keys(
+        monkeypatch, ["DOWN", "DOWN", "DOWN", "DOWN", "TOKEN", "ENTER", "CANCEL"]
+    )
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-new")
 
     assert main(["tui"]) == 0
@@ -511,6 +514,70 @@ def test_a_without_row_context_asks_what_to_add_first(monkeypatch):
 
     real_select = menu.select_from_menu
     monkeypatch.setattr(menu, "select_from_menu", _select)
+
+    assert main(["tui"]) == 0
+    assert "What do you want to add?" in seen
+
+
+@pytest.mark.integration
+def test_main_screen_has_add_agent_and_add_wrapper_action_rows(monkeypatch):
+    """The main screen must expose both unscoped add actions as visible rows:
+    `+ add agent` (a new CLI integration) and `+ add wrapper` (any agent)."""
+    captured: dict = {}
+
+    def _select(items, **_kwargs):
+        captured["values"] = [
+            item[0]
+            for item in items
+            if isinstance(item, tuple) and isinstance(item[0], str)
+        ]
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+
+    assert main(["tui"]) == 0
+    assert "add-agent" in captured["values"]
+    assert "add-wrapper" in captured["values"]
+
+
+@pytest.mark.integration
+def test_add_agent_action_row_registers_a_new_agent(monkeypatch):
+    """Entering the `+ add agent` row must run the Agent branch — collect a
+    name/binary/description and persist a new user-defined agent."""
+    import code_helper.cli.tui as tui
+
+    answers = iter(["add-agent", "quit"])
+    monkeypatch.setattr(
+        "code_helper.cli.menu.select_from_menu",
+        lambda _items, **_kwargs: next(answers),
+    )
+    # The agent flow reads name, binary, description via read_line.
+    monkeypatch.setattr(
+        "code_helper.cli.menu.read_line", lambda _prompt, **_kwargs: "myagent"
+    )
+    monkeypatch.setattr(tui.TuiSession, "_notify", lambda self, text: None)
+
+    assert main(["tui"]) == 0
+
+    from code_helper.services.agents import load_user_agents
+    from code_helper.services.paths import Paths
+
+    assert [a.name for a in load_user_agents(Paths.default())] == ["myagent"]
+
+
+@pytest.mark.integration
+def test_add_wrapper_action_row_opens_the_unscoped_kind_picker(monkeypatch):
+    """Entering the `+ add wrapper` row must open the unscoped Add flow — the
+    kind picker (wrapper vs agent), not a provider list scoped to one agent."""
+    seen: list[str] = []
+    answers = iter(["add-wrapper", "__back__", "quit"])
+
+    def _select(items, *, prompt, **kwargs):
+        text = prompt() if callable(prompt) else prompt
+        seen.append(text)
+        return next(answers)
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
 
     assert main(["tui"]) == 0
     assert "What do you want to add?" in seen
@@ -1245,9 +1312,10 @@ def test_main_screen_enter_sets_default_wrapper(monkeypatch):
     assert default_wrapper(paths, "claude") is None
     install_wrapper(paths, "glm", token="test-token")
 
-    # Past the two chipset rows, then one more DOWN to reach glm (the second
-    # wrapper, after deepseek); Enter makes it the default.
-    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "DOWN", "ENTER", "CANCEL"])
+    # Past the two chipset rows and the `+ add agent` action row, then one
+    # more DOWN to reach glm (the second wrapper, after deepseek); Enter makes
+    # it the default.
+    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "DOWN", "DOWN", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
     assert default_wrapper(paths, "claude") == "glm"
 
@@ -1272,8 +1340,9 @@ def test_main_screen_enter_on_an_unmanaged_foreign_file_does_not_set_a_ghost_def
     foreign.write_text("#!/bin/sh\necho not ours\n", encoding="utf-8")
     foreign.chmod(0o755)
 
-    # `deepseek` is the first wrapper row, below the two chipset rows.
-    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "ENTER", "CANCEL"])
+    # `deepseek` is the first wrapper row, below the two chipset rows and the
+    # `+ add agent` action row.
+    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "DOWN", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
     assert default_wrapper(paths, "claude") is None
@@ -1314,7 +1383,14 @@ def test_main_screen_groups_colliding_managed_wrapper_under_installed_agent(
     for e in main_items:
         if isinstance(e, Section):
             current = e.text
-        elif e[0] not in ("add", "profile", "settings", "quit"):
+        elif e[0] not in (
+            "add",
+            "add-agent",
+            "add-wrapper",
+            "profile",
+            "settings",
+            "quit",
+        ):
             section_of[e[0]] = current
     assert section_of["glm"].startswith("codex — ")
 
@@ -1324,8 +1400,8 @@ def test_main_screen_no_dead_end_for_non_secret_wrapper(monkeypatch, capsys):
     """`t` on a non-secret wrapper (deepseek is literal) is a silent no-op —
     the old dead-end 'has no editable token.' screen is gone (issue #29)."""
     # TOKEN on the first wrapper (deepseek, non-secret), reached past the two
-    # chipset rows, then quit.
-    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "TOKEN", "CANCEL"])
+    # chipset rows and the `+ add agent` action row, then quit.
+    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "DOWN", "TOKEN", "CANCEL"])
     assert main(["tui"]) == 0
 
     output = capsys.readouterr().out
