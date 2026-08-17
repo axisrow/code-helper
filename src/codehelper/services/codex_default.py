@@ -733,7 +733,8 @@ def clear_default(
     """Remove this tool's override from ``config.toml`` — codex's "native".
 
     The codex counterpart of ``switch``'s ``native`` provider: where claude's
-    ``env_reset`` clears the managed ``env`` block from ``settings.json``,
+    ``env_reset`` explicitly blanks managed ``env`` values in ``settings.json``
+    so a live Claude Code session receives the reset,
     this drops the managed keys and provider table from ``config.toml``, so
     Codex falls back to whatever it did before ``set-default`` ever ran.
 

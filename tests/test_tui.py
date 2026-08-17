@@ -1941,6 +1941,51 @@ def test_enter_on_deepseek_chip_hot_applies_without_confirmation(monkeypatch):
 
 
 @pytest.mark.integration
+def test_deepseek_chip_can_switch_back_to_native(monkeypatch):
+    """The reverse hot-apply explicitly resets the managed Claude env."""
+    import codehelper.cli.tui as tui
+    from codehelper.services.claude_settings import MANAGED_ENV_KEYS, current_switch
+    from codehelper.services.paths import Paths
+
+    # Start on native, apply deepseek, move the chip cursor back, and apply
+    # native.  The cursor must remain on the Claude row throughout.
+    frames = _capture_frames(monkeypatch, ["RIGHT", "ENTER", "LEFT", "ENTER", "CANCEL"])
+    assert main(["tui"]) == 0
+    assert f"{tui._REVERSE}✓ native{tui._RESET}" in frames[4]["claude"]
+    paths = Paths.default()
+    assert current_switch(paths) is None
+
+    settings_path = paths.claude_settings()
+    if not settings_path.exists():
+        return
+    import json
+
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert {key: settings["env"].get(key) for key in MANAGED_ENV_KEYS} == {
+        key: "" for key in MANAGED_ENV_KEYS
+    }
+
+
+@pytest.mark.integration
+def test_deepseek_chip_can_switch_to_glm_with_zai_url(monkeypatch):
+    """A live provider change updates both the model and endpoint."""
+    from codehelper.services.paths import Paths
+
+    # The glm chip's hot-apply resolves its token non-interactively via
+    # resolve_token, same as any other headless switch — needs a real
+    # source (env, here) since this test installs no wrapper/cache.
+    monkeypatch.setenv("ZAI_API_KEY", "sk-test")
+    _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "RIGHT", "ENTER", "CANCEL"])
+    assert main(["tui"]) == 0
+
+    import json
+
+    settings = json.loads(Paths.default().claude_settings().read_text(encoding="utf-8"))
+    assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5-turbo"
+
+
+@pytest.mark.integration
 def test_chip_apply_is_silent_no_wrote_no_pause(monkeypatch, capsys):
     """A claude chip hot-apply must switch without echoing the CLI's
     ``wrote ... (backup: ...)`` progress line or pausing on "Press any key".

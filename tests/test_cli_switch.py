@@ -17,6 +17,7 @@ import pytest
 from codehelper.__main__ import main
 from codehelper.cli.parser import _handle_switch
 from codehelper.cli.requests import SwitchRequest
+from codehelper.services.claude_settings import MANAGED_ENV_KEYS
 from codehelper.services.paths import Paths
 
 
@@ -101,10 +102,59 @@ def test_switch_native_never_reads_env_or_prompts(tmp_path, monkeypatch):
     )
     code = main(["switch", "native", "--force"])
     assert code == 0
-    assert "env" not in _settings(tmp_path) or not (
-        set(_settings(tmp_path).get("env", {}))
-        & {"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"}
+    assert {
+        "ANTHROPIC_BASE_URL": _settings(tmp_path)["env"].get("ANTHROPIC_BASE_URL"),
+        "ANTHROPIC_AUTH_TOKEN": _settings(tmp_path)["env"].get("ANTHROPIC_AUTH_TOKEN"),
+    } == {
+        "ANTHROPIC_BASE_URL": "",
+        "ANTHROPIC_AUTH_TOKEN": "",
+    }
+
+
+@pytest.mark.integration
+def test_switch_native_zai_native_round_trip(tmp_path, monkeypatch):
+    """zai(glm) -> native must blank every managed key the zai switch itself
+    set, without adding CLAUDE_CODE_SUBAGENT_MODEL — the glm preset never
+    sets it, so there is no stale process value for native to reset — the
+    same "don't add keys nobody set" invariant this cycle's own #61 review
+    caught. Regression coverage for #60's audit scope beyond the ANTHROPIC_*
+    keys the original deepseek->native bug was found in.
+
+    Starts from a zai switch, not a pristine file: `switch native` on a
+    settings.json with no managed override is a no-op (nothing to reset),
+    so a leading `native --force` on a fresh tmp_path would write nothing
+    and leave no settings.json to read."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-zai-secret")
+
+    assert _handle_switch(_preset_request("glm")) == 0
+    env = _settings(tmp_path)["env"]
+    assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-zai-secret"
+    assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
+
+    assert main(["switch", "native", "--force"]) == 0
+    final_env = _settings(tmp_path)["env"]
+    assert all(final_env[key] == "" for key in MANAGED_ENV_KEYS if key in env)
+    assert "CLAUDE_CODE_SUBAGENT_MODEL" not in final_env
+
+
+@pytest.mark.integration
+def test_switch_deepseek_to_glm_cross_provider(tmp_path, monkeypatch):
+    """deepseek -> glm (acceptance criteria in #60): both the model and
+    ANTHROPIC_BASE_URL must change, and deepseek's CLAUDE_CODE_SUBAGENT_MODEL
+    must not survive since the glm preset never sets one."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-zai-secret")
+
+    assert _handle_switch(_preset_request("deepseek")) == 0
+    assert _settings(tmp_path)["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] == (
+        "deepseek-v4-flash:0731-cloud"
     )
+
+    assert _handle_switch(_preset_request("glm")) == 0
+    env = _settings(tmp_path)["env"]
+    assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5-turbo"
+    assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
 
 
 @pytest.mark.integration
@@ -239,6 +289,23 @@ def test_switch_from_wrapper_lifts_tier_models_and_token(tmp_path, monkeypatch):
     assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5-turbo"
     assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.2[1m]"
+
+
+@pytest.mark.integration
+def test_switch_from_wrapper_glm_has_no_subagent_model(tmp_path, monkeypatch):
+    """The glm preset deliberately sets subagent_model=None (services/spec.py)
+    — a switch built from its wrapper must not write a stale/empty
+    CLAUDE_CODE_SUBAGENT_MODEL, and must remove one left by a prior switch."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-zai-secret")
+    _write_settings(
+        tmp_path, {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "stale-from-deepseek"}}
+    )
+    assert main(["add", "glm"]) == 0
+
+    code = main(["switch", "--from-wrapper", "glm", "--force"])
+
+    assert code == 0
+    assert "CLAUDE_CODE_SUBAGENT_MODEL" not in _settings(tmp_path)["env"]
 
 
 @pytest.mark.integration

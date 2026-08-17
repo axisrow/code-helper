@@ -113,16 +113,46 @@ def test_resolve_switch_patch_includes_subagent_model_when_given():
 
 @pytest.mark.unit
 def test_resolve_switch_patch_native_ignores_models_and_token():
-    """A reset patch is env=={} no matter what the caller passes — the CLI
-    layer is expected to collect neither for `switch native`, but even if it
-    did, nothing here may leak them into the patch."""
+    """Native explicitly blanks every live key without leaking caller input.
+
+    Claude Code's settings watcher applies environment updates to a running
+    process. Removing a key from settings.json does not remove its already
+    applied process value, so native must send an explicit empty value for
+    each key codehelper previously set.
+    """
     patch = resolve_switch_patch(
         NATIVE,
         tier_models=TierModels.uniform("glm-5.2"),
         token="sk-should-never-appear",
     )
-    assert patch.env == {}
+    assert patch.env == {key: "" for key in MANAGED_ENV_KEYS}
     assert patch.is_reset
+
+
+@pytest.mark.unit
+def test_resolve_switch_patch_native_blanks_only_keys_present_in_current_env():
+    """Native must stay a no-op on a settings.json with no managed override.
+
+    Blanking every MANAGED_ENV_KEYS key unconditionally would turn `switch
+    native` on an already-native file into a write that adds keys nobody set
+    — the opposite of "native means clear the override". Only keys already
+    present in the live env need the explicit-empty treatment; a key that
+    was never set has no stale process value to reset.
+    """
+    patch = resolve_switch_patch(
+        NATIVE,
+        tier_models=None,
+        token="",
+        current_env={"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic"},
+    )
+    assert patch.env == {"ANTHROPIC_BASE_URL": ""}
+
+
+@pytest.mark.unit
+def test_resolve_switch_patch_native_with_no_current_env_blanks_nothing():
+    patch = resolve_switch_patch(NATIVE, tier_models=None, token="", current_env={})
+    assert patch.env == {}
+    assert not patch.is_reset
 
 
 @pytest.mark.unit
@@ -219,7 +249,7 @@ def test_patch_settings_does_not_mutate_the_original():
 
 
 @pytest.mark.unit
-def test_patch_settings_reset_removes_only_managed_keys():
+def test_patch_settings_native_explicitly_blanks_only_managed_keys():
     original = {
         "env": {
             **_FOREIGN_ENV,
@@ -231,15 +261,28 @@ def test_patch_settings_reset_removes_only_managed_keys():
             "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2",
         }
     }
-    patched = patch_settings(original, SettingsPatch(provider_name="native", env={}))
-    assert patched["env"] == _FOREIGN_ENV
+    patched = patch_settings(
+        original,
+        SettingsPatch(
+            provider_name="native", env={key: "" for key in MANAGED_ENV_KEYS}
+        ),
+    )
+    assert patched["env"] == {
+        **_FOREIGN_ENV,
+        **{key: "" for key in MANAGED_ENV_KEYS},
+    }
 
 
 @pytest.mark.unit
-def test_patch_settings_reset_removes_empty_env_block():
+def test_patch_settings_native_keeps_empty_managed_keys_for_live_reset():
     original = {"env": {"ANTHROPIC_BASE_URL": "https://x"}}
-    patched = patch_settings(original, SettingsPatch(provider_name="native", env={}))
-    assert "env" not in patched
+    patched = patch_settings(
+        original,
+        SettingsPatch(
+            provider_name="native", env={key: "" for key in MANAGED_ENV_KEYS}
+        ),
+    )
+    assert patched["env"] == {key: "" for key in MANAGED_ENV_KEYS}
 
 
 @pytest.mark.unit
@@ -583,13 +626,14 @@ def test_apply_switch_file_mode_is_0600(tmp_path):
 
 
 @pytest.mark.unit
-def test_apply_switch_native_reset_clears_managed_keys(tmp_path):
+def test_apply_switch_native_explicitly_blanks_managed_keys(tmp_path):
     paths = Paths.from_home(tmp_path)
     apply_switch(
         paths,
         provider=ZAI,
         tier_models=TierModels.uniform("glm-5.2"),
         token="sk-test",
+        subagent_model="glm-5.2",  # populate every managed key, not just base_url/token
         force=True,
     )
     assert _read(paths)["env"].get("ANTHROPIC_BASE_URL")
@@ -598,9 +642,50 @@ def test_apply_switch_native_reset_clears_managed_keys(tmp_path):
 
     assert changed is True
     result = _read(paths)
-    assert "env" not in result or not (
-        set(result.get("env", {})) & set(MANAGED_ENV_KEYS)
+    assert {key: result["env"].get(key) for key in MANAGED_ENV_KEYS} == {
+        key: "" for key in MANAGED_ENV_KEYS
+    }
+
+
+@pytest.mark.unit
+def test_apply_switch_native_on_a_pristine_file_is_a_no_op(tmp_path):
+    """switch native must not touch a settings.json with no managed override.
+
+    Blanking keys that were never set would add codehelper-managed entries
+    to a file it never touched — the opposite of "native means clear the
+    override".
+    """
+    paths = Paths.from_home(tmp_path)
+    _write(paths, {"env": dict(_FOREIGN_ENV)})
+
+    changed = apply_switch(paths, provider=NATIVE, force=True)
+
+    assert changed is False
+    assert _read(paths)["env"] == _FOREIGN_ENV
+
+
+@pytest.mark.unit
+def test_apply_switch_native_reset_prints_reset_message(tmp_path, capsys):
+    """The write confirmation names the reset explicitly, not a generic write.
+
+    ``SettingsPatch.is_reset`` exists to answer exactly this — "was this
+    write a reset" — so it should drive the message the user sees, not sit
+    unused outside tests.
+    """
+    paths = Paths.from_home(tmp_path)
+    apply_switch(
+        paths,
+        provider=ZAI,
+        tier_models=TierModels.uniform("glm-5.2"),
+        token="sk-test",
+        force=True,
     )
+    capsys.readouterr()
+
+    apply_switch(paths, provider=NATIVE, force=True)
+
+    out = capsys.readouterr().out
+    assert "reset to native" in out
 
 
 @pytest.mark.unit

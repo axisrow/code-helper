@@ -98,10 +98,12 @@ class SettingsPatch:
     """The exact ``env`` values a ``switch`` writes into ``settings.json``.
 
     ``env`` is the COMPLETE set of managed keys to SET; every managed key
-    NOT present in it is REMOVED. A reset patch (``provider.env_reset``) is
-    simply ``env == {}`` — the removal path is not a special case in
-    :func:`patch_settings`, it is the ordinary consequence of an empty set,
-    which is why ``env_reset`` needs no branch below :func:`resolve_switch_patch`.
+    NOT present in it is REMOVED. A reset patch (``provider.env_reset``)
+    explicitly sets every managed key to ``""``. Claude Code's settings
+    watcher applies updates to the running process, but removing an env key
+    from the file does not unset its already-applied process value. Empty
+    values both reset that live state and remain false-y on a fresh launch,
+    which restores Claude's native OAuth/model defaults.
     """
 
     provider_name: str
@@ -109,7 +111,7 @@ class SettingsPatch:
 
     @property
     def is_reset(self) -> bool:
-        return not self.env
+        return bool(self.env) and all(value == "" for value in self.env.values())
 
 
 def resolve_switch_patch(
@@ -118,14 +120,24 @@ def resolve_switch_patch(
     tier_models: TierModels | None,
     token: str,
     subagent_model: str | None = None,
+    current_env: dict[str, str] | None = None,
 ) -> SettingsPatch:
     """Resolve the patch from the axes. Pure, no IO.
 
     The single place ``provider.env_reset`` is consulted. For a reset
-    provider the result carries an empty ``env`` and ``tier_models``/
-    ``token`` are ignored entirely — the CLI layer is expected to collect
-    neither for ``switch native`` (see ``cli/parser.py``'s ``_handle_switch``),
-    but even if it did, nothing here would leak them into the patch.
+    provider the result explicitly blanks every MANAGED_ENV_KEYS key that is
+    already present in ``current_env`` — never a key that was never set —
+    and ``tier_models``/``token`` are ignored entirely — the CLI layer is
+    expected to collect neither for ``switch native`` (see
+    ``cli/parser.py``'s ``_handle_switch``), but even if it did, nothing here
+    would leak them into the patch. ``current_env=None`` (the default, used
+    by callers with no live snapshot to hand, e.g. a bare CLI invocation with
+    no existing settings.json) blanks every managed key, matching the prior
+    unconditional behaviour. Blanking a key that was never set would turn
+    ``switch native`` on an already-native file into a write that ADDS keys
+    nobody set — the opposite of "native means clear the override" — since a
+    key with no prior value has no stale already-applied process value to
+    reset.
 
     ``ANTHROPIC_BASE_URL`` is derived via :func:`render.anthropic_base_url` —
     the SAME function the wrapper renderer uses — so a ``switch`` to a
@@ -151,7 +163,11 @@ def resolve_switch_patch(
         )
 
     if provider.env_reset:
-        return SettingsPatch(provider_name=provider.name, env={})
+        keys = MANAGED_ENV_KEYS if current_env is None else current_env.keys()
+        return SettingsPatch(
+            provider_name=provider.name,
+            env={key: "" for key in MANAGED_ENV_KEYS if key in keys},
+        )
 
     if provider.base_url_policy is BaseUrlPolicy.REQUIRED and not provider.base_url:
         raise CodeHelperError(
@@ -259,9 +275,10 @@ def patch_settings(original: dict, patch: SettingsPatch) -> dict:
     then ``patch.env`` is inserted. Every other key of ``env`` (a user's
     ``HTTPS_PROXY``, ``IS_DEMO``, ...) and every top-level key
     (``permissions``, ``hooks``, ``statusLine``, ``model``, ...) is carried
-    through unchanged. If ``env`` becomes empty after the removal (e.g. a
-    reset on a file whose ``env`` held only managed keys), the ``env`` key
-    itself is dropped entirely — a ``switch native`` should leave no trace.
+    through unchanged. Native deliberately keeps managed keys with empty
+    values: deleting them would leave their prior values alive in an already
+    running Claude Code process. For non-native patches, if ``env`` becomes
+    empty after the removal, the ``env`` key itself is dropped.
     """
     result = dict(original)
     env = dict(result.get("env", {}))
@@ -548,12 +565,17 @@ def apply_switch(
             settings.json, a patch that fails its own post-write
             verification, or a refused overwrite (no ``--force``/confirmation).
     """
-    patch = resolve_switch_patch(
-        provider, tier_models=tier_models, token=token, subagent_model=subagent_model
-    )
-
     settings_path = paths.claude_settings()
     original_text, original = read_settings(paths)
+
+    original_env = original.get("env")
+    patch = resolve_switch_patch(
+        provider,
+        tier_models=tier_models,
+        token=token,
+        subagent_model=subagent_model,
+        current_env=original_env if isinstance(original_env, dict) else {},
+    )
 
     patched = patch_settings(original, patch)
     _verify_patch_applied(original, patched, patch)
@@ -603,7 +625,8 @@ def apply_switch(
     if original_text:
         rotate_backups(_backup_slots(paths), current=original_text)
     atomic_write(settings_path, patched_text, mode=0o600)
-    print(f"wrote {settings_path} (backup: {paths.claude_settings_backup(1)})")
+    action = "reset to native" if patch.is_reset else "wrote"
+    print(f"{action} {settings_path} (backup: {paths.claude_settings_backup(1)})")
     return True
 
 
