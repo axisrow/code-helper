@@ -286,10 +286,7 @@ def test_switch_from_wrapper_rejects_a_non_claude_wrapper(tmp_path, monkeypatch)
     settings = Paths.from_home(tmp_path).claude_settings()
     if settings.exists():
         env = json.loads(settings.read_text(encoding="utf-8")).get("env", {})
-        assert not (
-            set(env)
-            & {"ANTHROPIC_BASE_URL", "ANTHROPIC_DEFAULT_SONNET_MODEL"}
-        )
+        assert not (set(env) & {"ANTHROPIC_BASE_URL", "ANTHROPIC_DEFAULT_SONNET_MODEL"})
 
 
 @pytest.mark.integration
