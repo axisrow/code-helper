@@ -57,7 +57,7 @@ def _preset_request(name: str) -> SwitchRequest:
 @pytest.mark.integration
 def test_switch_positional_provider_applies(tmp_path, monkeypatch):
     monkeypatch.setenv("ZAI_API_KEY", "sk-env")
-    code = main(["switch", "zai", "--model", "glm-5.2"])
+    code = main(["switch", "zai", "--model", "glm-5.2", "--force"])
     assert code == 0
     env = _settings(tmp_path)["env"]
     assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"

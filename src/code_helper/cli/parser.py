@@ -1109,11 +1109,12 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         subagent_model=subagent_model,
         dry_run=req.dry_run,
         # A provider switch is an explicitly requested hot-apply operation.
-        # The service still validates the complete target, protects unrelated
-        # keys, snapshots a backup and rejects stale writes; it must not turn
-        # a non-interactive CLI command into a confirmation prompt.
-        force=True,
-        confirm=None,
+        # A chip press (the TUI) opts in via force=True and skips the prompt;
+        # the interactive CLI command keeps its confirmation gate unless
+        # --force is passed. The service still validates the complete target,
+        # protects unrelated keys, snapshots a backup and rejects stale writes.
+        force=req.force,
+        confirm=_confirm_set_default,
     )
     if not wrote:
         print("no changes")
@@ -1446,7 +1447,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         default=False,
-        help="accepted for compatibility; switch hot-applies without a prompt",
+        help="skip the confirmation prompt (the TUI chip hot-applies either way)",
     )
     p_switch.set_defaults(func=_handle_switch)
 
