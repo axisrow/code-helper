@@ -24,6 +24,16 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = ["run_tui"]
 
 _ADD = "add"
+#: Main-screen action rows: add a new CLI integration (agent) and add a
+#: wrapper for any agent. Distinct from the per-row `+ add` chip (`_ADD_CHIP`),
+#: which is scoped to that row's agent; these are unscoped entry points.
+#:
+#: The values are namespaced with a ``:``-containing prefix so they can never
+#: collide with a wrapper alias: ``validate_alias`` rejects ``:``, so a wrapper
+#: literally named ``add-agent``/``add-wrapper`` (both valid aliases) stays
+#: selectable as a wrapper instead of being shadowed by these action rows.
+_ADD_AGENT = "__action:add-agent"
+_ADD_WRAPPER = "__action:add-wrapper"
 _SETTINGS = "settings"
 _PROFILE = "profile"
 _HELP = "help"
@@ -1425,6 +1435,7 @@ class TuiSession:
         from code_helper.cli.menu import press_any_key
 
         print("a add (agent row: scoped to it) · t/e token · d delete")
+        print("+ add agent: new CLI integration · + add wrapper: any agent")
         print("p profiles · s settings · ←→ + Enter on the + add chip: same as a")
         print("Up/Down row · Left/Right chip · Enter apply · Esc quit · Ctrl-C quit")
         press_any_key("Press any key to continue...")
@@ -1475,9 +1486,16 @@ class TuiSession:
                             (f"{_AGENT_ROW}{name}", self._chip_row(name))
                             for name in self._chips
                         ),
+                        # Add a new CLI integration, right below the chipset
+                        # rows — the one add action that has no agent row of
+                        # its own to hang a `+ add` chip on.
+                        (_ADD_AGENT, "+ add agent — a new CLI integration"),
                         # Separates the chipset from the wrapper list below.
                         Section(""),
                         *self._wrapper_rows(paths),
+                        # Add a wrapper for any agent (unscoped — asks which
+                        # agent first), at the bottom of the screen.
+                        (_ADD_WRAPPER, "+ add wrapper"),
                     ],
                     self._main_prompt,
                     exit_word="quit",
@@ -1488,6 +1506,10 @@ class TuiSession:
                 if choice in (_BACK, _QUIT):
                     return 0
                 if choice == _ADD:
+                    self._run_add()
+                elif choice == _ADD_AGENT:
+                    self._run_add_agent()
+                elif choice == _ADD_WRAPPER:
                     self._run_add()
                 elif choice.startswith("add:"):
                     self._run_add(choice.removeprefix("add:"))
