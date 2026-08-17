@@ -1941,6 +1941,30 @@ def test_enter_on_deepseek_chip_hot_applies_without_confirmation(monkeypatch):
 
 
 @pytest.mark.integration
+def test_chip_apply_is_silent_no_wrote_no_pause(monkeypatch, capsys):
+    """A claude chip hot-apply must switch without echoing the CLI's
+    ``wrote ... (backup: ...)`` progress line or pausing on "Press any key".
+    The chipset redraw alone conveys the new [applied] state, so a chip press
+    is quiet — the CLI switch command keeps its informative output, but the
+    TUI hot-apply path must not."""
+    from codehelper.services.paths import Paths
+
+    _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
+    assert main(["tui"]) == 0
+
+    output = capsys.readouterr().out
+    assert "wrote" not in output
+    assert "Press any key" not in output
+    import json
+
+    settings = json.loads(Paths.default().claude_settings().read_text(encoding="utf-8"))
+    assert (
+        settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"]
+        == "deepseek-v4-flash:0731-cloud"
+    )
+
+
+@pytest.mark.integration
 def test_enter_on_an_already_applied_chip_does_not_rewrite(monkeypatch):
     """A selected native chip is a silent no-op with no config write."""
     import codehelper.cli.tui as tui

@@ -181,6 +181,47 @@ def run_tui(args: argparse.Namespace) -> int:
     return TuiSession(args).run()
 
 
+class _Tee:
+    """Fan writes out to the real stdout AND a capture buffer.
+
+    Module-scoped (not nested in ``_run``) so the class is built once at import
+    rather than recreated on every ``_run`` call — including silent chip
+    applies, which never instantiate it. It closes over nothing from ``_run``.
+
+    Must behave enough like the stream it replaces that code reached through
+    the handler cannot tell the difference. ``isatty`` in particular is not
+    optional: ``menu.read_line`` — which every confirmation prompt goes
+    through — calls it to decide between raw-mode line editing and a plain
+    ``input()``. Without it, any handler that asked for confirmation died with
+    an ``AttributeError`` instead of prompting, which is exactly what happened
+    to ``set-default``'s prompt from inside the TUI. It answers for the REAL
+    terminal (the first stream), because that is where the prompt is actually
+    rendered and read.
+    """
+
+    def __init__(self, *streams) -> None:
+        self._streams = streams
+
+    def write(self, text: str) -> int:
+        for stream in self._streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
+
+    def isatty(self) -> bool:
+        return self._streams[0].isatty()
+
+    def fileno(self) -> int:
+        return self._streams[0].fileno()
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._streams[0], "encoding", "utf-8")
+
+
 class TuiSession:
     """One interactive UI session — replaces the former ``run_tui`` closure.
 
@@ -284,7 +325,7 @@ class TuiSession:
             print(text)
         press_any_key("Press any key to continue...")
 
-    def _run(self, handler, request=None) -> None:
+    def _run(self, handler, request=None, *, silent: bool = False) -> None:
         """Dispatch a CLI handler/request and preserve its user-facing output.
 
         Tees stdout instead of fully redirecting it: some handlers (e.g.
@@ -296,63 +337,39 @@ class TuiSession:
         the buffer keeps that output live while still letting ``_notify``
         replay the full transcript afterwards so it survives the next
         redraw.
+
+        ``silent=True`` is the chip hot-apply mode: a claude switch chip is a
+        fully-resolved, ``force=True`` apply that never prompts, so there is
+        no live prompt to keep visible — stdout is captured without teeing,
+        and on SUCCESS it is neither replayed nor paused on. The chipset
+        redraw already reflects the new ``[applied]`` state, so a chip press
+        must be quiet (no ``wrote ...`` echo, no "Press any key"). An error
+        is still surfaced and paused on: a failed apply must never be silent.
         """
+        import io
         import sys
 
         from codehelper.errors import CodeHelperError
 
-        class _Tee:
-            """Fan writes out to the real stdout AND a capture buffer.
-
-            Must behave enough like the stream it replaces that code reached
-            through the handler cannot tell the difference. ``isatty`` in
-            particular is not optional: ``menu.read_line`` — which every
-            confirmation prompt goes through — calls it to decide between
-            raw-mode line editing and a plain ``input()``. Without it, any
-            handler that asked for confirmation died with an
-            ``AttributeError`` instead of prompting, which is exactly what
-            happened to ``set-default``'s prompt from inside the TUI. It
-            answers for the REAL terminal (the first stream), because that is
-            where the prompt is actually rendered and read.
-            """
-
-            def __init__(self, *streams) -> None:
-                self._streams = streams
-
-            def write(self, text: str) -> int:
-                for stream in self._streams:
-                    stream.write(text)
-                return len(text)
-
-            def flush(self) -> None:
-                for stream in self._streams:
-                    stream.flush()
-
-            def isatty(self) -> bool:
-                return self._streams[0].isatty()
-
-            def fileno(self) -> int:
-                return self._streams[0].fileno()
-
-            @property
-            def encoding(self) -> str:
-                return getattr(self._streams[0], "encoding", "utf-8")
-
-        import io
-
         buffer = io.StringIO()
         real_stdout = sys.stdout
-        sys.stdout = _Tee(real_stdout, buffer)
+        # silent assumes a force=True apply that never prompts, so there is no
+        # live prompt to keep visible — capture without teeing.
+        sys.stdout = buffer if silent else _Tee(real_stdout, buffer)
         try:
             handler(self.args if request is None else request)
         except CodeHelperError as exc:
             if getattr(self.args, "debug", False):
                 sys.stdout = real_stdout
                 raise
+            sys.stdout = real_stdout
             print(f"error: {exc}")
+            self._notify(buffer.getvalue().rstrip())
+            return
         finally:
             sys.stdout = real_stdout
-        self._notify(buffer.getvalue().rstrip())
+        if not silent:
+            self._notify(buffer.getvalue().rstrip())
 
     def _read_text(self, prompt: str) -> str | None:
         from codehelper.cli.menu import MenuCancelled, read_line
@@ -649,13 +666,16 @@ class TuiSession:
             if spec.name in preset_names()
             else self._switch_request(from_wrapper=spec.name)
         )
-        self._run(_handle_switch, source)
+        # silent: a force=True switch chip never prompts — no echo, no pause.
+        self._run(_handle_switch, source, silent=True)
 
     def _apply_switch_native(self) -> None:
         """claude: clear the managed ``env`` block from settings.json."""
         from codehelper.cli.parser import _handle_switch
 
-        self._run(_handle_switch, self._switch_request(provider=_NATIVE_CHIP))
+        self._run(
+            _handle_switch, self._switch_request(provider=_NATIVE_CHIP), silent=True
+        )
 
     def _switch_request(self, *, provider=None, from_wrapper=None, from_preset=None):
         """A :class:`SwitchRequest` carrying only the axis a chip varies.
