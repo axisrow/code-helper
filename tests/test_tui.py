@@ -1949,9 +1949,7 @@ def test_deepseek_chip_can_switch_back_to_native(monkeypatch):
 
     # Start on native, apply deepseek, move the chip cursor back, and apply
     # native.  The cursor must remain on the Claude row throughout.
-    frames = _capture_frames(
-        monkeypatch, ["RIGHT", "ENTER", "LEFT", "ENTER", "CANCEL"]
-    )
+    frames = _capture_frames(monkeypatch, ["RIGHT", "ENTER", "LEFT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
     assert f"{tui._REVERSE}✓ native{tui._RESET}" in frames[4]["claude"]
     paths = Paths.default()
@@ -1973,9 +1971,11 @@ def test_deepseek_chip_can_switch_to_glm_with_zai_url(monkeypatch):
     """A live provider change updates both the model and endpoint."""
     from codehelper.services.paths import Paths
 
-    _real_menu_keys(
-        monkeypatch, ["RIGHT", "ENTER", "RIGHT", "ENTER", "CANCEL"]
-    )
+    # The glm chip's hot-apply resolves its token non-interactively via
+    # resolve_token, same as any other headless switch — needs a real
+    # source (env, here) since this test installs no wrapper/cache.
+    monkeypatch.setenv("ZAI_API_KEY", "sk-test")
+    _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "RIGHT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
     import json
