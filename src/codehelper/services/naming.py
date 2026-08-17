@@ -29,8 +29,8 @@ from __future__ import annotations
 import re
 from urllib.parse import urlsplit
 
-from code_helper.errors import CodeHelperError
-from code_helper.services.model import AGENTS
+from codehelper.errors import CodeHelperError
+from codehelper.services.model import AGENTS
 
 __all__ = [
     "validate_alias",
@@ -49,30 +49,30 @@ MAX_ALIAS_LENGTH = 64
 
 #: Names that must never become a wrapper, independent of shape:
 #:
-#: - ``code-helper`` — the tool would overwrite its own entry point.
+#: - ``codehelper`` — the tool would overwrite its own entry point.
 #: - every agent's ``binary`` — reserving it protects against two distinct
 #:   hazards, not one:
 #:
 #:   - For a shape that ``exec``'s the agent by its bare name on ``PATH``
-#:     (:attr:`~code_helper.services.model.ConfigShape.ANTHROPIC_ENV` renders
+#:     (:attr:`~codehelper.services.model.ConfigShape.ANTHROPIC_ENV` renders
 #:     ``claude "$@"``; ``OPENAI_TOML`` renders ``exec codex ...``), a wrapper
 #:     named after that same binary is an **infinite recursion** whenever
 #:     ``~/.local/bin`` precedes the real binary on ``PATH``: the script
 #:     re-invokes itself forever. Not hypothetical — ``~/.local/bin/claude``
 #:     is a real, working symlink on a typical install, and clobbering it also
 #:     breaks Claude Code itself.
-#:   - For :attr:`~code_helper.services.model.ConfigShape.OLLAMA_LAUNCH`
+#:   - For :attr:`~codehelper.services.model.ConfigShape.OLLAMA_LAUNCH`
 #:     (``exec ollama launch <agent> ...`` — see ``render.py``) there is no
 #:     recursion, since the script execs ``ollama``, never the agent — but a
 #:     wrapper named e.g. ``opencode`` still permanently **shadows** the real
 #:     ``opencode`` on ``PATH`` with one fixed model, silently rather than by
 #:     hanging, which is its own kind of surprising.
 #:
-#: Derived from :data:`~code_helper.services.model.AGENTS` (rather than kept
+#: Derived from :data:`~codehelper.services.model.AGENTS` (rather than kept
 #: as a hand-maintained literal) so a future agent added to that registry can
 #: never be forgotten here — the only genuinely NON-agent-derived name is
-#: ``code-helper`` itself.
-_RESERVED_LITERAL = frozenset({"code-helper"})
+#: ``codehelper`` itself.
+_RESERVED_LITERAL = frozenset({"codehelper"})
 RESERVED_ALIASES = _RESERVED_LITERAL | {a.binary for a in AGENTS}
 
 #: Must start alphanumeric (no leading ``-``/``.``), then alphanumerics plus

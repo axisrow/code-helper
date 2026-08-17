@@ -29,7 +29,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 
-from code_helper.errors import CodeHelperError
+from codehelper.errors import CodeHelperError
 
 __all__ = [
     "AddRequest",

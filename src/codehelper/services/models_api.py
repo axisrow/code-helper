@@ -31,8 +31,8 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from code_helper.services.model import ModelListAPI, Provider
-from code_helper.services.render import openai_base_url
+from codehelper.services.model import ModelListAPI, Provider
+from codehelper.services.render import openai_base_url
 
 __all__ = ["list_models", "ModelListResult", "Fetcher", "DEFAULT_TIMEOUT"]
 

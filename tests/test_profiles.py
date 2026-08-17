@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from code_helper.services.profiles import (
+from codehelper.services.profiles import (
     NewProfileOutcome,
     classify_new_profile,
     validate_new_profile_name,

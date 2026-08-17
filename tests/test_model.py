@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from code_helper.errors import CodeHelperError
-from code_helper.services.model import (
+from codehelper.errors import CodeHelperError
+from codehelper.services.model import (
     AGENTS,
     PROVIDERS,
     Agent,
@@ -296,7 +296,7 @@ def test_agent_binaries_are_safe_to_interpolate():
 
 @pytest.mark.unit
 def test_validate_registries_rejects_bad_binary(monkeypatch):
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     bad = Agent("x", "evil; rm -rf /", frozenset({ConfigShape.OLLAMA_LAUNCH}))
     monkeypatch.setattr(m, "AGENTS", (bad,))
@@ -306,7 +306,7 @@ def test_validate_registries_rejects_bad_binary(monkeypatch):
 
 @pytest.mark.unit
 def test_validate_registries_rejects_shapeless_agent(monkeypatch):
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     monkeypatch.setattr(m, "AGENTS", (Agent("x", "x", frozenset()),))
     with pytest.raises(CodeHelperError, match="no config shapes"):
@@ -406,7 +406,7 @@ def test_fixed_refusal_message_lists_runtime_providers_from_the_registry(
     monkeypatch,
 ):
     """The error text is DERIVED from PROVIDERS, not a hard-coded name list."""
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     monkeypatch.setattr(m, "PROVIDERS", (get_provider("ollama"), _RUNTIME_REQUIRED))
     with pytest.raises(CodeHelperError, match="runtime-required"):
@@ -420,7 +420,7 @@ def test_fixed_refusal_message_lists_runtime_providers_from_the_registry(
 
 @pytest.mark.unit
 def test_required_policy_with_a_registry_url_is_rejected():
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     bad = Provider(
         name="bad",
@@ -435,7 +435,7 @@ def test_required_policy_with_a_registry_url_is_rejected():
 @pytest.mark.unit
 @pytest.mark.parametrize("policy", [BaseUrlPolicy.FIXED, BaseUrlPolicy.OVERRIDABLE])
 def test_non_required_policy_with_an_empty_url_is_rejected(policy):
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     bad = Provider(
         name="bad",
@@ -449,7 +449,7 @@ def test_non_required_policy_with_an_empty_url_is_rejected(policy):
 
 @pytest.mark.unit
 def test_lowercase_token_env_var_is_rejected():
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     bad = Provider(
         name="bad",
@@ -463,7 +463,7 @@ def test_lowercase_token_env_var_is_rejected():
 
 @pytest.mark.unit
 def test_uppercase_token_env_var_is_accepted():
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     ok = Provider(
         name="ok",
@@ -485,7 +485,7 @@ def test_secret_provider_with_no_token_env_var_is_rejected():
     both carry a real token_env_var); this pins the registry-validation net
     that would catch a future one that doesn't.
     """
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     bad = Provider(
         name="bad-secret",
@@ -571,7 +571,7 @@ def test_auth_refusal_message_lists_overridable_providers_from_the_registry(
     monkeypatch,
 ):
     """The error text is DERIVED from PROVIDERS, not a hard-coded name list."""
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     monkeypatch.setattr(m, "PROVIDERS", (_FIXED_LITERAL, _RUNTIME_AUTH_OVERRIDABLE))
     with pytest.raises(CodeHelperError, match="runtime-auth-overridable"):
@@ -601,7 +601,7 @@ def test_ollama_declares_overridable_auth_with_a_token_env_var():
 
 @pytest.mark.unit
 def test_overridable_auth_policy_without_token_env_var_is_rejected():
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     bad = Provider(
         name="bad-overridable",
@@ -621,7 +621,7 @@ def test_fixed_auth_policy_without_token_env_var_is_accepted():
     """FIXED doesn't need a token_env_var unless auth='secret' itself (a
     separate, pre-existing check) — a literal-only provider like the
     registry's own ollama-before-this-change shape must stay valid."""
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     ok = Provider(
         name="ok-fixed",
@@ -645,7 +645,7 @@ def test_anthropic_settings_shape_on_no_agent():
     """No Agent may declare ANTHROPIC_SETTINGS — this is the guard that makes
     wrapper generation provably immune to this shape's existence, rather than
     relying on _SHAPE_PRIORITY ordering to keep it out of the way."""
-    from code_helper.services.model import AGENTS
+    from codehelper.services.model import AGENTS
 
     assert all(ConfigShape.ANTHROPIC_SETTINGS not in a.shapes for a in AGENTS)
 
@@ -681,7 +681,7 @@ def test_claude_native_pairing_is_incompatible():
 
 @pytest.mark.unit
 def test_switchable_providers_includes_native_and_the_settings_providers():
-    from code_helper.services.model import switchable_providers
+    from codehelper.services.model import switchable_providers
 
     assert {p.name for p in switchable_providers()} == {
         "ollama",
@@ -693,7 +693,7 @@ def test_switchable_providers_includes_native_and_the_settings_providers():
 
 @pytest.mark.unit
 def test_env_reset_provider_rejects_a_base_url():
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     bad = Provider(
         name="bad-reset",
@@ -707,7 +707,7 @@ def test_env_reset_provider_rejects_a_base_url():
 
 @pytest.mark.unit
 def test_env_reset_provider_rejects_a_credential():
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     bad = Provider(
         name="bad-reset",
@@ -722,7 +722,7 @@ def test_env_reset_provider_rejects_a_credential():
 
 @pytest.mark.unit
 def test_env_reset_provider_rejects_a_model_list_api():
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     bad = Provider(
         name="bad-reset",
@@ -736,7 +736,7 @@ def test_env_reset_provider_rejects_a_model_list_api():
 
 @pytest.mark.unit
 def test_env_reset_provider_with_no_address_or_credential_is_accepted():
-    import code_helper.services.model as m
+    import codehelper.services.model as m
 
     ok = Provider(
         name="ok-reset",

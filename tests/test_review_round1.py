@@ -13,14 +13,14 @@ import pathlib
 
 import pytest
 
-from code_helper.__main__ import main
-from code_helper.errors import CodeHelperError
-from code_helper.services.model import get_provider
-from code_helper.services.models_api import list_models
-from code_helper.services.paths import Paths
-from code_helper.services.render import render_legacy_script
-from code_helper.services.spec import build_spec
-from code_helper.services.wrappers import get_spec, install_wrapper
+from codehelper.__main__ import main
+from codehelper.errors import CodeHelperError
+from codehelper.services.model import get_provider
+from codehelper.services.models_api import list_models
+from codehelper.services.paths import Paths
+from codehelper.services.render import render_legacy_script
+from codehelper.services.spec import build_spec
+from codehelper.services.wrappers import get_spec, install_wrapper
 
 pytestmark = pytest.mark.unit
 
@@ -70,12 +70,12 @@ def test_a_legacy_markerless_wrapper_is_claimed_not_refused(tmp_path):
     # Exactly what the pre-marker release wrote for this preset: the current
     # body minus the marker line.
     legacy = render_legacy_script(get_spec("glm-ollama"), "")
-    assert "code-helper: managed wrapper" not in legacy
+    assert "codehelper: managed wrapper" not in legacy
     (paths.bin_dir / "glm-ollama").write_text(legacy)
 
     # confirm=None means "no way to ask" — a legacy file must not need asking.
     assert install_wrapper(paths, "glm-ollama", confirm=None) is True
-    assert "code-helper: managed wrapper" in (paths.bin_dir / "glm-ollama").read_text()
+    assert "codehelper: managed wrapper" in (paths.bin_dir / "glm-ollama").read_text()
 
 
 def test_a_genuinely_foreign_file_is_still_refused(tmp_path):
@@ -96,8 +96,8 @@ def test_an_unreadable_file_is_never_mistaken_for_ours(tmp_path):
     shape with no renderer, so the rendered body IS empty — the exact case
     that makes the distinction observable rather than academic.
     """
-    from code_helper.backends._atomic import read_text_or_none
-    from code_helper.services.wrappers import _ownership_full_match
+    from codehelper.backends._atomic import read_text_or_none
+    from codehelper.services.wrappers import _ownership_full_match
 
     paths = _bin(tmp_path)
     spec = build_spec(agent="claude", provider="ollama", model="m", alias="weird")
@@ -189,7 +189,7 @@ def test_edit_token_rotates_a_legacy_customized_install(tmp_path, monkeypatch):
     accepts no such flag — so this was a dead end with a hint pointing at
     something that does not exist, on a file this tool wrote.
     """
-    from code_helper.services.spec import get_preset, spec_from_preset
+    from codehelper.services.spec import get_preset, spec_from_preset
 
     paths = _bin(tmp_path)
     legacy = spec_from_preset(get_preset("glm"), model_override="customX")
@@ -212,7 +212,7 @@ def test_a_foreign_file_named_after_a_preset_is_not_adopted(tmp_path):
     every non-token byte. Without that check this path would adopt — and then
     silently overwrite — any file whose name happened to match a preset.
     """
-    from code_helper.services.wrappers import spec_from_installed
+    from codehelper.services.wrappers import spec_from_installed
 
     paths = _bin(tmp_path)
     (paths.bin_dir / "glm").write_text(
@@ -268,9 +268,9 @@ def test_spec_from_installed_keeps_the_recorded_shape(tmp_path):
     a wrapper installed as ``ollama launch`` into an ``ANTHROPIC_*`` env block
     — not a changed model but a changed mechanism.
     """
-    from code_helper.services.model import ConfigShape
-    from code_helper.services.render import render_script
-    from code_helper.services.wrappers import spec_from_installed
+    from codehelper.services.model import ConfigShape
+    from codehelper.services.render import render_script
+    from codehelper.services.wrappers import spec_from_installed
 
     paths = _bin(tmp_path)
     install_wrapper(paths, "glm-ollama")
@@ -290,14 +290,14 @@ def test_hard_cancel_at_the_picker_is_not_a_raw_traceback(monkeypatch, capsys):
     ``test_edit_token_hard_cancel_propagates``. So the translation belongs at
     the process boundary (``cli``), which is what the console script runs.
     """
-    from code_helper.__main__ import cli
-    from code_helper.cli.menu import MenuCancelled
+    from codehelper.__main__ import cli
+    from codehelper.cli.menu import MenuCancelled
 
     def _hard(*a, **k):
         raise MenuCancelled(hard=True)
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _hard)
-    monkeypatch.setattr("sys.argv", ["code-helper", "edit-token"])
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _hard)
+    monkeypatch.setattr("sys.argv", ["codehelper", "edit-token"])
 
     assert cli() == 130
     assert "Traceback" not in capsys.readouterr().err
@@ -309,7 +309,7 @@ def test_hard_cancel_at_the_picker_is_not_a_raw_traceback(monkeypatch, capsys):
 
 def test_model_override_refreshes_the_description(tmp_path):
     """``list`` is the only place a user sees what a wrapper points at."""
-    from code_helper.services.spec import get_preset, spec_from_preset
+    from codehelper.services.spec import get_preset, spec_from_preset
 
     spec = spec_from_preset(get_preset("deepseek"), model_override="qwen3")
     assert "deepseek-v4-flash" not in spec.description
@@ -322,8 +322,8 @@ def test_discover_managed_skips_structurally_invalid_names(tmp_path):
     A RESERVED name is still listed: it is a real, removable wrapper, and
     hiding it would strand it on PATH (see
     test_reserved_named_managed_wrapper_stays_discoverable_and_removable)."""
-    from code_helper.services.render import MARKER_PREFIX
-    from code_helper.services.wrappers import discover_managed
+    from codehelper.services.render import MARKER_PREFIX
+    from codehelper.services.wrappers import discover_managed
 
     paths = _bin(tmp_path)
     for bad in ("has space", "-leading-dash"):

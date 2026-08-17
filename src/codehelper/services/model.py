@@ -50,7 +50,7 @@ import re
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
-from code_helper.errors import CodeHelperError
+from codehelper.errors import CodeHelperError
 
 __all__ = [
     "ConfigShape",
@@ -320,7 +320,7 @@ class Provider:
     #: reader of this field branches on ``provider.env_reset``, never on
     #: ``provider.name == "anthropic"``.
     env_reset: bool = False
-    #: Fallback model names offered when :func:`~code_helper.services.
+    #: Fallback model names offered when :func:`~codehelper.services.
     #: models_api.list_models` returns none — either because the provider
     #: structurally cannot publish a list (``model_list_api is NONE``, e.g.
     #: zai's Anthropic-compatible endpoint) or because discovery failed for
@@ -489,7 +489,7 @@ PROVIDERS: tuple[Provider, ...] = (
         # `resolve_shape(claude, native)` therefore always raises "no common
         # configuration mechanism": this is correct, not a gap — a wrapper
         # cannot mean "be normal claude", that is just `claude` with no
-        # wrapper at all. `code-helper add`/`list matrix` show it as
+        # wrapper at all. `codehelper add`/`list matrix` show it as
         # switch-only rather than a usable pairing (see cli/parser.py's
         # `_handle_list_axes`).
         shapes=frozenset({ConfigShape.ANTHROPIC_SETTINGS}),
@@ -779,14 +779,14 @@ def with_base_url(provider: Provider, base_url: str | None) -> Provider:
         ``provider`` unchanged (FIXED with nothing supplied, or OVERRIDABLE
         with nothing supplied — the registry default applies), or a copy with
         ``base_url`` replaced (REQUIRED or OVERRIDABLE with a value supplied,
-        after :func:`~code_helper.services.naming.validate_base_url`).
+        after :func:`~codehelper.services.naming.validate_base_url`).
 
     Raises:
         CodeHelperError: a URL was supplied for a FIXED provider; no URL was
             supplied for a REQUIRED provider; or the supplied URL fails
             validation.
     """
-    from code_helper.services.naming import normalize_base_url, validate_base_url
+    from codehelper.services.naming import normalize_base_url, validate_base_url
 
     if provider.base_url_policy is BaseUrlPolicy.FIXED:
         if base_url:

@@ -1,4 +1,4 @@
-"""User-defined agents — CLI integrations beyond the built-in :data:`~code_helper.
+"""User-defined agents — CLI integrations beyond the built-in :data:`~codehelper.
 services.model.AGENTS` registry.
 
 ``AGENTS`` is a frozen, read-only, module-level tuple (see ``model.py``) — by
@@ -8,16 +8,16 @@ add "one more CLI integration ``ollama launch`` happens to support" therefore
 needs a genuinely separate storage layer, not a mutation of that tuple.
 
 Scope is deliberately narrow: a user-defined agent is always
-:attr:`~code_helper.services.model.ConfigShape.OLLAMA_LAUNCH`-only — the shape
+:attr:`~codehelper.services.model.ConfigShape.OLLAMA_LAUNCH`-only — the shape
 every non-``claude``/``codex`` CLI integration in the built-in registry uses
 (see the 13 entries at the bottom of ``AGENTS``). ``ANTHROPIC_ENV``/
 ``OPENAI_TOML`` need a renderer contract this module has no way to supply, so
 they stay out.
 
-Persistence: ``~/.config/code-helper/agents.json``
-(:meth:`~code_helper.services.paths.Paths.agents_file`), shape
+Persistence: ``~/.config/codehelper/agents.json``
+(:meth:`~codehelper.services.paths.Paths.agents_file`), shape
 ``{"agents": [{"name": ..., "binary": ..., "description": ...}, ...]}``.
-Written through :func:`~code_helper.backends._atomic.atomic_write`, the only
+Written through :func:`~codehelper.backends._atomic.atomic_write`, the only
 code in this project that touches the filesystem.
 
 Contract that matters, all enforced by :func:`add_user_agent`:
@@ -27,13 +27,13 @@ Contract that matters, all enforced by :func:`add_user_agent`:
   overriding ``claude`` would change what every ``claude``-agent wrapper
   execs.
 - ``name``/``binary`` are validated through
-  :func:`~code_helper.services.model.validate_agent_binary` — the exact same
+  :func:`~codehelper.services.model.validate_agent_binary` — the exact same
   gate the built-in registry itself is checked against at import time.
   ``binary`` is interpolated UNQUOTED into a generated script (see
   ``render.py``); skipping this validation is a shell-injection hole, not a
   cosmetic one.
 - The chosen ``name``/``binary`` must not collide with
-  :data:`~code_helper.services.naming.RESERVED_ALIASES` — the same hazard
+  :data:`~codehelper.services.naming.RESERVED_ALIASES` — the same hazard
   (infinite recursion / permanent shadowing on ``PATH``) that reserves every
   built-in agent's binary also applies to a newly-added one.
 
@@ -43,7 +43,7 @@ Contract that matters, all enforced by :func:`add_user_agent`:
 ``services/models_api.py``'s ``list_models`` already follow.
 
 Honest degradation: a user-added agent gets full ``add``/``list``/``remove``
-support (it is a real :class:`~code_helper.services.model.Agent`), but NO
+support (it is a real :class:`~codehelper.services.model.Agent`), but NO
 chipset row in the TUI — there is no live-patchable config this project knows
 how to read for it (see ``cli/tui.py``'s ``_AgentBackend`` docstring). That is
 correct, not a gap to fill.
@@ -56,11 +56,11 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from code_helper.backends._atomic import atomic_write
-from code_helper.errors import CodeHelperError
-from code_helper.services.model import AGENTS, Agent, ConfigShape, validate_agent_binary
-from code_helper.services.naming import RESERVED_ALIASES
-from code_helper.services.paths import Paths
+from codehelper.backends._atomic import atomic_write
+from codehelper.errors import CodeHelperError
+from codehelper.services.model import AGENTS, Agent, ConfigShape, validate_agent_binary
+from codehelper.services.naming import RESERVED_ALIASES
+from codehelper.services.paths import Paths
 
 __all__ = [
     "load_user_agents",
@@ -265,7 +265,7 @@ def add_user_agent(
     """Validate, then persist, a new user-defined agent.
 
     ``binary`` defaults to ``name`` — the common case, per
-    :attr:`~code_helper.services.model.Agent.binary`'s docstring: for an
+    :attr:`~codehelper.services.model.Agent.binary`'s docstring: for an
     ``OLLAMA_LAUNCH``-only agent the executable name and the ``ollama
     launch`` integration name are the same thing for every built-in entry
     today.
@@ -279,9 +279,9 @@ def add_user_agent(
 
     Raises:
         CodeHelperError: ``name``/``binary`` fails
-            :func:`~code_helper.services.model.validate_agent_binary`, OR
+            :func:`~codehelper.services.model.validate_agent_binary`, OR
             collides with a built-in agent, an existing user agent, or
-            :data:`~code_helper.services.naming.RESERVED_ALIASES`.
+            :data:`~codehelper.services.naming.RESERVED_ALIASES`.
     """
     binary = binary or name
     validate_agent_binary(name)
@@ -302,7 +302,7 @@ def add_user_agent(
                 raise CodeHelperError(f"an agent named {name!r} already exists")
             # RESERVED_ALIASES already contains every built-in binary, but
             # checking it explicitly (rather than relying solely on
-            # existing_binaries) also covers "code-helper" itself and stays
+            # existing_binaries) also covers "codehelper" itself and stays
             # correct even if that set's derivation ever changes shape.
             if name in RESERVED_ALIASES or binary in RESERVED_ALIASES:
                 raise CodeHelperError(

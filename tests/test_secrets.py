@@ -1,6 +1,6 @@
 """Tests for the credential cache and ``resolve_token`` source tracking.
 
-The cache (``~/.config/code-helper/credentials.json``) is the one persistent
+The cache (``~/.config/codehelper/credentials.json``) is the one persistent
 copy of a token outside a generated wrapper, and it is a CACHE — never a
 session. These tests pin:
 
@@ -22,8 +22,8 @@ import stat
 
 import pytest
 
-from code_helper.services.paths import Paths
-from code_helper.services.secrets import (
+from codehelper.services.paths import Paths
+from codehelper.services.secrets import (
     DEFAULT_PROFILE,
     SOURCE_CACHE,
     SOURCE_ENV,
@@ -255,7 +255,7 @@ def test_invalidate_cached_credential_swallows_oserror(tmp_path, capsys, monkeyp
     atomic_write with no try/except — a disk-full/permission-denied failure
     there would crash the process after the wrapper install already
     succeeded. Warn and move on instead."""
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     paths = _paths(tmp_path)
     save_credential(paths, "zai", "sk-stale")
@@ -263,7 +263,7 @@ def test_invalidate_cached_credential_swallows_oserror(tmp_path, capsys, monkeyp
     def _boom(*_a, **_kw):
         raise OSError("disk full")
 
-    monkeypatch.setattr("code_helper.backends._atomic.atomic_write", _boom)
+    monkeypatch.setattr("codehelper.backends._atomic.atomic_write", _boom)
     monkeypatch.setattr(secrets, "atomic_write", _boom)
     secrets.invalidate_cached_credential(paths, "zai")
 
@@ -284,7 +284,7 @@ def test_cache_freshly_typed_token_swallows_oserror(tmp_path, capsys, monkeypatc
     permission-denied/other OSError writing the cache must not propagate as
     an uncaught exception — that would crash the process for what is, from
     the user's perspective, a fully successful command. Warn and move on."""
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     paths = _paths(tmp_path)
 
@@ -304,7 +304,7 @@ def test_cache_freshly_typed_token_swallows_oserror(tmp_path, capsys, monkeypatc
 def test_cache_freshly_typed_token_still_raises_nothing_on_success(tmp_path):
     """Sanity check: the try/except added for the OSError case does not
     swallow a normal, successful save — it still lands in the cache."""
-    from code_helper.services.secrets import cache_freshly_typed_token
+    from codehelper.services.secrets import cache_freshly_typed_token
 
     paths = _paths(tmp_path)
     cache_freshly_typed_token(
@@ -515,7 +515,7 @@ def test_resolve_token_prompt_when_neither_env_nor_cache(tmp_path):
 
 @pytest.mark.unit
 def test_resolve_token_raises_after_empty_retries(tmp_path):
-    from code_helper.errors import CodeHelperError
+    from codehelper.errors import CodeHelperError
 
     paths = _paths(tmp_path)
     with pytest.raises(CodeHelperError):

@@ -1,7 +1,7 @@
 """Tests for ``services/codex_default.py`` — the ``set-default`` command.
 
 Unlike every other write path in this project, ``config.toml`` here is
-ALWAYS a foreign file by definition — it belongs to Codex, not code-helper —
+ALWAYS a foreign file by definition — it belongs to Codex, not codehelper —
 so the guard shape is different from ``wrappers.py``'s ownership marker: this
 module PATCHES specific keys/tables and must leave everything else
 byte-for-byte untouched, rather than deciding whole-file skip/write/refuse.
@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from code_helper.errors import CodeHelperError
-from code_helper.services.codex_default import (
+from codehelper.errors import CodeHelperError
+from codehelper.services.codex_default import (
     DefaultPatch,
     _config_backup_slots,
     _rotate_backups,
@@ -23,8 +23,8 @@ from code_helper.services.codex_default import (
     resolve_default_patch,
     restore_default,
 )
-from code_helper.services.model import ConfigShape, Provider, get_agent, get_provider
-from code_helper.services.paths import Paths
+from codehelper.services.model import ConfigShape, Provider, get_agent, get_provider
+from codehelper.services.paths import Paths
 
 CODEX = get_agent("codex")
 CLAUDE = get_agent("claude")
@@ -195,7 +195,7 @@ def test_patch_appends_table_with_exactly_one_blank_line_regardless_of_trailing_
     about this one function's normalization, independent of what
     ``_patch_top_level`` prepends first.
     """
-    from code_helper.services.codex_default import _patch_model_providers_table
+    from codehelper.services.codex_default import _patch_model_providers_table
 
     for trailing in ("", "\n", "\n\n", "\n\n\n", "\n\n\n\n"):
         original = f"some_other_key = 1{trailing}" if trailing else ""
@@ -678,7 +678,7 @@ def test_set_default_refuses_outright_without_tomllib(tmp_path, monkeypatch):
     """
     import builtins
 
-    from code_helper.services import codex_default
+    from codehelper.services import codex_default
 
     real_import = builtins.__import__
 
@@ -728,7 +728,7 @@ def test_set_default_refuses_when_a_managed_key_name_appears_inside_a_string_val
         encoding="utf-8",
     )
 
-    with pytest.raises(CodeHelperError, match="code-helper bug"):
+    with pytest.raises(CodeHelperError, match="codehelper bug"):
         _install(paths, force=True)
     # Nothing was written — the refusal happens before any atomic_write.
     assert not paths.codex_main_config_backup(1).exists()
@@ -755,7 +755,7 @@ def test_set_default_refuses_cleanly_when_model_providers_is_an_array_of_tables(
         '[[model_providers]]\nname = "weird"\n', encoding="utf-8"
     )
 
-    with pytest.raises(CodeHelperError, match="code-helper bug"):
+    with pytest.raises(CodeHelperError, match="codehelper bug"):
         _install(paths, force=True)
     # Nothing was written — the refusal happens before any atomic_write.
     assert not paths.codex_main_config_backup(1).exists()
@@ -850,7 +850,7 @@ def test_slot_without_restore_is_rejected(tmp_path, monkeypatch, capsys):
     having no effect.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
-    from code_helper.__main__ import main
+    from codehelper.__main__ import main
 
     assert (
         main(
@@ -892,7 +892,7 @@ def test_resolve_default_patch_refuses_a_required_provider_with_no_base_url():
 def test_resolve_default_patch_uses_the_substituted_provider():
     """A unit-level pin: resolve_default_patch itself is provider-agnostic —
     it is the CALLER's job (cli/parser.py) to substitute base_url in first."""
-    from code_helper.services.model import with_base_url
+    from codehelper.services.model import with_base_url
 
     litellm = with_base_url(get_provider("litellm"), "http://h:4000/v1")
     result = resolve_default_patch(CODEX, litellm, "gpt-4o", "/x/model.json")
@@ -1012,9 +1012,9 @@ def test_clear_default_does_not_erase_an_unrecognized_providers_model_config(tmp
     # to drop — but clear_config_toml() removes the `model`/`model_provider`/
     # `model_catalog_json` top-level keys UNCONDITIONALLY, regardless of
     # whether current_default() recognized the provider. A user who
-    # hand-configured `model_provider = "mine"` (not in code-helper's
+    # hand-configured `model_provider = "mine"` (not in codehelper's
     # PROVIDERS registry) gets those keys silently deleted by `native`
-    # anyway, even though code-helper never wrote them and current_default()
+    # anyway, even though codehelper never wrote them and current_default()
     # itself reports None (nothing of ours is applied).
     paths = Paths.from_home(tmp_path)
     config = paths.codex_main_config()

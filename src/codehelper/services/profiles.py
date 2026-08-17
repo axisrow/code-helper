@@ -24,8 +24,8 @@ __all__ = [
 
 def profile_slots(paths) -> list[tuple[str, str]]:
     """Return up to ten stable ``(provider, profile)`` shortcut slots."""
-    from code_helper.services.model import PROVIDERS
-    from code_helper.services.secrets import profile_names
+    from codehelper.services.model import PROVIDERS
+    from codehelper.services.secrets import profile_names
 
     slots: list[tuple[str, str]] = []
     for provider in PROVIDERS:

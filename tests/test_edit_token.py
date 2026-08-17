@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from code_helper.__main__ import main
-from code_helper.services.paths import Paths
+from codehelper.__main__ import main
+from codehelper.services.paths import Paths
 
 _OLD_TOKEN = "00000000000000000000000000000000.aaaaaaaaaaaaaaaa"
 _NEW_TOKEN = "11111111111111111111111111111111.bbbbbbbbbbbbbbbb"
@@ -34,7 +34,7 @@ def test_edit_token_with_name_rewrites_token(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_edit_token_can_rotate_a_named_profile(tmp_path, monkeypatch):
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     paths = Paths.from_home(tmp_path)
     secrets.save_credential(paths, "zai", _OLD_TOKEN, "work")
@@ -87,7 +87,7 @@ def test_edit_token_no_name_uses_menu(tmp_path, monkeypatch):
     # `_read_key_raw` after import has no effect; patch select_from_menu
     # itself instead (its own key-parsing behavior is covered by test_menu.py).
     monkeypatch.setattr(
-        "code_helper.cli.menu.select_from_menu", lambda items, **_kw: "glm"
+        "codehelper.cli.menu.select_from_menu", lambda items, **_kw: "glm"
     )
     monkeypatch.setattr("getpass.getpass", lambda _prompt: _NEW_TOKEN)
 
@@ -101,12 +101,12 @@ def test_edit_token_no_name_uses_menu(tmp_path, monkeypatch):
 @pytest.mark.integration
 def test_edit_token_menu_cancelled_writes_nothing(tmp_path, monkeypatch, capsys):
     # Esc/q — a soft cancel — prints "cancelled" and returns 0, same as ever.
-    from code_helper.cli.menu import MenuCancelled
+    from codehelper.cli.menu import MenuCancelled
 
     def _cancel(items, **_kw):
         raise MenuCancelled(hard=False)
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _cancel)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _cancel)
 
     assert main(["edit-token"]) == 0
 
@@ -121,12 +121,12 @@ def test_edit_token_hard_cancel_propagates(tmp_path, monkeypatch):
     # Ctrl-C (a hard cancel) is NOT swallowed into "cancelled" + exit 0 — it
     # propagates like any other uncaught KeyboardInterrupt in the plain CLI,
     # so a TUI caller can distinguish "back" from "leave the whole TUI".
-    from code_helper.cli.menu import MenuCancelled
+    from codehelper.cli.menu import MenuCancelled
 
     def _cancel(items, **_kw):
         raise MenuCancelled(hard=True)
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _cancel)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _cancel)
 
     with pytest.raises(MenuCancelled):
         main(["edit-token"])

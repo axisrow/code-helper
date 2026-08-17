@@ -1,4 +1,4 @@
-# code-helper
+# codehelper
 
 Generates and manages small bash wrapper scripts in `~/.local/bin` that point a
 coding agent — [Claude Code](https://claude.ai/code) or
@@ -21,39 +21,39 @@ pip install -e ".[dev]"
 
 ```bash
 # curated presets
-code-helper add deepseek                  # create ~/.local/bin/deepseek
-code-helper add glm                       # prompts for ZAI_API_KEY (or reads it from env)
-code-helper add deepseek --model X        # override the preset's model
+codehelper add deepseek                  # create ~/.local/bin/deepseek
+codehelper add glm                       # prompts for ZAI_API_KEY (or reads it from env)
+codehelper add deepseek --model X        # override the preset's model
 
 # build your own: agent + provider + model
-code-helper add --agent codex  --provider ollama --model glm-5:cloud
+codehelper add --agent codex  --provider ollama --model glm-5:cloud
                                           # -> ~/.local/bin/glm-5-codex
-code-helper add --agent claude --provider ollama --model qwen3.5:9b \
+codehelper add --agent claude --provider ollama --model qwen3.5:9b \
                 --alias qwen              # -> ~/.local/bin/qwen
 
 # a provider whose endpoint YOU choose (a self-hosted LiteLLM proxy) needs
 # --base-url — see the "LiteLLM" section below
-code-helper add --agent claude --provider litellm \
+codehelper add --agent claude --provider litellm \
                 --base-url http://localhost:4000/v1 --model gpt-4o
-code-helper add --agent codex  --provider litellm \
+codehelper add --agent codex  --provider litellm \
                 --base-url http://localhost:4000/v1 --model gpt-4o
 
 # discover what's available
-code-helper list                          # wrappers + install state
-code-helper list agents                   # agents and how each can be configured
-code-helper list providers                # backends and what they speak
-code-helper list matrix                   # which agent × provider pairings work
-code-helper add --agent codex --provider ollama --list-models
+codehelper list                          # wrappers + install state
+codehelper list agents                   # agents and how each can be configured
+codehelper list providers                # backends and what they speak
+codehelper list matrix                   # which agent × provider pairings work
+codehelper add --agent codex --provider ollama --list-models
 
-code-helper --dry-run add deepseek        # preview, write nothing
-code-helper add glm --profile work        # use a named token profile
-code-helper edit-token glm --profile work # rotate the selected profile
-code-helper edit-token glm                # choose a profile and rotate it
-code-helper                               # arrow-key menu over all of the above
+codehelper --dry-run add deepseek        # preview, write nothing
+codehelper add glm --profile work        # use a named token profile
+codehelper edit-token glm --profile work # rotate the selected profile
+codehelper edit-token glm                # choose a profile and rotate it
+codehelper                               # arrow-key menu over all of the above
 
 # change what a bare `codex` (no wrapper) runs by default
-code-helper set-default --agent codex --provider ollama --model glm-5.2:cloud
-code-helper set-default --restore         # undo the last set-default
+codehelper set-default --agent codex --provider ollama --model glm-5.2:cloud
+codehelper set-default --restore         # undo the last set-default
 ```
 
 The alias defaults to `<model>-<agent>` (`glm-5:cloud` + `codex` →
@@ -61,7 +61,7 @@ The alias defaults to `<model>-<agent>` (`glm-5:cloud` + `codex` →
 
 ## Interactive menu
 
-Running `code-helper` opens an English arrow-key menu with `List`, `Add`,
+Running `codehelper` opens an English arrow-key menu with `List`, `Add`,
 `Settings`, and `Quit`. `Add` follows one path:
 
 `provider → profile/token → model → compatible agent → command name`
@@ -77,7 +77,7 @@ For a secret profile, the suggested command name includes both the profile
 and the agent: choosing `axisrow` for model `glm` on `claude` suggests
 `glm-axisrow-claude`, so two agents sharing the same model and profile never
 collide on one wrapper name. The installed wrapper records the selected
-profile and `code-helper list` shows it, so each alias has an explicit
+profile and `codehelper list` shows it, so each alias has an explicit
 token-profile association.
 
 ## Presets
@@ -98,7 +98,7 @@ below).
 
 ## Not every combination is possible
 
-`code-helper list matrix` shows which pairings exist and refuses the rest with
+`codehelper list matrix` shows which pairings exist and refuses the rest with
 an explanation rather than generating a wrapper that fails at runtime:
 
 ```
@@ -115,24 +115,24 @@ so neither of its cells is empty.
 
 ## LiteLLM
 
-`litellm` is the one provider whose address is not built into `code-helper` —
+`litellm` is the one provider whose address is not built into `codehelper` —
 it's your own [LiteLLM](https://docs.litellm.ai/) proxy, so you supply its URL
 yourself:
 
 ```bash
-code-helper add --agent claude --provider litellm \
+codehelper add --agent claude --provider litellm \
                 --base-url http://localhost:4000/v1 --model gpt-4o
-code-helper add --agent codex  --provider litellm \
+codehelper add --agent codex  --provider litellm \
                 --base-url http://localhost:4000/v1 --model gpt-4o
 ```
 
 Either form works — `http://localhost:4000` or `http://localhost:4000/v1` —
-`code-helper` derives the right endpoint for each agent from whichever you
+`codehelper` derives the right endpoint for each agent from whichever you
 give it. One URL serves both agents: `claude` resolves to the direct
 `ANTHROPIC_*` env shape (LiteLLM's Anthropic Messages passthrough, which
-never takes a `/v1` suffix — `code-helper` strips one if present), `codex`
+never takes a `/v1` suffix — `codehelper` strips one if present), `codex`
 resolves to a `[model_providers.litellm]` TOML profile whose `base_url` does
-need `/v1` (`code-helper` appends one if absent) — chosen automatically, same
+need `/v1` (`codehelper` appends one if absent) — chosen automatically, same
 as every other provider here.
 
 The token comes from `LITELLM_API_KEY`, a selected token profile, or a hidden
@@ -150,9 +150,9 @@ no wrapper script for a bare `codex` to source a variable from, so set the
 `LITELLM_API_KEY` environment variable in your own shell profile if you use
 this path.
 
-### Fallback (429, provider outages) is LiteLLM's job, not code-helper's
+### Fallback (429, provider outages) is LiteLLM's job, not codehelper's
 
-`code-helper` generates one wrapper for one `agent × provider × model` point,
+`codehelper` generates one wrapper for one `agent × provider × model` point,
 on purpose — it does not retry, does not race multiple backends, and will not
 grow that logic. A LiteLLM proxy already does this well, in its own
 `config.yaml`:
@@ -175,7 +175,7 @@ litellm_settings:
   cooldown_time: 30
 ```
 
-Point a wrapper at `primary` — `code-helper add ... --model primary` — and a
+Point a wrapper at `primary` — `codehelper add ... --model primary` — and a
 429 (or any failure LiteLLM is configured to catch) fails over to `backup`
 transparently; the agent never sees the switch. Check the
 [LiteLLM reliability docs](https://docs.litellm.ai/docs/proxy/reliability) for
@@ -190,10 +190,10 @@ start on the backend you chose. It does this by patching Codex's own
 `model_catalog_json` keys, and the matching `[model_providers.X]` table.
 
 ```bash
-code-helper set-default --agent codex --provider ollama --model glm-5.2:cloud
-code-helper set-default --agent codex --provider ollama --model glm-5.2:cloud --dry-run
-code-helper set-default --restore                # undo, from the newest backup
-code-helper set-default --restore --slot 2        # or an older one
+codehelper set-default --agent codex --provider ollama --model glm-5.2:cloud
+codehelper set-default --agent codex --provider ollama --model glm-5.2:cloud --dry-run
+codehelper set-default --restore                # undo, from the newest backup
+codehelper set-default --restore --slot 2        # or an older one
 ```
 
 This is the **one** command that touches `~/.codex/config.toml`. It never uses
@@ -212,7 +212,7 @@ reads one back. Off a TTY, `set-default` refuses without `--force`, same as
 ## Safety
 
 - **Your other executables are protected.** A wrapper carries a marker
-  comment, and `code-helper` refuses to overwrite a file it didn't create
+  comment, and `codehelper` refuses to overwrite a file it didn't create
   unless you pass `--force` or confirm interactively. In a non-interactive run
   it fails immediately rather than waiting on input.
 - **Wrapper names are validated.** A name must be a single, plain path
@@ -225,7 +225,7 @@ reads one back. Off a TTY, `set-default` refuses without `--force`, same as
   written `0o700` when it carries a real credential — that copy is what an
   installed wrapper actually runs on, and it is never affected by anything
   below. A token typed at a prompt is also cached in named provider profiles
-  in `~/.config/code-helper/credentials.json` (`0o600`) so the next `add` or
+  in `~/.config/codehelper/credentials.json` (`0o600`) so the next `add` or
   `--list-models` doesn't ask again — see
   [Where tokens live](#where-tokens-live). The only agent config file this
   tool ever touches is `~/.codex/config.toml`, and only through the explicit
@@ -277,11 +277,11 @@ whose URL you supply yourself (`litellm`), the same `--profile work` reuses
 its cached key against whatever `--base-url` you give — the key is stored per
 provider and profile, never per URL, so there is no warning if you point it at
 a different host later. Without `--profile`, a cached key is *not* reused for
-such a provider: nothing selected it for that run, so `code-helper` prompts
-instead. Naming a profile is what tells `code-helper` you mean that key for
+such a provider: nothing selected it for that run, so `codehelper` prompts
+instead. Naming a profile is what tells `codehelper` you mean that key for
 this address; if a key is really scoped to one host, give it its own profile.
 
-This file is a **cache, not a session with the provider**: `code-helper`
+This file is a **cache, not a session with the provider**: `codehelper`
 configures agents and aliases, it does not log in anywhere. There is no
 "logged in" state and no command that connects to a provider to validate a
 token. Deleting the file does not break any installed wrapper — each wrapper

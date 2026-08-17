@@ -21,7 +21,7 @@ import urllib.error
 
 import pytest
 
-from code_helper.services.models_api import _urlopen_fetch
+from codehelper.services.models_api import _urlopen_fetch
 
 
 class _RedirectingHandler(http.server.BaseHTTPRequestHandler):

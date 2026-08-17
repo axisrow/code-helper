@@ -15,7 +15,7 @@ import sys
 
 import pytest
 
-from code_helper.cli.menu import _ESC_TIMEOUT, _PAIR_TIMEOUT, _translate
+from codehelper.cli.menu import _ESC_TIMEOUT, _PAIR_TIMEOUT, _translate
 
 
 class _StubTermios:
@@ -270,7 +270,7 @@ def test_key_reader_pushback_survives_into_the_next_call(monkeypatch):
     over a fake fd (a pipe) with the ``termios``/``tty`` calls stubbed out,
     since there is no TTY under pytest.
     """
-    from code_helper.cli.menu import KeyReader
+    from codehelper.cli.menu import KeyReader
 
     read_fd, write_fd = os.pipe()
     os.write(write_fd, b"\r\x1b[B")  # Enter, immediately followed by Down
@@ -312,8 +312,8 @@ def test_select_from_menu_default_reader_preserves_pushback_across_calls(monkeyp
     drop it. Every other test in this suite injects ``read_key`` directly
     and would never catch a regression at this specific boundary.
     """
-    import code_helper.cli.menu as menu_module
-    from code_helper.cli.menu import select_from_menu
+    import codehelper.cli.menu as menu_module
+    from codehelper.cli.menu import select_from_menu
 
     monkeypatch.setattr(menu_module, "_default_key_reader", None)
 
