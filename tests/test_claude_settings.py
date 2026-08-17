@@ -113,15 +113,19 @@ def test_resolve_switch_patch_includes_subagent_model_when_given():
 
 @pytest.mark.unit
 def test_resolve_switch_patch_native_ignores_models_and_token():
-    """A reset patch is env=={} no matter what the caller passes — the CLI
-    layer is expected to collect neither for `switch native`, but even if it
-    did, nothing here may leak them into the patch."""
+    """Native explicitly blanks every live key without leaking caller input.
+
+    Claude Code's settings watcher applies environment updates to a running
+    process. Removing a key from settings.json does not remove its already
+    applied process value, so native must send an explicit empty value for
+    each key codehelper previously set.
+    """
     patch = resolve_switch_patch(
         NATIVE,
         tier_models=TierModels.uniform("glm-5.2"),
         token="sk-should-never-appear",
     )
-    assert patch.env == {}
+    assert patch.env == {key: "" for key in MANAGED_ENV_KEYS}
     assert patch.is_reset
 
 
@@ -219,7 +223,7 @@ def test_patch_settings_does_not_mutate_the_original():
 
 
 @pytest.mark.unit
-def test_patch_settings_reset_removes_only_managed_keys():
+def test_patch_settings_native_explicitly_blanks_only_managed_keys():
     original = {
         "env": {
             **_FOREIGN_ENV,
@@ -231,15 +235,24 @@ def test_patch_settings_reset_removes_only_managed_keys():
             "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2",
         }
     }
-    patched = patch_settings(original, SettingsPatch(provider_name="native", env={}))
-    assert patched["env"] == _FOREIGN_ENV
+    patched = patch_settings(
+        original,
+        SettingsPatch(provider_name="native", env={key: "" for key in MANAGED_ENV_KEYS}),
+    )
+    assert patched["env"] == {
+        **_FOREIGN_ENV,
+        **{key: "" for key in MANAGED_ENV_KEYS},
+    }
 
 
 @pytest.mark.unit
-def test_patch_settings_reset_removes_empty_env_block():
+def test_patch_settings_native_keeps_empty_managed_keys_for_live_reset():
     original = {"env": {"ANTHROPIC_BASE_URL": "https://x"}}
-    patched = patch_settings(original, SettingsPatch(provider_name="native", env={}))
-    assert "env" not in patched
+    patched = patch_settings(
+        original,
+        SettingsPatch(provider_name="native", env={key: "" for key in MANAGED_ENV_KEYS}),
+    )
+    assert patched["env"] == {key: "" for key in MANAGED_ENV_KEYS}
 
 
 @pytest.mark.unit
@@ -583,7 +596,7 @@ def test_apply_switch_file_mode_is_0600(tmp_path):
 
 
 @pytest.mark.unit
-def test_apply_switch_native_reset_clears_managed_keys(tmp_path):
+def test_apply_switch_native_explicitly_blanks_managed_keys(tmp_path):
     paths = Paths.from_home(tmp_path)
     apply_switch(
         paths,
@@ -598,9 +611,9 @@ def test_apply_switch_native_reset_clears_managed_keys(tmp_path):
 
     assert changed is True
     result = _read(paths)
-    assert "env" not in result or not (
-        set(result.get("env", {})) & set(MANAGED_ENV_KEYS)
-    )
+    assert {key: result["env"].get(key) for key in MANAGED_ENV_KEYS} == {
+        key: "" for key in MANAGED_ENV_KEYS
+    }
 
 
 @pytest.mark.unit

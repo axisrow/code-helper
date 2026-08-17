@@ -98,10 +98,12 @@ class SettingsPatch:
     """The exact ``env`` values a ``switch`` writes into ``settings.json``.
 
     ``env`` is the COMPLETE set of managed keys to SET; every managed key
-    NOT present in it is REMOVED. A reset patch (``provider.env_reset``) is
-    simply ``env == {}`` — the removal path is not a special case in
-    :func:`patch_settings`, it is the ordinary consequence of an empty set,
-    which is why ``env_reset`` needs no branch below :func:`resolve_switch_patch`.
+    NOT present in it is REMOVED. A reset patch (``provider.env_reset``)
+    explicitly sets every managed key to ``""``. Claude Code's settings
+    watcher applies updates to the running process, but removing an env key
+    from the file does not unset its already-applied process value. Empty
+    values both reset that live state and remain false-y on a fresh launch,
+    which restores Claude's native OAuth/model defaults.
     """
 
     provider_name: str
@@ -109,7 +111,7 @@ class SettingsPatch:
 
     @property
     def is_reset(self) -> bool:
-        return not self.env
+        return bool(self.env) and all(value == "" for value in self.env.values())
 
 
 def resolve_switch_patch(
@@ -122,10 +124,11 @@ def resolve_switch_patch(
     """Resolve the patch from the axes. Pure, no IO.
 
     The single place ``provider.env_reset`` is consulted. For a reset
-    provider the result carries an empty ``env`` and ``tier_models``/
-    ``token`` are ignored entirely — the CLI layer is expected to collect
-    neither for ``switch native`` (see ``cli/parser.py``'s ``_handle_switch``),
-    but even if it did, nothing here would leak them into the patch.
+    provider the result explicitly blanks every managed environment key and
+    ``tier_models``/``token`` are ignored entirely — the CLI layer is expected
+    to collect neither for ``switch native`` (see ``cli/parser.py``'s
+    ``_handle_switch``), but even if it did, nothing here would leak them into
+    the patch.
 
     ``ANTHROPIC_BASE_URL`` is derived via :func:`render.anthropic_base_url` —
     the SAME function the wrapper renderer uses — so a ``switch`` to a
@@ -151,7 +154,10 @@ def resolve_switch_patch(
         )
 
     if provider.env_reset:
-        return SettingsPatch(provider_name=provider.name, env={})
+        return SettingsPatch(
+            provider_name=provider.name,
+            env={key: "" for key in MANAGED_ENV_KEYS},
+        )
 
     if provider.base_url_policy is BaseUrlPolicy.REQUIRED and not provider.base_url:
         raise CodeHelperError(
@@ -259,9 +265,10 @@ def patch_settings(original: dict, patch: SettingsPatch) -> dict:
     then ``patch.env`` is inserted. Every other key of ``env`` (a user's
     ``HTTPS_PROXY``, ``IS_DEMO``, ...) and every top-level key
     (``permissions``, ``hooks``, ``statusLine``, ``model``, ...) is carried
-    through unchanged. If ``env`` becomes empty after the removal (e.g. a
-    reset on a file whose ``env`` held only managed keys), the ``env`` key
-    itself is dropped entirely — a ``switch native`` should leave no trace.
+    through unchanged. Native deliberately keeps managed keys with empty
+    values: deleting them would leave their prior values alive in an already
+    running Claude Code process. For non-native patches, if ``env`` becomes
+    empty after the removal, the ``env`` key itself is dropped.
     """
     result = dict(original)
     env = dict(result.get("env", {}))
