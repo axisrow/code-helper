@@ -1970,17 +1970,16 @@ def test_enter_on_the_selected_deepseek_chip_is_a_silent_noop(monkeypatch):
         force=True,
     )
 
+    frames = _capture_frames(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
+    assert main(["tui"]) == 0
+
     import code_helper.cli.tui as tui
 
-    applied = []
-    monkeypatch.setattr(
-        tui.TuiSession,
-        "_apply_switch_wrapper",
-        lambda self, chip: applied.append(chip.name),
-    )
-    _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
-    assert main(["tui"]) == 0
-    assert applied == []
+    # Frame 1 is after Right, frame 2 after the no-op Enter.  The same chip
+    # stays selected; Enter must not reset or advance the chip cursor.
+    selected = f"{tui._REVERSE}✓ deepseek{tui._RESET}"
+    assert selected in frames[1]["claude"]
+    assert frames[2]["claude"] == frames[1]["claude"]
 
 
 @pytest.mark.integration

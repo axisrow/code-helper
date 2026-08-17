@@ -1450,11 +1450,10 @@ class TuiSession:
             self._run_add(agent_name)
             return
         backend = _AGENT_BACKENDS[agent_name]
-        if chip == _NATIVE_CHIP or (
-            agent_name == "claude" and self._chip_is_applied(agent_name, chip)
+        if (chip == _NATIVE_CHIP or agent_name == "claude") and self._chip_is_applied(
+            agent_name, chip
         ):
-            if self._chip_is_applied(agent_name, chip):
-                return
+            return
         if chip == _NATIVE_CHIP:
             getattr(self, backend.apply_native)()
         else:
