@@ -18,8 +18,8 @@ usage() {
   cat <<'EOF'
 Usage:
   scripts/release_pypi.sh testpypi
-  scripts/release_pypi.sh pypi
-  scripts/release_pypi.sh all
+  scripts/release_pypi.sh pypi [--no-git]
+  scripts/release_pypi.sh all [--no-git]
 
 Behavior:
   - loads .env from the repository root when present
@@ -28,6 +28,12 @@ Behavior:
   - rebuilds dist artifacts from scratch
   - runs twine checks before upload
   - uploads to TestPyPI, PyPI, or both
+  - after a successful PyPI upload (pypi/all only, NOT testpypi), commits
+    the version bump in src/codehelper/__init__.py and pushes the current
+    branch to its upstream. --no-git skips this step. The commit is made
+    only after the upload is confirmed, so a failed upload never produces a
+    release commit; only __init__.py is staged, so unrelated working-tree
+    changes are left untouched.
 
 Required .env variables:
   TWINE_USERNAME=__token__
@@ -36,12 +42,22 @@ Required .env variables:
 EOF
 }
 
-if [[ $# -ne 1 ]]; then
+if [[ $# -lt 1 || $# -gt 2 ]]; then
   usage
   exit 1
 fi
 
 TARGET="$1"
+GIT_STEP=1
+
+if [[ $# -eq 2 ]]; then
+  if [[ "$2" == "--no-git" ]]; then
+    GIT_STEP=0
+  else
+    usage
+    exit 1
+  fi
+fi
 
 case "${TARGET}" in
   testpypi|pypi|all)
@@ -133,6 +149,42 @@ upload_target() {
   )
 }
 
+# Commit the version bump and push the current branch. Runs only after a
+# confirmed PyPI upload (pypi/all), never after testpypi. Only
+# src/codehelper/__init__.py is staged, so unrelated working-tree changes
+# are left alone. Re-runs are safe: if the bump is already committed, the
+# commit is skipped and we just push.
+git_release() {
+  local version
+  version="$(resolve_version)"
+
+  echo "Recording release ${version} in git"
+
+  cd "${ROOT_DIR}"
+
+  if git diff --quiet -- "${INIT_FILE}"; then
+    echo "  version bump already committed; nothing to commit"
+  else
+    git add -- "${INIT_FILE}"
+    git commit -m "release: publish codehelper ${version} to PyPI"
+  fi
+
+  local branch upstream remote
+  branch="$(git rev-parse --abbrev-ref HEAD)"
+  if [[ "${branch}" == "HEAD" ]]; then
+    echo "  detached HEAD; skipping push" >&2
+    return 0
+  fi
+  upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  if [[ -z "${upstream}" ]]; then
+    echo "  no upstream tracking for ${branch}; skipping push" >&2
+    return 0
+  fi
+  remote="${upstream%%/*}"
+  echo "  pushing ${branch} to ${remote}"
+  git push "${remote}" "${branch}"
+}
+
 build_artifacts
 
 case "${TARGET}" in
@@ -141,9 +193,15 @@ case "${TARGET}" in
     ;;
   pypi)
     upload_target "pypi" "PYPI_TOKEN"
+    if [[ "${GIT_STEP}" -eq 1 ]]; then
+      git_release
+    fi
     ;;
   all)
     upload_target "testpypi" "TEST_PYPI_TOKEN"
     upload_target "pypi" "PYPI_TOKEN"
+    if [[ "${GIT_STEP}" -eq 1 ]]; then
+      git_release
+    fi
     ;;
 esac
