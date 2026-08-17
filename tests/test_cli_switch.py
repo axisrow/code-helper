@@ -270,6 +270,12 @@ def test_switch_restore_with_provider_rejected(tmp_path):
     assert code != 0
 
 
+@pytest.mark.integration
+def test_switch_restore_with_profile_rejected(tmp_path):
+    code = main(["switch", "--restore", "--profile", "named", "--force"])
+    assert code != 0
+
+
 # --------------------------------------------------------------------------- #
 # --from-wrapper
 # --------------------------------------------------------------------------- #

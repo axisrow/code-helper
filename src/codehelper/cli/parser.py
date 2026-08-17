@@ -1092,6 +1092,7 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         or req.subagent_model
         or req.base_url
         or req.auth
+        or req.profile
     ):
         raise CodeHelperError(
             "--restore cannot be combined with a provider or model flags"
