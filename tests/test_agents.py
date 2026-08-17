@@ -9,6 +9,7 @@ interpolation of ``agent.binary``.
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
@@ -251,3 +252,67 @@ def test_add_user_agent_returns_the_created_agent(tmp_path):
     assert agent.name == "myagent"
     assert agent.binary == "mybin"
     assert agent.shapes == frozenset({ConfigShape.OLLAMA_LAUNCH})
+
+
+@pytest.mark.unit
+def test_add_user_agent_concurrent_adds_all_survive(tmp_path):
+    """The read-modify-write must be serialized: N concurrent adds, each
+    reading the same empty registry and passing the duplicate checks, must
+    NOT have the later writers silently delete the earlier agents. Without
+    the flock this is a lost-update race; with it every agent persists."""
+    paths = _paths(tmp_path)
+    names = [f"agent-{i}" for i in range(8)]
+    barrier = threading.Barrier(len(names))
+    errors: list[Exception] = []
+
+    def _add(name: str) -> None:
+        barrier.wait()  # maximize the window where all read the same state
+        try:
+            add_user_agent(paths, name)
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_add, args=(n,)) for n in names]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert {a.name for a in load_user_agents(paths)} == set(names)
+
+
+# --------------------------------------------------------------------------- #
+# wrapper-alias reservation — a wrapper must not shadow a user-agent binary
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_wrapper_alias_cannot_shadow_a_user_agent_binary():
+    """The reservation that stops a wrapper shadowing a built-in agent's binary
+    must extend to user-defined agents: register `mytool`, then a wrapper
+    aliased `mytool` would clobber the real `mytool` on PATH — reject it."""
+    from code_helper.cli.parser import _handle_add
+    from code_helper.cli.requests import AddRequest
+
+    add_user_agent(Paths.default(), "mytool", "mytool", "a real CLI")
+    req = AddRequest(
+        name=None,
+        agent="mytool",
+        provider="ollama",
+        model="model-x",
+        alias="mytool",
+        shape=None,
+        base_url=None,
+        auth=None,
+        profile=None,
+        profile_token=None,
+        profile_rename_from=None,
+        profile_rename_to=None,
+        list_models=False,
+        dry_run=True,
+        force=False,
+        debug=False,
+    )
+    with pytest.raises(CodeHelperError, match="reserved"):
+        _handle_add(req)

@@ -51,8 +51,10 @@ correct, not a gap to fill.
 
 from __future__ import annotations
 
+import fcntl
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from code_helper.backends._atomic import atomic_write
 from code_helper.errors import CodeHelperError
@@ -173,6 +175,18 @@ def get_agent(paths: Paths, name: str) -> Agent:
     raise CodeHelperError(f"unknown agent: {name} (known: {known})")
 
 
+def _agents_lock(paths: Paths) -> Path:
+    """Return the lock-file path guarding ``agents.json``.
+
+    A SEPARATE file from ``agents.json`` itself: ``atomic_write`` replaces the
+    destination inode, so a lock held on ``agents.json`` would silently point
+    at the stale pre-replace inode after the first write. The lock file is
+    never replaced, only flock-ed, so its inode is stable for the process's
+    lifetime.
+    """
+    return paths.agents_file().with_suffix(".json.lock")
+
+
 def add_user_agent(
     paths: Paths, name: str, binary: str | None = None, description: str = ""
 ) -> Agent:
@@ -184,6 +198,13 @@ def add_user_agent(
     launch`` integration name are the same thing for every built-in entry
     today.
 
+    The read-modify-write (load → validate → replace) runs under an exclusive
+    ``fcntl.flock`` on a sibling lock file, so two concurrent invocations
+    (two TUI/process instances) cannot each read the same registry, both pass
+    the duplicate checks, and the later writer silently delete the earlier
+    agent. ``atomic_write`` prevents torn JSON, not this lost-update race; the
+    lock closes that gap.
+
     Raises:
         CodeHelperError: ``name``/``binary`` fails
             :func:`~code_helper.services.model.validate_agent_binary`, OR
@@ -194,44 +215,52 @@ def add_user_agent(
     validate_agent_binary(name)
     validate_agent_binary(binary)
 
-    user_agents = load_user_agents(paths)
-    existing = AGENTS + user_agents
-    existing_names = {a.name for a in existing}
-    existing_binaries = {a.binary for a in existing}
-    if name in existing_names:
-        raise CodeHelperError(f"an agent named {name!r} already exists")
-    # RESERVED_ALIASES already contains every built-in binary, but checking it
-    # explicitly (rather than relying solely on existing_binaries) also covers
-    # "code-helper" itself and stays correct even if that set's derivation
-    # ever changes shape.
-    if name in RESERVED_ALIASES or binary in RESERVED_ALIASES:
-        raise CodeHelperError(
-            f"{name!r} collides with a reserved name — an agent named after "
-            f"an existing binary on PATH would either re-invoke itself "
-            f"forever or permanently shadow the real one"
-        )
-    if binary in existing_binaries:
-        raise CodeHelperError(
-            f"an agent with binary {binary!r} already exists — two agents "
-            f"sharing a binary would make wrapper generation ambiguous"
-        )
+    lock_path = _agents_lock(paths)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            user_agents = load_user_agents(paths)
+            existing = AGENTS + user_agents
+            existing_names = {a.name for a in existing}
+            existing_binaries = {a.binary for a in existing}
+            if name in existing_names:
+                raise CodeHelperError(f"an agent named {name!r} already exists")
+            # RESERVED_ALIASES already contains every built-in binary, but
+            # checking it explicitly (rather than relying solely on
+            # existing_binaries) also covers "code-helper" itself and stays
+            # correct even if that set's derivation ever changes shape.
+            if name in RESERVED_ALIASES or binary in RESERVED_ALIASES:
+                raise CodeHelperError(
+                    f"{name!r} collides with a reserved name — an agent named "
+                    f"after an existing binary on PATH would either re-invoke "
+                    f"itself forever or permanently shadow the real one"
+                )
+            if binary in existing_binaries:
+                raise CodeHelperError(
+                    f"an agent with binary {binary!r} already exists — two "
+                    f"agents sharing a binary would make wrapper generation "
+                    f"ambiguous"
+                )
 
-    agent = Agent(
-        name=name,
-        binary=binary,
-        shapes=frozenset({ConfigShape.OLLAMA_LAUNCH}),
-        description=description,
-    )
+            agent = Agent(
+                name=name,
+                binary=binary,
+                shapes=frozenset({ConfigShape.OLLAMA_LAUNCH}),
+                description=description,
+            )
 
-    payload = {
-        "agents": [
-            {"name": a.name, "binary": a.binary, "description": a.description}
-            for a in (*user_agents, agent)
-        ]
-    }
-    atomic_write(
-        paths.agents_file(),
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        mode=None,
-    )
-    return agent
+            payload = {
+                "agents": [
+                    {"name": a.name, "binary": a.binary, "description": a.description}
+                    for a in (*user_agents, agent)
+                ]
+            }
+            atomic_write(
+                paths.agents_file(),
+                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                mode=None,
+            )
+            return agent
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)

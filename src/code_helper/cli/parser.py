@@ -51,7 +51,7 @@ from code_helper.errors import CodeHelperError
 
 # Modules, not names — see this module's docstring on late binding.
 from code_helper.services import claude_settings, codex_default, models_api, secrets
-from code_helper.services.agents import all_agents
+from code_helper.services.agents import all_agents, load_user_agents
 from code_helper.services.agents import get_agent as get_any_agent
 from code_helper.services.claude_settings import current_switch
 from code_helper.services.codex_default import restore_default
@@ -538,6 +538,18 @@ def _handle_add(args: argparse.Namespace | AddRequest) -> int:
         # _add_spec_from_preset may have filled profile_name via its own
         # active-profile fallback; re-read it off the built spec.
         profile_name = spec.profile_name
+
+    # The alias reservation (naming.validate_alias) covers only the static
+    # built-in registry. A user-defined agent's binary is a real agent binary
+    # too, and a wrapper named after it would shadow the real executable on
+    # PATH exactly as a built-in one would — so reject it here, at the single
+    # boundary every wrapper creation flows through, before any token prompt.
+    user_binaries = {a.binary for a in load_user_agents(paths)}
+    if spec.alias in user_binaries:
+        raise CodeHelperError(
+            f"{spec.alias!r} is a reserved name — a wrapper named after a "
+            f"user-defined agent's binary would shadow the real one on PATH"
+        )
 
     token, resolved = _add_resolve_token(spec, req, paths, profile_name)
     wrote = _add_install_and_cache(spec, req, paths, token, resolved, profile_name)

@@ -15,10 +15,11 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final, Literal
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from code_helper.services.paths import Paths
+    from code_helper.services.spec import WrapperSpec
 
 __all__ = ["run_tui"]
 
@@ -27,7 +28,7 @@ _SETTINGS = "settings"
 _PROFILE = "profile"
 _HELP = "help"
 _QUIT = "quit"
-_BACK = "__back__"
+_BACK: Final = "__back__"
 _NEW_PROFILE = "__new_profile__"
 _USE_PROFILE = "__use_profile__"
 _REPLACE_TOKEN = "__replace_token__"
@@ -387,7 +388,7 @@ class TuiSession:
 
     def _new_profile(
         self, names: list[str], provider_name: str
-    ) -> ProfileChoice | str | None:
+    ) -> ProfileChoice | Literal["__back__"] | None:
         """Collect a new profile and token before model discovery."""
         from code_helper.services.profiles import (
             NewProfileOutcome,
@@ -460,7 +461,8 @@ class TuiSession:
             self._recover_default(provider_name)
             names = list(profile_names(Paths.default(), provider_name))
             if not names:
-                return self._new_profile(names, provider_name)
+                created = self._new_profile(names, provider_name)
+                return None if created == _BACK else created
 
             # The stored active profile is the pre-selection: put it FIRST
             # with a marker so the cursor (index 0) lands on it.
@@ -574,7 +576,7 @@ class TuiSession:
             )
         return rows
 
-    def _resolve_spec(self, alias: str) -> object | None:
+    def _resolve_spec(self, alias: str) -> WrapperSpec | None:
         """Resolve ``alias`` to a spec — installed wrapper first, else preset."""
         from code_helper.errors import CodeHelperError
         from code_helper.services.paths import Paths
@@ -813,7 +815,11 @@ class TuiSession:
         # source fed the menu is shown in the prompt so a stale built-in
         # entry is never mistaken for something the endpoint just confirmed.
         models = result.models
-        using_known = not models and provider.known_models
+        # Fall back to the registry's known_models only when discovery
+        # actually FAILED (not result.ok) — a successful discovery that
+        # legitimately returned zero models is a real answer, not a reason to
+        # substitute the built-in list and mislabel it "discovery unavailable".
+        using_known = not result.ok and provider.known_models
         if using_known:
             models = provider.known_models
         items = [(model, model) for model in models]
@@ -1022,10 +1028,11 @@ class TuiSession:
         from code_helper.services.agents import add_user_agent
         from code_helper.services.paths import Paths
 
-        name = self._read_text("Agent name (its executable name on PATH): ")
+        name = (
+            self._read_text("Agent name (its executable name on PATH): ") or ""
+        ).strip()
         if not name:
             return
-        name = name.strip()
         binary = self._read_text(f"Binary name [{name}]: ")
         binary = (binary or "").strip() or name
         description = self._read_text("Description (optional): ")
