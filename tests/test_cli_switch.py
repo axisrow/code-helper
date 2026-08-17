@@ -258,6 +258,41 @@ def test_switch_from_wrapper_lifts_an_ollama_launch_wrapper_to_live_settings(tmp
 
 
 @pytest.mark.integration
+def test_switch_from_wrapper_rejects_a_non_claude_wrapper(tmp_path, monkeypatch):
+    """switch retargets a LIVE CLAUDE session, so a wrapper that belongs to
+    another agent (codex shares Ollama) must fail closed — it must never
+    silently retarget claude to a foreign selection just because the provider
+    happens to declare the ANTHROPIC_SETTINGS shape."""
+    assert (
+        main(
+            [
+                "add",
+                "--agent",
+                "codex",
+                "--provider",
+                "ollama",
+                "--model",
+                "x",
+                "--alias",
+                "codex-ollama",
+            ]
+        )
+        == 0
+    )
+
+    code = main(["switch", "--from-wrapper", "codex-ollama", "--force"])
+
+    assert code != 0
+    settings = Paths.from_home(tmp_path).claude_settings()
+    if settings.exists():
+        env = json.loads(settings.read_text(encoding="utf-8")).get("env", {})
+        assert not (
+            set(env)
+            & {"ANTHROPIC_BASE_URL", "ANTHROPIC_DEFAULT_SONNET_MODEL"}
+        )
+
+
+@pytest.mark.integration
 def test_switch_from_wrapper_and_provider_conflict(tmp_path, monkeypatch):
     monkeypatch.setenv("ZAI_API_KEY", "sk-env")
     assert main(["add", "glm"]) == 0

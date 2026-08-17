@@ -953,10 +953,11 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
     (``wrappers.spec_from_installed``) and the token from the same file
     (``wrappers.token_from_installed``) — zero prompts, zero re-derivation.
 
-    An ``ollama-launch`` wrapper is converted to Ollama's
+    An ``ollama-launch`` claude wrapper is converted to Ollama's
     Anthropic-compatible live-settings target, just like its preset chip.
-    Other shapes still fail closed unless their provider explicitly supports
-    the live settings mechanism.
+    ``switch`` drives a LIVE CLAUDE session, so a wrapper belonging to any
+    other agent (codex shares Ollama) fails closed rather than retargeting
+    claude to a foreign selection.
     """
     if not req.from_wrapper:
         raise CodeHelperError(
@@ -968,6 +969,11 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
     if spec is None:
         raise CodeHelperError(
             f"no installed wrapper named {name!r} — see `code-helper list`"
+        )
+    if spec.agent.name != "claude":
+        raise CodeHelperError(
+            f"wrapper {name!r} is a {spec.agent.name} wrapper — "
+            f"`switch --from-wrapper` can only retarget a claude session"
         )
     provider, tier_models, subagent_model = claude_settings.live_axes_for_spec(spec)
     token = ""
