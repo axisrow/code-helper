@@ -3,7 +3,7 @@ requires = ["hatchling>=1.21"]
 build-backend = "hatchling.build"
 
 [project]
-name = "code-helper"
+name = "codehelper"
 dynamic = ["version"]
 description = "Manage generated Claude Code wrapper scripts (deepseek, glm, ...) in ~/.local/bin."
 readme = "README.md"
