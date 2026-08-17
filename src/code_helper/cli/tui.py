@@ -1434,18 +1434,11 @@ class TuiSession:
     def _apply_chip(self, agent_name: str) -> None:
         """Apply the highlighted chip of ``agent_name`` (Enter on its row).
 
-        The already-applied short-circuit is trusted ONLY for the native
-        chip: ``applied is None`` is an exact, unambiguous read (see
-        ``_chip_is_applied``). A wrapper chip's "applied" is a heuristic —
-        matched by PROVIDER NAME only, because that is all a config file
-        records — so two installed wrappers sharing a provider (different
-        model/profile/token/base-url) are indistinguishable there and the
-        first one is reported applied even when the SECOND is the one
-        actually live. Short-circuiting Enter on that heuristic would make
-        the second wrapper permanently unreachable through the chipset — the
-        exact distinction it exists to expose — so a wrapper chip always
-        re-applies; the backend's own apply path already no-ops safely when
-        the resolved config truly hasn't changed.
+        A selected Claude chip is an exact comparison of its full managed
+        target (endpoint, models, subagent and credential), so Enter is a
+        silent no-op.  The same holds for native, whose no-override state is
+        exact.  Other agents retain their existing provider-level readback,
+        which is not precise enough to skip a potentially different wrapper.
         """
         chips = self._chips.get(agent_name, [])
         if not chips:
@@ -1457,10 +1450,12 @@ class TuiSession:
             self._run_add(agent_name)
             return
         backend = _AGENT_BACKENDS[agent_name]
-        if chip == _NATIVE_CHIP:
+        if chip == _NATIVE_CHIP or (
+            agent_name == "claude" and self._chip_is_applied(agent_name, chip)
+        ):
             if self._chip_is_applied(agent_name, chip):
-                self._notify(f"{agent_name} is already on {self._chip_name(chip)}.")
                 return
+        if chip == _NATIVE_CHIP:
             getattr(self, backend.apply_native)()
         else:
             getattr(self, backend.apply_wrapper)(chip)

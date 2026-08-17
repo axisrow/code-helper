@@ -1942,19 +1942,44 @@ def test_enter_on_deepseek_chip_hot_applies_without_confirmation(monkeypatch):
 
 @pytest.mark.integration
 def test_enter_on_an_already_applied_chip_does_not_rewrite(monkeypatch):
-    """A no-op is reported, not written — re-applying what is already applied
-    should not rotate a backup or touch the config."""
+    """A selected native chip is a silent no-op with no config write."""
     import code_helper.cli.tui as tui
 
     applied = []
     monkeypatch.setattr(
         tui.TuiSession, "_apply_switch_native", lambda self: applied.append("native")
     )
-    monkeypatch.setattr(tui.TuiSession, "_notify", lambda self, text: None)
-
     _real_menu_keys(monkeypatch, ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
+    assert applied == []
+
+
+@pytest.mark.integration
+def test_enter_on_the_selected_deepseek_chip_is_a_silent_noop(monkeypatch):
+    from code_helper.services.claude_settings import apply_switch
+    from code_helper.services.wrappers import get_spec
+
+    spec = get_spec("deepseek")
+    apply_switch(
+        Paths.default(),
+        provider=spec.provider,
+        tier_models=spec.tier_models,
+        token=spec.auth_value,
+        subagent_model=spec.subagent_model,
+        force=True,
+    )
+
+    import code_helper.cli.tui as tui
+
+    applied = []
+    monkeypatch.setattr(
+        tui.TuiSession,
+        "_apply_switch_wrapper",
+        lambda self, chip: applied.append(chip.name),
+    )
+    _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
+    assert main(["tui"]) == 0
     assert applied == []
 
 
