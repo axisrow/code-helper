@@ -1965,6 +1965,34 @@ def test_chip_apply_is_silent_no_wrote_no_pause(monkeypatch, capsys):
 
 
 @pytest.mark.integration
+def test_dry_run_chip_surfaces_the_preview_not_silent(monkeypatch, capsys):
+    """A claude chip press under ``--dry-run`` must NOT be silent. Silence is
+    justified by a real write whose chipset redraw already shows the new
+    [applied] state; a dry run writes nothing, so the redraw does not change
+    and the preview is the only feedback. A dry-run chip press must surface the
+    redacted diff / "would write" line instead of swallowing it, and must not
+    mutate settings.json."""
+    from codehelper.services.paths import Paths
+
+    _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
+    assert main(["tui", "--dry-run"]) == 0
+
+    output = capsys.readouterr().out
+    # The dry-run preview is surfaced, not discarded by the silent path.
+    assert "would write" in output
+    # Dry-run must never claim a real write.
+    assert "wrote " not in output
+
+    # Nothing may be mutated by a dry-run chip press.
+    settings_path = Paths.default().claude_settings()
+    if settings_path.exists():
+        import json
+
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert "ANTHROPIC_DEFAULT_SONNET_MODEL" not in settings.get("env", {})
+
+
+@pytest.mark.integration
 def test_enter_on_an_already_applied_chip_does_not_rewrite(monkeypatch):
     """A selected native chip is a silent no-op with no config write."""
     import codehelper.cli.tui as tui

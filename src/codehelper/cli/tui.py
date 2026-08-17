@@ -656,6 +656,16 @@ class TuiSession:
 
     # --- applying a chip -------------------------------------------------
 
+    def _chip_silent(self) -> bool:
+        """A chip press is silent only for a real write.
+
+        The silence is justified by the chipset redraw already showing the new
+        [applied] state. A dry run writes nothing, so the redraw does not
+        change — silence would swallow the only feedback (the preview). In
+        dry-run the chip must surface its preview and pause like a normal run.
+        """
+        return not getattr(self.args, "dry_run", False)
+
     def _apply_switch_wrapper(self, spec) -> None:
         """claude: retarget the RUNNING session at ``spec``'s backend."""
         from codehelper.cli.parser import _handle_switch
@@ -667,14 +677,16 @@ class TuiSession:
             else self._switch_request(from_wrapper=spec.name)
         )
         # silent: a force=True switch chip never prompts — no echo, no pause.
-        self._run(_handle_switch, source, silent=True)
+        self._run(_handle_switch, source, silent=self._chip_silent())
 
     def _apply_switch_native(self) -> None:
         """claude: clear the managed ``env`` block from settings.json."""
         from codehelper.cli.parser import _handle_switch
 
         self._run(
-            _handle_switch, self._switch_request(provider=_NATIVE_CHIP), silent=True
+            _handle_switch,
+            self._switch_request(provider=_NATIVE_CHIP),
+            silent=self._chip_silent(),
         )
 
     def _switch_request(self, *, provider=None, from_wrapper=None, from_preset=None):
