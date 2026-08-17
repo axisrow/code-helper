@@ -12,8 +12,8 @@ import urllib.error
 
 import pytest
 
-from code_helper.services.model import ModelListAPI, Provider
-from code_helper.services.models_api import list_models
+from codehelper.services.model import ModelListAPI, Provider
+from codehelper.services.models_api import list_models
 
 _OLLAMA = Provider(
     name="ollama",

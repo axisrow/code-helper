@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from code_helper.__main__ import main
-from code_helper.services.paths import Paths
+from codehelper.__main__ import main
+from codehelper.services.paths import Paths
 
 
 def _menu_sequence(monkeypatch, answers):
@@ -17,11 +17,11 @@ def _menu_sequence(monkeypatch, answers):
     def _select(_items, **_kwargs):
         return next(iterator)
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
 
 
 def _real_menu_keys(monkeypatch, keys):
-    import code_helper.cli.menu as menu
+    import codehelper.cli.menu as menu
 
     iterator = iter(keys)
     real_select = menu.select_from_menu
@@ -52,7 +52,7 @@ def _tab_on_profile_screen(monkeypatch, presses=1):
             on_tab()
         return "__back__"
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     return seen
 
 
@@ -90,9 +90,9 @@ def test_add_order_is_agent_provider_model_alias(monkeypatch):
         seen.append(prompt() if callable(prompt) else prompt)
         return next(answers)
 
-    import code_helper.services.models_api as api
+    import codehelper.services.models_api as api
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     monkeypatch.setattr(
         api,
         "list_models",
@@ -103,7 +103,7 @@ def test_add_order_is_agent_provider_model_alias(monkeypatch):
     assert main(["tui"]) == 0
     # The header no longer restates which backend is live: the chipset rows
     # say that in place (see TuiSession._main_prompt).
-    assert seen[0].startswith("code-helper")
+    assert seen[0].startswith("codehelper")
     assert "Live:" not in seen[0]
     assert seen[1:4] == [
         "What do you want to add?",
@@ -143,20 +143,20 @@ def test_add_agent_branch_persists_a_user_agent_end_to_end(monkeypatch):
             return next(agent_field_answers)
         return "my-myagent-wrapper"  # the alias prompt
 
-    import code_helper.services.models_api as api
+    import codehelper.services.models_api as api
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
-    monkeypatch.setattr("code_helper.cli.menu.read_line", _read_line)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.read_line", _read_line)
     monkeypatch.setattr(
         api,
         "list_models",
         lambda *_args, **_kwargs: api.ModelListResult(("model-x",), "fake"),
     )
-    monkeypatch.setattr("code_helper.cli.menu.press_any_key", lambda *_a, **_k: None)
+    monkeypatch.setattr("codehelper.cli.menu.press_any_key", lambda *_a, **_k: None)
 
     assert main(["tui"]) == 0
 
-    from code_helper.services.agents import load_user_agents
+    from codehelper.services.agents import load_user_agents
 
     agents = load_user_agents(Paths.default())
     assert len(agents) == 1
@@ -177,9 +177,9 @@ def test_alias_prompt_carries_a_breadcrumb_of_earlier_choices(monkeypatch):
         seen.append(prompt() if callable(prompt) else prompt)
         return next(answers)
 
-    import code_helper.services.models_api as api
+    import codehelper.services.models_api as api
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     monkeypatch.setattr(
         api,
         "list_models",
@@ -192,7 +192,7 @@ def test_alias_prompt_carries_a_breadcrumb_of_earlier_choices(monkeypatch):
         captured_prompt["value"] = prompt
         return "my-codex"
 
-    monkeypatch.setattr("code_helper.cli.menu.read_line", _read_line)
+    monkeypatch.setattr("codehelper.cli.menu.read_line", _read_line)
 
     assert main(["tui"]) == 0
     assert captured_prompt["value"].startswith("codex › ollama › model-x › ")
@@ -208,9 +208,9 @@ def test_literal_provider_skips_profile_screen(monkeypatch):
         seen.append(prompt() if callable(prompt) else prompt)
         return next(answers)
 
-    import code_helper.services.models_api as api
+    import codehelper.services.models_api as api
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     monkeypatch.setattr(
         api,
         "list_models",
@@ -228,8 +228,8 @@ def test_escape_from_alias_reprompts_the_model_when_agent_is_prescoped(monkeypat
     to fall back to on an alias Esc — the guard in `_run_add_provider` must
     fall back to the model menu instead of spinning on a screen that no
     longer renders (see the plan's Stage 1.4)."""
-    import code_helper.services.models_api as api
-    from code_helper.cli.menu import MenuCancelled
+    import codehelper.services.models_api as api
+    from codehelper.cli.menu import MenuCancelled
 
     answers = iter(
         ["add", "wrapper", "claude", "ollama", "__custom__", "__custom__", "quit"]
@@ -246,8 +246,8 @@ def test_escape_from_alias_reprompts_the_model_when_agent_is_prescoped(monkeypat
             raise MenuCancelled(hard=False)
         return value
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
-    monkeypatch.setattr("code_helper.cli.menu.read_line", _read_line)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.read_line", _read_line)
     monkeypatch.setattr(
         api,
         "list_models",
@@ -260,12 +260,12 @@ def test_escape_from_alias_reprompts_the_model_when_agent_is_prescoped(monkeypat
 
 @pytest.mark.integration
 def test_ctrl_c_from_tui_propagates_as_hard_cancel(monkeypatch):
-    from code_helper.cli.menu import MenuCancelled
+    from codehelper.cli.menu import MenuCancelled
 
     def _hard(*_args, **_kwargs):
         raise MenuCancelled(hard=True)
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _hard)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _hard)
     with pytest.raises(MenuCancelled) as exc_info:
         main(["tui"])
     assert exc_info.value.hard is True
@@ -288,7 +288,7 @@ def test_model_step_falls_back_to_known_models_when_discovery_is_unavailable(
         return next(answers)
 
     answers = iter(["add", "wrapper", "claude", "zai", "quit"])
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-first")
     monkeypatch.setattr("builtins.input", lambda _prompt: "known-wrapper")
 
@@ -312,7 +312,7 @@ def test_first_secret_token_creates_default_before_model(monkeypatch):
 
     assert main(["tui"]) == 0
 
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     paths = Paths.default()
     assert secrets.credential_for(paths, "zai", "default") == "sk-first"
@@ -347,7 +347,7 @@ def test_second_profile_names_both_keys_and_preserves_them(monkeypatch):
 
     assert main(["tui"]) == 0
 
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     assert secrets.load_credentials(Paths.default())["zai"] == {
         "personal": "sk-personal",
@@ -357,7 +357,7 @@ def test_second_profile_names_both_keys_and_preserves_them(monkeypatch):
 
 @pytest.mark.integration
 def test_replacing_selected_profile_changes_only_that_profile(monkeypatch):
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     paths = Paths.default()
     secrets.save_credential(paths, "zai", "sk-work", "work")
@@ -393,8 +393,8 @@ def test_litellm_uses_selected_profile_for_model_discovery(monkeypatch):
     chose this profile for this invocation, the same deliberate choice that
     already lets a profile win over the environment in ``resolve_token``.
     """
-    import code_helper.services.models_api as api
-    import code_helper.services.secrets as secrets
+    import codehelper.services.models_api as api
+    import codehelper.services.secrets as secrets
 
     secrets.save_credential(Paths.default(), "litellm", "sk-work", "work")
     captured: list[tuple[str, str]] = []
@@ -430,7 +430,7 @@ def test_t_rotates_token_for_secret_wrapper_from_main_screen(monkeypatch):
     key on the main screen. With glm installed (secret), `t` on its row opens
     the profile picker and a new token is written — the same end-to-end result
     the old `list → glm → profile` flow produced, just without the sub-screen."""
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     paths = Paths.default()
     secrets.save_credential(paths, "zai", "sk-old", "default")
@@ -469,7 +469,7 @@ def test_a_on_the_codex_row_scopes_add_to_codex(monkeypatch):
             return "__back__"
         return real_select(items, read_key=lambda: next(real_menu_keys), **kwargs)
 
-    import code_helper.cli.menu as menu
+    import codehelper.cli.menu as menu
 
     real_select = menu.select_from_menu
     monkeypatch.setattr(menu, "select_from_menu", _select)
@@ -489,7 +489,7 @@ def test_a_without_row_context_asks_what_to_add_first(monkeypatch):
     # The `add glm` setup must not hit a real getpass prompt: resolve_token
     # falls through to a prompt only when no env var / cached profile supplies
     # the token, and CI has neither. Mock it like test_cli_add.py does.
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     monkeypatch.setattr(
         secrets,
@@ -510,7 +510,7 @@ def test_a_without_row_context_asks_what_to_add_first(monkeypatch):
             return "__back__"
         return real_select(items, read_key=lambda: next(real_menu_keys), **kwargs)
 
-    import code_helper.cli.menu as menu
+    import codehelper.cli.menu as menu
 
     real_select = menu.select_from_menu
     monkeypatch.setattr(menu, "select_from_menu", _select)
@@ -533,7 +533,7 @@ def test_main_screen_has_add_agent_and_add_wrapper_action_rows(monkeypatch):
         ]
         return "quit"
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
 
     assert main(["tui"]) == 0
     assert "__action:add-agent" in captured["values"]
@@ -544,23 +544,23 @@ def test_main_screen_has_add_agent_and_add_wrapper_action_rows(monkeypatch):
 def test_add_agent_action_row_registers_a_new_agent(monkeypatch):
     """Entering the `+ add agent` row must run the Agent branch — collect a
     name/binary/description and persist a new user-defined agent."""
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     answers = iter(["__action:add-agent", "quit"])
     monkeypatch.setattr(
-        "code_helper.cli.menu.select_from_menu",
+        "codehelper.cli.menu.select_from_menu",
         lambda _items, **_kwargs: next(answers),
     )
     # The agent flow reads name, binary, description via read_line.
     monkeypatch.setattr(
-        "code_helper.cli.menu.read_line", lambda _prompt, **_kwargs: "myagent"
+        "codehelper.cli.menu.read_line", lambda _prompt, **_kwargs: "myagent"
     )
     monkeypatch.setattr(tui.TuiSession, "_notify", lambda self, text: None)
 
     assert main(["tui"]) == 0
 
-    from code_helper.services.agents import load_user_agents
-    from code_helper.services.paths import Paths
+    from codehelper.services.agents import load_user_agents
+    from codehelper.services.paths import Paths
 
     assert [a.name for a in load_user_agents(Paths.default())] == ["myagent"]
 
@@ -577,7 +577,7 @@ def test_add_wrapper_action_row_opens_the_unscoped_kind_picker(monkeypatch):
         seen.append(text)
         return next(answers)
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
 
     assert main(["tui"]) == 0
     assert "What do you want to add?" in seen
@@ -602,7 +602,7 @@ def test_list_handles_a_managed_wrapper_whose_marker_names_an_unknown_provider(
     wrapper = paths.script_for("orphaned-wrapper")
     wrapper.write_text(
         "#!/bin/sh\n"
-        "# code-helper: managed wrapper (agent=claude, provider=defunct, "
+        "# codehelper: managed wrapper (agent=claude, provider=defunct, "
         "shape=anthropic-env)\n"
         "exit 0\n"
     )
@@ -635,7 +635,7 @@ def test_provider_first_flow_through_a_real_pty(tmp_path):
     )
     master_fd, slave_fd = pty.openpty()
     child = subprocess.Popen(
-        [sys.executable, "-m", "code_helper", "tui"],
+        [sys.executable, "-m", "codehelper", "tui"],
         cwd=str(Path(__file__).resolve().parents[1]),
         env=environment,
         stdin=slave_fd,
@@ -720,7 +720,7 @@ def test_main_screen_default_wrapper_marker_through_a_real_pty(tmp_path):
         # the marker yet narrow enough that `_fit` truncation is exercised.
         fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         child = subprocess.Popen(
-            [sys.executable, "-m", "code_helper", "tui"],
+            [sys.executable, "-m", "codehelper", "tui"],
             cwd=str(Path(__file__).resolve().parents[1]),
             env=environment,
             stdin=slave_fd,
@@ -799,10 +799,10 @@ def test_set_default_confirmation_preview_is_visible_before_the_prompt(tmp_path)
     import termios
     import time
 
-    from code_helper.services.paths import Paths
-    from code_helper.services.spec import build_spec
-    from code_helper.services.state import set_default_wrapper
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.services.paths import Paths
+    from codehelper.services.spec import build_spec
+    from codehelper.services.state import set_default_wrapper
+    from codehelper.services.wrappers import install_wrapper
 
     environment = os.environ.copy()
     environment["HOME"] = str(tmp_path)
@@ -822,7 +822,7 @@ def test_set_default_confirmation_preview_is_visible_before_the_prompt(tmp_path)
 
     master_fd, slave_fd = pty.openpty()
     child = subprocess.Popen(
-        [sys.executable, "-m", "code_helper", "tui"],
+        [sys.executable, "-m", "codehelper", "tui"],
         cwd=str(Path(__file__).resolve().parents[1]),
         env=environment,
         stdin=slave_fd,
@@ -887,8 +887,8 @@ def test_set_default_confirmation_preview_is_visible_before_the_prompt(tmp_path)
 
 @pytest.mark.integration
 def test_tui_profile_screen_sets_active_and_persists_across_runs(monkeypatch):
-    import code_helper.services.secrets as secrets
-    from code_helper.services.state import active_selection
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "litellm", "sk-work", "work")
@@ -905,7 +905,7 @@ def test_tui_profile_screen_sets_active_and_persists_across_runs(monkeypatch):
         prompts.append(prompt)
         return "quit"
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
     assert prompts and prompts[0]().endswith("litellm/work")
     assert active_selection(paths) == ("litellm", "work")
@@ -913,8 +913,8 @@ def test_tui_profile_screen_sets_active_and_persists_across_runs(monkeypatch):
 
 @pytest.mark.integration
 def test_tui_tab_cycles_the_active_profile(monkeypatch):
-    import code_helper.services.secrets as secrets
-    from code_helper.services.state import active_selection, set_active_selection
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import active_selection, set_active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "litellm", "sk-work", "work")
@@ -937,9 +937,9 @@ def test_tui_tab_updates_profile_row_label_not_just_header(monkeypatch):
     per frame. Tab lives on the Profile screen now, so the label under test is
     that screen's slot strip — the invariant is unchanged.
     """
-    import code_helper.services.secrets as secrets
-    from code_helper.cli.menu import Section
-    from code_helper.services.state import set_active_selection
+    import codehelper.services.secrets as secrets
+    from codehelper.cli.menu import Section
+    from codehelper.services.state import set_active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "litellm", "sk-work", "work")
@@ -958,12 +958,12 @@ def test_tui_tab_updates_profile_row_label_not_just_header(monkeypatch):
         captured["after"] = strip.text()
         return "__back__"
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
     # The strip lists every provider/profile slot and marks none of them, so
     # what must change across a Tab is the ACTIVE selection it is rendered
     # from — pinned via state rather than by grepping the strip text.
-    from code_helper.services.state import active_selection
+    from codehelper.services.state import active_selection
 
     assert active_selection(paths) == ("litellm", "personal")
     assert captured["before"] and captured["after"]
@@ -978,8 +978,8 @@ def test_tui_tab_works_on_a_fresh_install_with_no_prior_profile_screen_visit(
     had been visited once, because the stored selection is only ever written
     there. Deliberately does NOT call set_active_selection — only cached
     credentials exist, matching a real first-time install."""
-    import code_helper.services.secrets as secrets
-    from code_helper.services.state import active_selection
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "zai", "sk-one", "axisrow")
@@ -1000,8 +1000,8 @@ def test_tui_tab_on_fresh_install_selects_the_first_profile(monkeypatch):
     must land on profile_names[0], not skip it to names[1]. Guards the
     off-by-one where the header shows names[0] but a real Tab selects
     names[1] (issue #23's _on_tab)."""
-    import code_helper.services.secrets as secrets
-    from code_helper.services.state import active_selection
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "zai", "sk-one", "axisrow")
@@ -1016,7 +1016,7 @@ def test_tui_tab_on_fresh_install_selects_the_first_profile(monkeypatch):
 
 @pytest.mark.integration
 def test_tui_tab_is_a_silent_noop_with_no_cached_profiles(monkeypatch):
-    from code_helper.services.state import load_state
+    from codehelper.services.state import load_state
 
     paths = Paths.default()
 
@@ -1032,8 +1032,8 @@ def test_tui_tab_falls_through_a_stale_stored_provider(monkeypatch):
     credentials were cleared after the selection was made) must not wedge Tab
     silently — it should fall through to a provider that still has cached
     profiles."""
-    import code_helper.services.secrets as secrets
-    from code_helper.services.state import active_selection, set_active_selection
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import active_selection, set_active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "zai", "sk-one", "work")
@@ -1049,7 +1049,7 @@ def test_tui_tab_falls_through_a_stale_stored_provider(monkeypatch):
 def test_tui_header_shows_active_profile_without_a_prior_profile_screen_visit(
     monkeypatch,
 ):
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     paths = Paths.default()
     secrets.save_credential(paths, "zai", "sk-one", "work")
@@ -1060,16 +1060,16 @@ def test_tui_header_shows_active_profile_without_a_prior_profile_screen_visit(
         prompts.append(prompt)
         return "quit"
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
     assert prompts and prompts[0]().endswith("zai/work")
 
 
 @pytest.mark.integration
 def test_tui_add_preselects_the_active_profile_first(monkeypatch):
-    import code_helper.services.models_api as api
-    import code_helper.services.secrets as secrets
-    from code_helper.services.state import set_active_selection
+    import codehelper.services.models_api as api
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import set_active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "litellm", "sk-work", "work")
@@ -1094,7 +1094,7 @@ def test_tui_add_preselects_the_active_profile_first(monkeypatch):
         seen_items.append(list(_items))
         return next(answers)
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     monkeypatch.setattr(
         api,
         "list_models",
@@ -1116,9 +1116,9 @@ def test_tui_add_preselects_the_active_profile_first(monkeypatch):
 
 @pytest.mark.integration
 def test_tui_stale_active_profile_falls_back_without_crashing(monkeypatch):
-    import code_helper.services.models_api as api
-    import code_helper.services.secrets as secrets
-    from code_helper.services.state import set_active_selection
+    import codehelper.services.models_api as api
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import set_active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "litellm", "sk-work", "work")
@@ -1144,7 +1144,7 @@ def test_tui_stale_active_profile_falls_back_without_crashing(monkeypatch):
         seen_items.append(list(_items))
         return next(answers)
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     monkeypatch.setattr(
         api,
         "list_models",
@@ -1177,7 +1177,7 @@ def test_tui_provider_list_offers_ollama_with_a_token(monkeypatch):
         seen_items.append(list(_items))
         return next(answers)
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
     # seen_items order: [0] main menu, [1] kind, [2] agent, [3] provider list.
     provider_list = seen_items[3]
@@ -1191,14 +1191,14 @@ def test_tui_provider_list_offers_ollama_with_a_token(monkeypatch):
 
 @pytest.mark.integration
 def test_tui_add_ollama_with_token_installs_a_secret_wrapper(monkeypatch):
-    import code_helper.services.models_api as api
+    import codehelper.services.models_api as api
 
     answers = iter(["add", "wrapper", "claude", "ollama:secret", "model-x", "quit"])
 
     def _select(_items, **_kwargs):
         return next(answers)
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     monkeypatch.setattr(
         api,
         "list_models",
@@ -1223,8 +1223,8 @@ def test_tui_profile_screen_finds_ollama_profiles_after_a_token_install(
     from the Profile screen / Tab even though ollama's registry entry stays
     auth="literal" (with_auth returns a runtime copy, never mutates
     PROVIDERS) — see _secret_providers in cli/tui.py."""
-    import code_helper.services.secrets as secrets
-    from code_helper.services.state import active_selection
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import active_selection
 
     paths = Paths.default()
     secrets.save_credential(paths, "ollama", "sk-ollama-proxy", "proxy")
@@ -1241,7 +1241,7 @@ def test_tui_profile_screen_finds_ollama_profiles_after_a_token_install(
 def test_main_screen_shows_wrappers_grouped_by_agent(monkeypatch):
     """The wrapper list IS the main screen now: no separate 'List' entry, and
     wrappers are grouped under non-selectable Section headers per agent."""
-    from code_helper.cli.menu import Section
+    from codehelper.cli.menu import Section
 
     captured: list[list] = []
 
@@ -1249,7 +1249,7 @@ def test_main_screen_shows_wrappers_grouped_by_agent(monkeypatch):
         captured.append(list(items))
         return "quit"
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
 
     main_items = captured[0]
@@ -1271,9 +1271,9 @@ def test_main_screen_shows_wrappers_grouped_by_agent(monkeypatch):
 def test_main_screen_marker_on_default_wrapper(monkeypatch):
     """A wrapper that is the saved default_wrapper for its agent is rendered
     with the `●` marker; every other wrapper is not."""
-    from code_helper.cli.menu import Section
-    from code_helper.services.state import default_wrapper, set_default_wrapper
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.cli.menu import Section
+    from codehelper.services.state import default_wrapper, set_default_wrapper
+    from codehelper.services.wrappers import install_wrapper
 
     paths = Paths.default()
     # A default must point to a real installed wrapper, not just a preset name.
@@ -1287,7 +1287,7 @@ def test_main_screen_marker_on_default_wrapper(monkeypatch):
         captured.append(list(items))
         return "quit"
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
 
     main_items = captured[0]
@@ -1305,8 +1305,8 @@ def test_main_screen_marker_on_default_wrapper(monkeypatch):
 def test_main_screen_enter_sets_default_wrapper(monkeypatch):
     """Enter on a wrapper row makes it the default for its agent; the marker
     moves on the next redraw."""
-    from code_helper.services.state import default_wrapper
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.services.state import default_wrapper
+    from codehelper.services.wrappers import install_wrapper
 
     paths = Paths.default()
     assert default_wrapper(paths, "claude") is None
@@ -1327,9 +1327,9 @@ def test_wrapper_named_add_agent_is_selectable_from_main_screen(monkeypatch):
     The action-row IDs collided with valid wrapper aliases (both `add-agent`
     and `add-wrapper` pass `validate_alias`), so selecting such a wrapper
     dispatched into the add-agent flow instead of the wrapper-selection path."""
-    from code_helper.services.spec import build_spec
-    from code_helper.services.state import default_wrapper
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.services.spec import build_spec
+    from codehelper.services.state import default_wrapper
+    from codehelper.services.wrappers import install_wrapper
 
     paths = Paths.default()
     install_wrapper(
@@ -1351,9 +1351,9 @@ def test_wrapper_named_add_wrapper_is_selectable_from_main_screen(monkeypatch):
     """Symmetric to the `add-agent` case: a wrapper literally named
     `add-wrapper` must be selectable as a wrapper, not shadowed by the
     `+ add wrapper` action row."""
-    from code_helper.services.spec import build_spec
-    from code_helper.services.state import default_wrapper
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.services.spec import build_spec
+    from codehelper.services.state import default_wrapper
+    from codehelper.services.wrappers import install_wrapper
 
     paths = Paths.default()
     install_wrapper(
@@ -1380,7 +1380,7 @@ def test_main_screen_enter_on_an_unmanaged_foreign_file_does_not_set_a_ghost_def
     A foreign (unmanaged) file sitting at a preset's alias path would let
     Enter write a default that the very next read silently rejects: a
     default that "sets" but never sticks, with no error shown either time."""
-    from code_helper.services.state import default_wrapper
+    from codehelper.services.state import default_wrapper
 
     paths = Paths.default()
     # A foreign executable at the "deepseek" preset's path — no ownership
@@ -1407,9 +1407,9 @@ def test_main_screen_groups_colliding_managed_wrapper_under_installed_agent(
     under the installed wrapper's agent — display grouping must agree with
     what Enter resolves (installed-first), or the same row would sit under
     one agent's section but launch another."""
-    from code_helper.cli.menu import Section
-    from code_helper.services.spec import build_spec
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.cli.menu import Section
+    from codehelper.services.spec import build_spec
+    from codehelper.services.wrappers import install_wrapper
 
     paths = Paths.default()
     # Install a codex wrapper named "glm" (collides with the claude preset).
@@ -1424,7 +1424,7 @@ def test_main_screen_groups_colliding_managed_wrapper_under_installed_agent(
         captured.append(list(items))
         return "quit"
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
 
     main_items = captured[0]
@@ -1467,7 +1467,7 @@ def test_main_screen_hint_advertises_token_key(monkeypatch):
         captured["hint"] = hint() if callable(hint) else hint
         return "quit"
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
     assert "· ? ·" in captured["hint"]
 
@@ -1484,7 +1484,7 @@ def test_main_screen_hint_names_a_as_add_not_edit(monkeypatch):
         captured["hint"] = hint() if callable(hint) else hint
         return "quit"
 
-    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
     assert "a add" in captured["hint"]
     assert "a/e/d" not in captured["hint"]
@@ -1504,7 +1504,7 @@ def _chip_rows(items, *, cursor_pair: int = 0, ansi: bool = True) -> dict[str, s
     ``cursor_pair`` is the index of the row the list cursor `>` sits on,
     matching ``menu._row_text``'s ``cursor_pair`` parameter.
     """
-    from code_helper.cli.menu import Section, _call_label
+    from codehelper.cli.menu import Section, _call_label
 
     return {
         entry[0].removeprefix("agent:"): (
@@ -1526,8 +1526,8 @@ def _capture_frames(monkeypatch, keys):
     contract instead of guessing — a test that always renders "as selected"
     is exactly how the two-cursor bug passed once already.
     """
-    import code_helper.cli.menu as menu
-    from code_helper.cli.menu import Section
+    import codehelper.cli.menu as menu
+    from codehelper.cli.menu import Section
 
     iterator = iter(keys)
     real_select = menu.select_from_menu
@@ -1567,7 +1567,7 @@ def test_chipset_shows_one_row_per_agent_with_native_applied(monkeypatch):
     frames = _capture_frames(monkeypatch, ["CANCEL"])
     assert main(["tui"]) == 0
 
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     rows = frames[0]
     # Regression pin, not a stale hardcode: the chipset is built from
@@ -1589,7 +1589,7 @@ def test_chipset_row_count_matches_agent_backends(monkeypatch):
     """The chipset's row set IS `_AGENT_BACKENDS`'s key set — stated as an
     explicit invariant rather than a hardcoded pair, so it stays true no
     matter how many launch-only agents `AGENTS` grows to."""
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     frames = _capture_frames(monkeypatch, ["CANCEL"])
     assert main(["tui"]) == 0
@@ -1606,7 +1606,7 @@ def test_chipset_cursor_moves_with_the_list_not_duplicates(monkeypatch):
     frames = _capture_frames(monkeypatch, ["DOWN", "CANCEL"])
     assert main(["tui"]) == 0
 
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     rows = frames[1]
     assert f"{tui._REVERSE}✓ native{tui._RESET}" in rows["codex"]
@@ -1617,14 +1617,14 @@ def test_chipset_cursor_moves_with_the_list_not_duplicates(monkeypatch):
 def test_chipset_has_no_cursor_when_list_cursor_is_on_a_wrapper_row(monkeypatch):
     """Parking the list cursor on a wrapper row below leaves BOTH agent rows
     with no reverse-video block — the chipset has no cursor of its own."""
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
 
     frames = _capture_frames(monkeypatch, ["DOWN", "DOWN", "DOWN", "CANCEL"])
     assert main(["tui"]) == 0
 
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     rows = frames[-1]
     assert tui._REVERSE not in rows["claude"]
@@ -1650,7 +1650,7 @@ def test_add_chip_present_and_never_marked_applied(monkeypatch):
     """Every agent row carries a trailing `+ add` action chip — including an
     agent with zero wrappers, which is the codex empty-state fix — and it is
     never rendered as applied, since it isn't a backend at all."""
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     frames = _capture_frames(monkeypatch, ["CANCEL"])
     assert main(["tui"]) == 0
@@ -1678,7 +1678,7 @@ def test_enter_on_the_add_chip_opens_add_scoped_to_that_agent(monkeypatch):
             return "__back__"
         return real_select(items, read_key=lambda: next(real_menu_keys), **kwargs)
 
-    import code_helper.cli.menu as menu
+    import codehelper.cli.menu as menu
 
     real_select = menu.select_from_menu
     monkeypatch.setattr(menu, "select_from_menu", _select)
@@ -1691,7 +1691,7 @@ def test_enter_on_the_add_chip_opens_add_scoped_to_that_agent(monkeypatch):
 @pytest.mark.integration
 def test_chips_include_claude_presets_without_wrapper_files(monkeypatch):
     """Claude presets are live backend choices, not PATH entries."""
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
     frames = _capture_frames(monkeypatch, ["CANCEL"])
@@ -1705,10 +1705,10 @@ def test_chips_include_claude_presets_without_wrapper_files(monkeypatch):
 
 @pytest.mark.integration
 def test_litellm_chip_reads_a_runtime_url_instead_of_marking_native(monkeypatch):
-    from code_helper.services.claude_settings import apply_switch
-    from code_helper.services.model import get_provider, with_base_url
-    from code_helper.services.spec import build_spec
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.services.claude_settings import apply_switch
+    from codehelper.services.model import get_provider, with_base_url
+    from codehelper.services.spec import build_spec
+    from codehelper.services.wrappers import install_wrapper
 
     paths = Paths.default()
     provider = with_base_url(get_provider("litellm"), "https://proxy.example")
@@ -1727,7 +1727,7 @@ def test_litellm_chip_reads_a_runtime_url_instead_of_marking_native(monkeypatch)
     frames = _capture_frames(monkeypatch, ["CANCEL"])
     assert main(["tui"]) == 0
 
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     assert f"{tui._BOLD}✓ glm52-litellm{tui._RESET}" in frames[0]["claude"]
     assert "✓ native" not in frames[0]["claude"]
@@ -1735,14 +1735,14 @@ def test_litellm_chip_reads_a_runtime_url_instead_of_marking_native(monkeypatch)
 
 @pytest.mark.integration
 def test_right_moves_the_chip_cursor_and_wraps(monkeypatch):
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
     # Presets are always present, even before their launcher files exist.
     frames = _capture_frames(monkeypatch, ["RIGHT", "RIGHT", "RIGHT", "CANCEL"])
     assert main(["tui"]) == 0
 
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     # cursor on native
     assert f"{tui._REVERSE}✓ native{tui._RESET}" in frames[0]["claude"]
@@ -1754,7 +1754,7 @@ def test_right_moves_the_chip_cursor_and_wraps(monkeypatch):
 @pytest.mark.integration
 def test_back_tab_moves_the_chip_cursor_like_left(monkeypatch):
     """Shift+Tab is the backwards twin of Left, not a second mechanism."""
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
 
@@ -1775,8 +1775,8 @@ def test_moving_the_chip_cursor_does_no_io(monkeypatch):
     """Applying happens on Enter, so Left/Right must be pure in-memory: the
     per-agent config reads happen ONCE per main-loop iteration, never once
     per keystroke. This is the pin on that caching discipline."""
-    import code_helper.cli.tui as tui
-    from code_helper.services.wrappers import install_wrapper
+    import codehelper.cli.tui as tui
+    from codehelper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
 
@@ -1808,13 +1808,13 @@ def test_moving_the_chip_cursor_does_no_io(monkeypatch):
 def test_chip_cursor_is_independent_per_agent(monkeypatch):
     """Each agent row remembers its own chip, so moving away and back does
     not reset where the user was."""
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
     frames = _capture_frames(monkeypatch, ["RIGHT", "DOWN", "UP", "CANCEL"])
     assert main(["tui"]) == 0
 
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     assert f"{tui._REVERSE}deepseek{tui._RESET}" in frames[1]["claude"]
     assert (
@@ -1834,8 +1834,8 @@ def test_enter_applies_the_second_wrapper_sharing_a_provider_with_the_first(
     unreachable through the chipset. Only the native chip's applied read is
     exact (`applied is None`) and still short-circuits; a wrapper chip must
     always re-apply."""
-    from code_helper.services.spec import build_spec
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.services.spec import build_spec
+    from codehelper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
     second = build_spec(
@@ -1845,7 +1845,7 @@ def test_enter_applies_the_second_wrapper_sharing_a_provider_with_the_first(
 
     import dataclasses
 
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     # Pretend "glm" (the first zai wrapper) is the one currently live —
     # _chip_is_applied will then also report "glm-air" as applied, since
@@ -1879,7 +1879,7 @@ def test_enter_applies_the_second_wrapper_sharing_a_provider_with_the_first(
 def test_left_right_are_a_no_op_on_a_wrapper_row(monkeypatch):
     """The chip cursor belongs to agent rows; on a wrapper row the keys do
     nothing rather than moving some other row's cursor."""
-    from code_helper.services.wrappers import install_wrapper
+    from codehelper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
     # DOWN twice lands past both agent rows, onto the wrapper list.
@@ -1894,8 +1894,8 @@ def test_enter_on_an_agent_row_applies_the_highlighted_chip(monkeypatch):
     """The TUI mirrors the CLI: Enter dispatches into the same handler with
     the same request the command line would build, rather than writing the
     config itself."""
-    import code_helper.cli.tui as tui
-    from code_helper.services.wrappers import install_wrapper
+    import codehelper.cli.tui as tui
+    from codehelper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
 
@@ -1915,7 +1915,7 @@ def test_enter_on_an_agent_row_applies_the_highlighted_chip(monkeypatch):
 def test_claude_chip_request_is_a_noninteractive_hot_apply():
     import argparse
 
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     request = tui.TuiSession(
         argparse.Namespace(dry_run=False, debug=False)
@@ -1926,7 +1926,7 @@ def test_claude_chip_request_is_a_noninteractive_hot_apply():
 
 @pytest.mark.integration
 def test_enter_on_deepseek_chip_hot_applies_without_confirmation(monkeypatch):
-    from code_helper.services.paths import Paths
+    from codehelper.services.paths import Paths
 
     _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
@@ -1943,7 +1943,7 @@ def test_enter_on_deepseek_chip_hot_applies_without_confirmation(monkeypatch):
 @pytest.mark.integration
 def test_enter_on_an_already_applied_chip_does_not_rewrite(monkeypatch):
     """A selected native chip is a silent no-op with no config write."""
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     applied = []
     monkeypatch.setattr(
@@ -1957,8 +1957,8 @@ def test_enter_on_an_already_applied_chip_does_not_rewrite(monkeypatch):
 
 @pytest.mark.integration
 def test_enter_on_the_selected_deepseek_chip_is_a_silent_noop(monkeypatch):
-    from code_helper.services.claude_settings import apply_switch
-    from code_helper.services.wrappers import get_spec
+    from codehelper.services.claude_settings import apply_switch
+    from codehelper.services.wrappers import get_spec
 
     spec = get_spec("deepseek")
     apply_switch(
@@ -1973,7 +1973,7 @@ def test_enter_on_the_selected_deepseek_chip_is_a_silent_noop(monkeypatch):
     frames = _capture_frames(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     # Frame 1 is after Right, frame 2 after the no-op Enter.  The same chip
     # stays selected; Enter must not reset or advance the chip cursor.
@@ -1987,12 +1987,12 @@ def test_a_removed_wrapper_disappears_from_the_strip(monkeypatch):
     """Chips are rebuilt once per iteration, so a wrapper removed mid-session
     is gone on the next frame — and a chip cursor left past the end of the
     shorter strip is clamped, not left dangling."""
-    from code_helper.services.wrappers import install_wrapper, remove_wrapper
+    from codehelper.services.wrappers import install_wrapper, remove_wrapper
 
     paths = Paths.default()
     install_wrapper(paths, "glm", token="test-token")
 
-    import code_helper.cli.menu as menu
+    import codehelper.cli.menu as menu
 
     frames: list[dict[str, str]] = []
     real_select = menu.select_from_menu
@@ -2014,7 +2014,7 @@ def test_a_removed_wrapper_disappears_from_the_strip(monkeypatch):
     monkeypatch.setattr(menu, "select_from_menu", _select)
     assert main(["tui"]) == 0
 
-    import code_helper.cli.tui as tui
+    import codehelper.cli.tui as tui
 
     assert f"{tui._REVERSE}deepseek{tui._RESET}" in frames[1]["claude"]
 
@@ -2027,7 +2027,7 @@ def test_every_main_screen_key_survives_translation():
     single-character binding the main screen declares against the translator
     so the two can never drift apart again.
     """
-    from code_helper.cli.menu import _translate_char
+    from codehelper.cli.menu import _translate_char
 
     # Mirrors the `keys` table in TuiSession.run.
     for key in ("a", "p", "s", "?", "e", "d"):

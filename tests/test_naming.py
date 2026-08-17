@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import pytest
 
-from code_helper.errors import CodeHelperError
-from code_helper.services.naming import (
+from codehelper.errors import CodeHelperError
+from codehelper.services.naming import (
     MAX_ALIAS_LENGTH,
     MAX_BASE_URL_LENGTH,
     RESERVED_ALIASES,
@@ -22,7 +22,7 @@ from code_helper.services.naming import (
     validate_alias,
     validate_base_url,
 )
-from code_helper.services.paths import Paths
+from codehelper.services.paths import Paths
 
 
 @pytest.mark.unit
@@ -127,11 +127,11 @@ def test_reserved_aliases_cover_every_agent_binary():
     """RESERVED_ALIASES is derived from AGENTS — a future agent can't be forgotten.
 
     Regression pin: `RESERVED_ALIASES` used to be a hand-maintained literal of
-    just `{"code-helper", "claude", "codex"}`. Deriving it from the registry
+    just `{"codehelper", "claude", "codex"}`. Deriving it from the registry
     means a wrapper named `opencode` (etc.) is rejected without anyone having
     to remember to update this module when `AGENTS` grows.
     """
-    from code_helper.services.model import AGENTS
+    from codehelper.services.model import AGENTS
 
     assert {a.binary for a in AGENTS} <= RESERVED_ALIASES
 

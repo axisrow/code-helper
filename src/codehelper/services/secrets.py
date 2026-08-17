@@ -9,7 +9,7 @@ keeps outside a generated wrapper script — and it is a CACHE, not a session:
   ``credentials.json`` does NOT break an installed wrapper; it only means the
   next install/discovery prompts again.
 - There is no "logged in" state, no provider round-trip to validate a token, no
-  command that "connects" code-helper to a service. ``code-helper`` configures
+  command that "connects" codehelper to a service. ``codehelper`` configures
   agents and aliases; it does not authenticate with anything.
 - The file is written ``0o600`` (owner-only) and read by no one but this module.
 
@@ -22,7 +22,7 @@ shape is read as ``default`` for backward compatibility.
 Provider-specific key FORMAT validation (the archived project's strict
 ``<32-hex>.<16-alnum>`` Z.ai regex) is deliberately NOT reproduced here — this
 project has no reason to know what a valid Z.ai (or any other provider's) key
-looks like. Instead, :func:`code_helper.services.wrappers.render_script`
+looks like. Instead, :func:`codehelper.services.wrappers.render_script`
 neutralizes shell metacharacters in EVERY interpolated value via POSIX
 single-quoting, so an arbitrary (even adversarial) token string can never
 break out of the generated script — see the injection tests in
@@ -39,9 +39,9 @@ import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
-from code_helper.backends._atomic import atomic_write
-from code_helper.errors import CodeHelperError
-from code_helper.services.paths import Paths
+from codehelper.backends._atomic import atomic_write
+from codehelper.errors import CodeHelperError
+from codehelper.services.paths import Paths
 
 try:
     import fcntl
@@ -92,7 +92,7 @@ def load_credentials(paths: Paths) -> dict[str, dict[str, str]]:
 
     **Never raises.** A missing, unreadable, malformed, or oddly-shaped file is
     equivalent to "no cached credentials" — the same never-fails-on-its-way-out
-    contract :func:`code_helper.services.models_api.list_models` follows,
+    contract :func:`codehelper.services.models_api.list_models` follows,
     because this is read on the optional discovery path where the absence of a
     token is a normal state, not an error. Non-string values are skipped (not
     fatal): a stray entry must not cost the user the rest of the cache.
@@ -153,7 +153,7 @@ def valid_active_profile(paths: Paths, provider_name: str) -> str | None:
     selected for. Lives here (not in ``state.py``) because it needs
     ``profile_names``, and ``state.py`` must not depend on this module.
     """
-    from code_helper.services.state import active_selection
+    from codehelper.services.state import active_selection
 
     selection = active_selection(paths)
     if selection is None:
@@ -260,7 +260,7 @@ def _locked_update(paths: Paths):
     three writers cannot drift on how they serialize.
 
     Empirically (see ``tests/test_credentials_concurrency.py``), two
-    concurrent ``code-helper`` invocations racing this window reliably lose
+    concurrent ``codehelper`` invocations racing this window reliably lose
     one side's update — not a rare, hard-to-hit interleaving, but one that
     reproduced on ordinary GIL-scheduled threads with no forced delay. An
     ``fcntl.flock`` held for the read-modify-write window closes that window:
@@ -489,7 +489,7 @@ def resolve_token(
         provider_name: Key into ``credentials.json`` (a provider name, not a
             wrapper name).
         base_url_policy: The resolved provider's
-            :class:`~code_helper.services.model.BaseUrlPolicy` value (as a
+            :class:`~codehelper.services.model.BaseUrlPolicy` value (as a
             plain string — this module stays free of the ``model`` import,
             same reasoning as :func:`token_for_discovery`). Defaults to
             ``"fixed"`` so every pre-existing caller keeps the original
@@ -563,7 +563,7 @@ def token_for_discovery(
 ) -> str:  # type: ignore[no-untyped-def]
     """A token for an OPTIONAL listing request: explicit profile → env → default.
 
-    Mirrors :func:`code_helper.services.models_api.list_models`'s contract: it
+    Mirrors :func:`codehelper.services.models_api.list_models`'s contract: it
     never prompts and never raises. An empty return is legitimate — the listing
     just goes out unauthenticated (as it did before caching existed) and the
     caller falls back to manual model entry. Returns ``""`` for any non-secret
@@ -573,7 +573,7 @@ def token_for_discovery(
     (default ``os.environ``), so a test can prove "no env var" without
     monkeypatching the real process environment.
 
-    ``provider`` is a :class:`code_helper.services.model.Provider`; typed loose
+    ``provider`` is a :class:`codehelper.services.model.Provider`; typed loose
     to avoid importing the model module here (``secrets`` → ``model`` would be a
     fine edge, but this helper reads only three attributes and staying free of
     the import keeps the dependency arrow one-directional at call sites).

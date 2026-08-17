@@ -27,9 +27,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from code_helper.errors import CodeHelperError
-from code_helper.services.model import ConfigShape, Provider
-from code_helper.services.spec import WrapperSpec
+from codehelper.errors import CodeHelperError
+from codehelper.services.model import ConfigShape, Provider
+from codehelper.services.spec import WrapperSpec
 
 __all__ = [
     "render_script",
@@ -49,7 +49,7 @@ __all__ = [
 #: ``is_managed`` tells a file this tool wrote from a file it merely found —
 #: see ``wrappers.py``. Kept as a comment so it rides along if the script is
 #: copied, and so it costs no runtime behaviour.
-MARKER_PREFIX = "# code-helper: managed wrapper"
+MARKER_PREFIX = "# codehelper: managed wrapper"
 
 
 def _shell_single_quote(value: str) -> str:
@@ -327,7 +327,7 @@ def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
 #: has no key at all — treated the same as "not (self-)provably ours", exactly
 #: like a markerless pre-marker wrapper before the byte-match migration path.
 CATALOG_MANAGED_BY_KEY = "managed_by"
-CATALOG_MANAGED_BY_VALUE = "code-helper"
+CATALOG_MANAGED_BY_VALUE = "codehelper"
 
 
 def openai_catalog_body(spec: WrapperSpec) -> str:

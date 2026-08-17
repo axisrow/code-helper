@@ -1,4 +1,4 @@
-"""Tests for ``code-helper add`` in both modes, and ``list agents|providers|matrix``.
+"""Tests for ``codehelper add`` in both modes, and ``list agents|providers|matrix``.
 
 Everything runs through ``main([...])`` so the argparse wiring is exercised too,
 not just the handler.
@@ -10,8 +10,8 @@ import stat
 
 import pytest
 
-from code_helper.__main__ import main
-from code_helper.services.paths import Paths
+from codehelper.__main__ import main
+from codehelper.services.paths import Paths
 
 
 def _body(tmp_path, name: str) -> str:
@@ -37,7 +37,7 @@ def test_add_agent_provider_model_creates_wrapper(tmp_path):
     alias = "glm-5-codex"  # alias derived from model + agent
     assert f"exec codex --profile '{alias}' \"$@\"" in _body(tmp_path, alias)
     config = paths.codex_config_for(alias).read_text(encoding="utf-8")
-    assert config.startswith("# code-helper: managed wrapper")
+    assert config.startswith("# codehelper: managed wrapper")
     assert 'model = "glm-5:cloud"' in config
     assert 'base_url = "http://127.0.0.1:11434/v1/"' in config
     assert 'wire_api = "responses"' in config
@@ -136,7 +136,7 @@ def test_launch_only_agent_incompatible_with_zai(tmp_path, capsys):
 @pytest.mark.integration
 def test_incompatible_pairing_never_prompts_for_a_token(tmp_path, monkeypatch):
     """Validation must happen BEFORE any interactive secret prompt."""
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     def _explode(*a, **kw):  # pragma: no cover - must not run
         raise AssertionError("must not prompt for a token on an invalid combination")
@@ -380,7 +380,7 @@ def test_add_auth_applies_to_the_constructor_form_only(tmp_path, capsys):
 
 @pytest.mark.integration
 def test_add_auth_rejects_an_unknown_value(tmp_path, capsys):
-    # argparse's own `choices` gate rejects this before code-helper ever sees
+    # argparse's own `choices` gate rejects this before codehelper ever sees
     # it — SystemExit(2), the same as any other invalid-choice flag, not a
     # CodeHelperError main() would turn into exit code 1.
     with pytest.raises(SystemExit) as exc_info:
@@ -403,7 +403,7 @@ def test_add_auth_rejects_an_unknown_value(tmp_path, capsys):
 @pytest.mark.integration
 def test_bad_base_url_never_prompts_for_a_token(tmp_path, monkeypatch):
     """validate-before-prompt, pinned for the NEW validation channel."""
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     def _explode(*a, **kw):  # pragma: no cover - must not run
         raise AssertionError("must not prompt for a token on an invalid base URL")
@@ -431,7 +431,7 @@ def test_list_models_uses_the_runtime_base_url(tmp_path, monkeypatch, capsys):
 
     Also pins that the discovery token reaches ``list_models`` (from env here)
     — the bug #15 point 1: discovery never sent a token at all."""
-    import code_helper.services.models_api as models_api
+    import codehelper.services.models_api as models_api
 
     seen = {}
 
@@ -698,8 +698,8 @@ def test_list_shows_ad_hoc_wrappers(tmp_path, capsys):
 
 @pytest.mark.integration
 def test_list_models_prints_and_writes_nothing(tmp_path, monkeypatch):
-    import code_helper.services.models_api as api
-    from code_helper.services.models_api import ModelListResult
+    import codehelper.services.models_api as api
+    from codehelper.services.models_api import ModelListResult
 
     monkeypatch.setattr(
         api, "list_models", lambda p, **kw: ModelListResult(("a:1", "b:2"), "url")
@@ -718,7 +718,7 @@ def test_list_models_prints_and_writes_nothing(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_add_caches_a_prompt_typed_token(tmp_path, monkeypatch):
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     def _fake_resolve_token(**kwargs):
         return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
@@ -746,7 +746,7 @@ def test_add_caches_a_prompt_typed_token(tmp_path, monkeypatch):
 def test_add_uses_the_selected_profile_even_when_env_has_another_token(
     tmp_path, monkeypatch
 ):
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     paths = Paths.from_home(tmp_path)
     secrets.save_credential(paths, "zai", "sk-work", "work")
@@ -759,7 +759,7 @@ def test_add_uses_the_selected_profile_even_when_env_has_another_token(
 
 @pytest.mark.integration
 def test_add_profile_caches_a_prompt_typed_token(tmp_path, monkeypatch):
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     def _fake_resolve_token(**_kwargs):
         return secrets.ResolvedToken("sk-personal", secrets.SOURCE_PROMPT)
@@ -778,7 +778,7 @@ def test_profile_selects_the_default_alias_and_is_visible_in_list(
     tmp_path, monkeypatch, capsys
 ):
     """A profile is durable wrapper metadata, not an invisible install input."""
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     paths = Paths.from_home(tmp_path)
     secrets.save_credential(paths, "zai", "sk-axisrow", "axisrow")
@@ -815,7 +815,7 @@ def test_suggest_alias_includes_the_agent_when_a_profile_is_set():
     ``glm-5`` for both ``codex`` and ``claude`` with the same profile
     silently suggested the identical wrapper name for both.
     """
-    from code_helper.services.spec import suggest_alias
+    from codehelper.services.spec import suggest_alias
 
     codex_alias = suggest_alias("glm-5:cloud", "codex", "axisrow")
     claude_alias = suggest_alias("glm-5:cloud", "claude", "axisrow")
@@ -866,7 +866,7 @@ def test_add_env_sourced_install_invalidates_a_stale_cached_token(
     wrapper that currently has "new" — reverting a rotated/revoked
     credential with no confirmation and no warning.
     """
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     paths = Paths.from_home(tmp_path)
 
@@ -924,7 +924,7 @@ def test_add_invalidates_stale_cache_even_on_a_byte_identical_env_reinstall(
     (byte-identical), so ``wrote=False`` — and the gate must still catch the
     staleness, or a later env-free run resurrects the stale value.
     """
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     paths = Paths.from_home(tmp_path)
 
@@ -959,7 +959,7 @@ def test_add_does_not_cache_a_prompt_typed_token_when_the_install_is_refused(
     ``--force``, no TTY to confirm). ``edit-token`` already gets this right
     (caches only after ``wrote`` is truthy); ``add`` must match it.
     """
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     paths = Paths.from_home(tmp_path)
@@ -1000,7 +1000,7 @@ def test_add_caches_a_prompt_typed_token_on_a_byte_identical_noop_reinstall(
     the re-typed token happens to match what's already installed byte-for-byte
     (``wrote=False``, not a refusal) — the fix must not overcorrect into never
     caching when ``wrote`` is falsy for this reason instead of a refusal."""
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     monkeypatch.delenv("LITELLM_API_KEY", raising=False)
     paths = Paths.from_home(tmp_path)
@@ -1034,7 +1034,7 @@ def test_add_caches_a_prompt_typed_token_on_a_byte_identical_noop_reinstall(
 
 @pytest.mark.integration
 def test_add_dry_run_never_writes_the_credentials_file(tmp_path, monkeypatch):
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     def _fake_resolve_token(**kwargs):
         return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
@@ -1064,7 +1064,7 @@ def test_add_warns_when_bin_dir_is_not_on_path(tmp_path, monkeypatch, capsys):
     """A real (non-dry-run) install warns on stderr when ``paths.bin_dir``
     isn't on ``PATH`` — otherwise the freshly-installed alias just gives
     ``command not found`` with no clue why."""
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     def _fake_resolve_token(**kwargs):
         return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
@@ -1096,7 +1096,7 @@ def test_add_dry_run_does_not_print_a_path_warning(tmp_path, monkeypatch, capsys
     """``install_wrapper`` returns True under ``dry_run`` too ("would write"),
     so the PATH check must not fire off that truthy-but-nothing-written
     signal — a dry run must not warn about a file it never created."""
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     def _fake_resolve_token(**kwargs):
         return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
@@ -1127,7 +1127,7 @@ def test_add_reuses_a_cached_token_without_prompting(tmp_path, monkeypatch):
     """A token cached by a previous add is picked up silently on the next one
     — for a FIXED-base_url_policy provider (zai), where the address never
     varies and the cache is safe to reuse across installs."""
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
     paths = Paths.from_home(tmp_path)
@@ -1136,7 +1136,7 @@ def test_add_reuses_a_cached_token_without_prompting(tmp_path, monkeypatch):
     def _explode(_prompt):  # pragma: no cover - must not run
         raise AssertionError("must not prompt when the cache already has the token")
 
-    monkeypatch.setattr("code_helper.services.secrets.getpass.getpass", _explode)
+    monkeypatch.setattr("codehelper.services.secrets.getpass.getpass", _explode)
     code = main(
         [
             "add",
@@ -1162,7 +1162,7 @@ def test_add_ignores_a_cached_token_for_a_runtime_address_provider_on_install(
     the same provider name — the install-path twin of
     ``test_list_models_ignores_a_cached_token_for_a_runtime_address_provider``
     (discovery path). Falls through to the prompt instead of the stale cache."""
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     monkeypatch.delenv("LITELLM_API_KEY", raising=False)
     paths = Paths.from_home(tmp_path)
@@ -1210,7 +1210,7 @@ def test_add_reuses_a_named_profile_across_two_different_base_urls(
     named profiles unusable for ``litellm`` — a regression this project
     shipped in review and reverted by explicit decision.
     """
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     monkeypatch.delenv("LITELLM_API_KEY", raising=False)
     paths = Paths.from_home(tmp_path)
@@ -1219,7 +1219,7 @@ def test_add_reuses_a_named_profile_across_two_different_base_urls(
     def _explode(_prompt):  # pragma: no cover - must not run
         raise AssertionError("must not prompt when the named profile's cache has it")
 
-    monkeypatch.setattr("code_helper.services.secrets.getpass.getpass", _explode)
+    monkeypatch.setattr("codehelper.services.secrets.getpass.getpass", _explode)
 
     code_a = main(
         [
@@ -1275,8 +1275,8 @@ def test_list_models_ignores_a_cached_token_for_a_runtime_address_provider(
     see ``token_for_discovery``'s ``base_url_policy`` gate in secrets.py.
     Through the real CLI path (not a fake ``token_for_discovery``), proving the
     substitution actually reaches discovery for a REQUIRED provider."""
-    import code_helper.services.models_api as models_api
-    import code_helper.services.secrets as secrets
+    import codehelper.services.models_api as models_api
+    import codehelper.services.secrets as secrets
 
     paths = Paths.from_home(tmp_path)
     secrets.save_credential(paths, "litellm", "sk-cached")
@@ -1316,9 +1316,9 @@ def test_list_models_does_not_use_the_implicit_active_profile_for_a_custom_base_
     authorize explicitly (``--profile`` or env), so the discovery token stays
     empty. Guards the trust-boundary hole the active-profile injection opened
     (parser.py)."""
-    import code_helper.services.models_api as models_api
-    import code_helper.services.secrets as secrets
-    from code_helper.services.state import set_active_selection
+    import codehelper.services.models_api as models_api
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import set_active_selection
 
     paths = Paths.from_home(tmp_path)
     # A named profile is cached AND is the persisted active selection.
@@ -1358,8 +1358,8 @@ def test_list_models_uses_a_named_profile_for_a_runtime_address_provider(
     caller named the profile explicitly — mirroring ``resolve_token``'s same
     named/unnamed asymmetry on the discovery path (``token_for_discovery``,
     secrets.py). Deliberate, per issue #19."""
-    import code_helper.services.models_api as models_api
-    import code_helper.services.secrets as secrets
+    import codehelper.services.models_api as models_api
+    import codehelper.services.secrets as secrets
 
     paths = Paths.from_home(tmp_path)
     secrets.save_credential(paths, "litellm", "sk-profile-work", "work")
@@ -1398,7 +1398,7 @@ def test_edit_token_updates_the_cache(tmp_path, monkeypatch):
     assert main(["add", "glm"]) == 0
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
 
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     # _handle_edit_token does `import getpass` locally and calls
     # getpass.getpass directly (never resolve_token) — patch that exact path.
@@ -1418,7 +1418,7 @@ def test_edit_token_caches_even_on_a_byte_identical_noop(tmp_path, monkeypatch):
     assert main(["add", "glm"]) == 0
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
 
-    import code_helper.services.secrets as secrets
+    import codehelper.services.secrets as secrets
 
     paths = Paths.from_home(tmp_path)
     # The install above resolved its token from ZAI_API_KEY (not a prompt), so
@@ -1449,8 +1449,8 @@ def test_add_without_profile_picks_up_the_active_profile(tmp_path, monkeypatch):
     patching getpass to explode: if the active profile's cached token were NOT
     reused, ``add`` would have to prompt and the test would fail.
     """
-    import code_helper.services.secrets as secrets
-    from code_helper.services.state import set_active_selection
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import set_active_selection
 
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
     paths = Paths.from_home(tmp_path)
@@ -1460,7 +1460,7 @@ def test_add_without_profile_picks_up_the_active_profile(tmp_path, monkeypatch):
     def _explode(_prompt):  # pragma: no cover - must not run
         raise AssertionError("must not prompt when the active profile has a token")
 
-    monkeypatch.setattr("code_helper.services.secrets.getpass.getpass", _explode)
+    monkeypatch.setattr("codehelper.services.secrets.getpass.getpass", _explode)
 
     code = main(
         [
@@ -1487,8 +1487,8 @@ def test_add_explicit_profile_wins_over_the_active_profile(tmp_path, monkeypatch
 
     The active profile is invisible state; the flag must always win over it.
     """
-    import code_helper.services.secrets as secrets
-    from code_helper.services.state import set_active_selection
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import set_active_selection
 
     monkeypatch.delenv("LITELLM_API_KEY", raising=False)
     paths = Paths.from_home(tmp_path)
@@ -1499,7 +1499,7 @@ def test_add_explicit_profile_wins_over_the_active_profile(tmp_path, monkeypatch
     def _explode(_prompt):  # pragma: no cover - must not run
         raise AssertionError("must not prompt when the explicit profile has a token")
 
-    monkeypatch.setattr("code_helper.services.secrets.getpass.getpass", _explode)
+    monkeypatch.setattr("codehelper.services.secrets.getpass.getpass", _explode)
 
     code = main(
         [
@@ -1532,8 +1532,8 @@ def test_list_shows_the_active_profile_header(tmp_path, capsys):
     A user coming from the TUI can see, from the CLI, which profile is active
     without re-entering the menu.
     """
-    import code_helper.services.secrets as secrets
-    from code_helper.services.state import set_active_selection
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import set_active_selection
 
     paths = Paths.from_home(tmp_path)
     secrets.save_credential(paths, "litellm", "sk-work", "work")

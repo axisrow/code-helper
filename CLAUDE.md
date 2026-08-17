@@ -2,7 +2,7 @@
 
 Guidance for Claude Code when working in this repository.
 
-`code-helper` — pip-installable Python CLI that generates bash wrapper scripts in `~/.local/bin`, each pointing a coding agent (Claude Code, Codex, and every other CLI integration `ollama launch` supports — OpenCode, Copilot CLI, Droid, Cline, …) at a model backend (Ollama, Z.ai, LiteLLM, …) under a chosen name. A wrapper is a resolved point in **agent × provider × model**.
+`codehelper` — pip-installable Python CLI that generates bash wrapper scripts in `~/.local/bin`, each pointing a coding agent (Claude Code, Codex, and every other CLI integration `ollama launch` supports — OpenCode, Copilot CLI, Droid, Cline, …) at a model backend (Ollama, Z.ai, LiteLLM, …) under a chosen name. A wrapper is a resolved point in **agent × provider × model**.
 
 ## Package Manager
 
@@ -16,7 +16,7 @@ Guidance for Claude Code when working in this repository.
 | Run tests | `pytest -q` |
 | Lint | `ruff check .` |
 | Format | `ruff format .` |
-| CLI entry points | `code-helper add [<preset>] \| add --agent A --provider P --model M \| list [wrappers\|agents\|providers\|matrix] \| edit-token [<name>] \| set-default [...] \| switch [<provider>\|--from-wrapper NAME] \| tui` |
+| CLI entry points | `codehelper add [<preset>] \| add --agent A --provider P --model M \| list [wrappers\|agents\|providers\|matrix] \| edit-token [<name>] \| set-default [...] \| switch [<provider>\|--from-wrapper NAME] \| tui` |
 
 ## Architecture
 
@@ -54,7 +54,7 @@ Guidance for Claude Code when working in this repository.
 - One renderer per `ConfigShape` in `_RENDERERS`; "incompatible" (`resolve_shape`) and "not implemented yet" (`render_script`) are distinct errors — never collapse them.
 - Every value interpolated into a generated script goes through `_shell_single_quote`/`toml_string`; the only bare interpolation is `agent.binary`/`provider.token_env_var`, both guarded by an import-time regex.
 - `build_spec` validates compatibility and alias **before** any token prompt — a bad combination must never trigger interactive auth.
-- Every generated script carries an ownership marker (`# code-helper: managed wrapper …`); overwriting a foreign file requires `--force` or interactive confirm; `--dry-run` never prompts or writes.
+- Every generated script carries an ownership marker (`# codehelper: managed wrapper …`); overwriting a foreign file requires `--force` or interactive confirm; `--dry-run` never prompts or writes.
 - `--dry-run` never writes any file.
 - TUI is a mirror of the CLI, not a second implementation — every menu item dispatches into the same `_handle_*` functions; no duplicated validation or state-changing service calls.
 - The TUI main screen is a **chipset**: one selectable row per agent, each a horizontal strip of `native` + that agent's installed wrappers. Up/Down moves rows, Left/Right (and Shift+Tab) moves the chip cursor with NO I/O, Enter applies. Three chip states are distinct: `[applied]`, `<highlighted>`, `( plain )`.

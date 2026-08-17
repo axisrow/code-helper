@@ -29,8 +29,8 @@ import sys
 
 import pytest
 
-import code_helper.backends._atomic as atomic_mod
-from code_helper.backends._atomic import atomic_write
+import codehelper.backends._atomic as atomic_mod
+from codehelper.backends._atomic import atomic_write
 
 
 class _Boom(RuntimeError):

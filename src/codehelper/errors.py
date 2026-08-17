@@ -8,7 +8,7 @@ traceback unless ``--debug`` is passed — and is called from every dispatch sit
 them.
 
 It lives in its own module (not in ``__main__``) so that the class object is
-identical regardless of how the package is invoked — ``python -m code_helper``
+identical regardless of how the package is invoked — ``python -m codehelper``
 runs ``__main__.py`` as the ``__main__`` module, which would otherwise create a
 *second* ``CodeHelperError`` distinct from the one imported by
 ``backends``/``services``. That identity split would defeat the single

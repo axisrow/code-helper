@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from code_helper.cli.menu import (
+from codehelper.cli.menu import (
     MenuCancelled,
     Section,
     _fit,
@@ -511,7 +511,7 @@ def test_translate_t_and_T_return_token():
     # `t`/`T` is the per-row token-rotation key on the main screen (#29). It
     # maps to a caller-side hook name just like Tab, so a menu without on_token
     # ignores it instead of doing something surprising.
-    from code_helper.cli.menu import _translate
+    from codehelper.cli.menu import _translate
 
     assert _translate("t", lambda _t: None) == "TOKEN"
     assert _translate("T", lambda _t: None) == "TOKEN"

@@ -40,10 +40,10 @@ import threading
 
 import pytest
 
-from code_helper.backends._atomic import atomic_write
-from code_helper.services import secrets as secrets_module
-from code_helper.services.paths import Paths
-from code_helper.services.secrets import (
+from codehelper.backends._atomic import atomic_write
+from codehelper.services import secrets as secrets_module
+from codehelper.services.paths import Paths
+from codehelper.services.secrets import (
     DEFAULT_PROFILE,
     invalidate_cached_credential,
     load_credentials,
@@ -370,7 +370,7 @@ def test_locked_update_falls_back_to_unlocked_when_fcntl_is_unavailable(
     ``fcntl`` to ``None`` (simulating a non-POSIX platform) must still let a
     normal, single-threaded ``save_credential`` succeed.
     """
-    monkeypatch.setattr("code_helper.services.secrets.fcntl", None)
+    monkeypatch.setattr("codehelper.services.secrets.fcntl", None)
     paths = _paths(tmp_path)
     save_credential(paths, "litellm", "sk-1")
     assert load_credentials(paths) == {"litellm": {DEFAULT_PROFILE: "sk-1"}}
@@ -396,6 +396,6 @@ def test_locked_update_falls_back_when_the_lock_file_cannot_be_opened(
             raise OSError("simulated: cannot open lock file")
         return real_open(path, mode, *a, **kw)
 
-    monkeypatch.setattr("code_helper.services.secrets.open", _boom, raising=False)
+    monkeypatch.setattr("codehelper.services.secrets.open", _boom, raising=False)
     save_credential(paths, "litellm", "sk-1")
     assert load_credentials(paths) == {"litellm": {DEFAULT_PROFILE: "sk-1"}}

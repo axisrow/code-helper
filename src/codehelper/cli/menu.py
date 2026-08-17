@@ -13,7 +13,7 @@ raw-keypress reading is layered in two pieces:
 
 :func:`select_from_menu` takes ``read_key`` as an injectable callable so tests
 can drive the menu with a fake key sequence instead of a real terminal —
-mirroring how :func:`code_helper.services.secrets.resolve_token` injects
+mirroring how :func:`codehelper.services.secrets.resolve_token` injects
 ``getpass_fn``.
 """
 
@@ -250,7 +250,7 @@ _PASSTHROUGH = "aedtps?"
 
 def _translate_char(first: str) -> str:
     """Translate one printable character into a key name."""
-    from code_helper.cli.keymap import translate_key
+    from codehelper.cli.keymap import translate_key
 
     first = translate_key(first)
     if first in _CHAR_KEYS:

@@ -1,4 +1,4 @@
-"""Tests for ``code-helper switch`` — live-patching ``~/.claude/settings.json``.
+"""Tests for ``codehelper switch`` — live-patching ``~/.claude/settings.json``.
 
 Everything runs through ``main([...])`` so the argparse wiring (positional
 ``provider`` vs ``--provider``, ``--restore``/``--slot`` validation) is
@@ -14,10 +14,10 @@ import json
 
 import pytest
 
-from code_helper.__main__ import main
-from code_helper.cli.parser import _handle_switch
-from code_helper.cli.requests import SwitchRequest
-from code_helper.services.paths import Paths
+from codehelper.__main__ import main
+from codehelper.cli.parser import _handle_switch
+from codehelper.cli.requests import SwitchRequest
+from codehelper.services.paths import Paths
 
 
 def _settings(tmp_path) -> dict:
@@ -89,7 +89,7 @@ def test_switch_native_never_reads_env_or_prompts(tmp_path, monkeypatch):
     def _explode(**_kwargs):
         raise AssertionError("resolve_token must not be called for switch native")
 
-    monkeypatch.setattr("code_helper.cli.parser.secrets.resolve_token", _explode)
+    monkeypatch.setattr("codehelper.cli.parser.secrets.resolve_token", _explode)
     _write_settings(
         tmp_path,
         {
@@ -135,9 +135,9 @@ def test_chip_preset_glm_never_prompts_for_a_token(tmp_path, monkeypatch):
     """A token-bearing preset chip (glm / Z.ai) must resolve its token
     non-interactively: a prompt inside the running menu would swallow the
     user's keystrokes, breaking the no-prompt hot-apply a chip promises."""
-    import code_helper.services.secrets as secrets
-    from code_helper.cli.parser import _switch_axes_from_preset
-    from code_helper.errors import CodeHelperError
+    import codehelper.services.secrets as secrets
+    from codehelper.cli.parser import _switch_axes_from_preset
+    from codehelper.errors import CodeHelperError
 
     seen = {}
     cached = {"value": "sk-cached", "source": "cache"}

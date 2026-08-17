@@ -13,15 +13,15 @@ import threading
 
 import pytest
 
-from code_helper.errors import CodeHelperError
-from code_helper.services.agents import (
+from codehelper.errors import CodeHelperError
+from codehelper.services.agents import (
     add_user_agent,
     all_agents,
     get_agent,
     load_user_agents,
 )
-from code_helper.services.model import AGENTS, ConfigShape
-from code_helper.services.paths import Paths
+from codehelper.services.model import AGENTS, ConfigShape
+from codehelper.services.paths import Paths
 
 
 def _paths(tmp_path):
@@ -203,10 +203,10 @@ def test_add_user_agent_rejects_a_built_in_binary_as_the_binary(tmp_path):
 
 
 @pytest.mark.unit
-def test_add_user_agent_rejects_code_helper_itself(tmp_path):
+def test_add_user_agent_rejects_codehelper_itself(tmp_path):
     paths = _paths(tmp_path)
     with pytest.raises(CodeHelperError, match="reserved"):
-        add_user_agent(paths, "code-helper")
+        add_user_agent(paths, "codehelper")
 
 
 @pytest.mark.unit
@@ -337,8 +337,8 @@ def test_wrapper_alias_cannot_shadow_a_user_agent_binary():
     """The reservation that stops a wrapper shadowing a built-in agent's binary
     must extend to user-defined agents: register `mytool`, then a wrapper
     aliased `mytool` would clobber the real `mytool` on PATH — reject it."""
-    from code_helper.cli.parser import _handle_add
-    from code_helper.cli.requests import AddRequest
+    from codehelper.cli.parser import _handle_add
+    from codehelper.cli.requests import AddRequest
 
     add_user_agent(Paths.default(), "mytool", "mytool", "a real CLI")
     req = AddRequest(
@@ -369,8 +369,8 @@ def test_wrapper_alias_check_fails_closed_on_a_corrupt_registry(tmp_path):
     user agents" and let a wrapper silently shadow a real binary. A corrupt
     agents.json fails the add closed even when the agent itself is a built-in
     (so it resolves fine) and only the alias collides with a user binary."""
-    from code_helper.cli.parser import _handle_add
-    from code_helper.cli.requests import AddRequest
+    from codehelper.cli.parser import _handle_add
+    from codehelper.cli.requests import AddRequest
 
     paths = _paths(tmp_path)
     _write_agents_file(paths, "{not valid json")
