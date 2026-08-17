@@ -27,8 +27,13 @@ _ADD = "add"
 #: Main-screen action rows: add a new CLI integration (agent) and add a
 #: wrapper for any agent. Distinct from the per-row `+ add` chip (`_ADD_CHIP`),
 #: which is scoped to that row's agent; these are unscoped entry points.
-_ADD_AGENT = "add-agent"
-_ADD_WRAPPER = "add-wrapper"
+#:
+#: The values are namespaced with a ``:``-containing prefix so they can never
+#: collide with a wrapper alias: ``validate_alias`` rejects ``:``, so a wrapper
+#: literally named ``add-agent``/``add-wrapper`` (both valid aliases) stays
+#: selectable as a wrapper instead of being shadowed by these action rows.
+_ADD_AGENT = "__action:add-agent"
+_ADD_WRAPPER = "__action:add-wrapper"
 _SETTINGS = "settings"
 _PROFILE = "profile"
 _HELP = "help"

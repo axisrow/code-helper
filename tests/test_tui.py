@@ -536,8 +536,8 @@ def test_main_screen_has_add_agent_and_add_wrapper_action_rows(monkeypatch):
     monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
 
     assert main(["tui"]) == 0
-    assert "add-agent" in captured["values"]
-    assert "add-wrapper" in captured["values"]
+    assert "__action:add-agent" in captured["values"]
+    assert "__action:add-wrapper" in captured["values"]
 
 
 @pytest.mark.integration
@@ -546,7 +546,7 @@ def test_add_agent_action_row_registers_a_new_agent(monkeypatch):
     name/binary/description and persist a new user-defined agent."""
     import code_helper.cli.tui as tui
 
-    answers = iter(["add-agent", "quit"])
+    answers = iter(["__action:add-agent", "quit"])
     monkeypatch.setattr(
         "code_helper.cli.menu.select_from_menu",
         lambda _items, **_kwargs: next(answers),
@@ -570,7 +570,7 @@ def test_add_wrapper_action_row_opens_the_unscoped_kind_picker(monkeypatch):
     """Entering the `+ add wrapper` row must open the unscoped Add flow — the
     kind picker (wrapper vs agent), not a provider list scoped to one agent."""
     seen: list[str] = []
-    answers = iter(["add-wrapper", "__back__", "quit"])
+    answers = iter(["__action:add-wrapper", "__back__", "quit"])
 
     def _select(items, *, prompt, **kwargs):
         text = prompt() if callable(prompt) else prompt
@@ -1321,6 +1321,56 @@ def test_main_screen_enter_sets_default_wrapper(monkeypatch):
 
 
 @pytest.mark.integration
+def test_wrapper_named_add_agent_is_selectable_from_main_screen(monkeypatch):
+    """A wrapper literally named `add-agent` must be selectable as a wrapper —
+    Enter sets it as default — not shadowed by the `+ add agent` action row.
+    The action-row IDs collided with valid wrapper aliases (both `add-agent`
+    and `add-wrapper` pass `validate_alias`), so selecting such a wrapper
+    dispatched into the add-agent flow instead of the wrapper-selection path."""
+    from code_helper.services.spec import build_spec
+    from code_helper.services.state import default_wrapper
+    from code_helper.services.wrappers import install_wrapper
+
+    paths = Paths.default()
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude", provider="ollama", model="qwen3.5:9b", alias="add-agent"
+        ),
+    )
+    # The `add-agent` wrapper is the 7th selectable row: the two chipset rows,
+    # the `+ add agent` action row, then the deepseek/glm/glm-ollama presets.
+    # Six DOWNs reach it; Enter must set it as default, not open add-agent.
+    _real_menu_keys(monkeypatch, ["DOWN"] * 6 + ["ENTER", "CANCEL"])
+    assert main(["tui"]) == 0
+    assert default_wrapper(paths, "claude") == "add-agent"
+
+
+@pytest.mark.integration
+def test_wrapper_named_add_wrapper_is_selectable_from_main_screen(monkeypatch):
+    """Symmetric to the `add-agent` case: a wrapper literally named
+    `add-wrapper` must be selectable as a wrapper, not shadowed by the
+    `+ add wrapper` action row."""
+    from code_helper.services.spec import build_spec
+    from code_helper.services.state import default_wrapper
+    from code_helper.services.wrappers import install_wrapper
+
+    paths = Paths.default()
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude", provider="ollama", model="qwen3.5:9b", alias="add-wrapper"
+        ),
+    )
+    # The `add-wrapper` wrapper is the 7th selectable row (two chipset rows,
+    # the `+ add agent` action row, then the deepseek/glm/glm-ollama presets).
+    # Six DOWNs reach it; Enter must set it as default, not open the add flow.
+    _real_menu_keys(monkeypatch, ["DOWN"] * 6 + ["ENTER", "CANCEL"])
+    assert main(["tui"]) == 0
+    assert default_wrapper(paths, "claude") == "add-wrapper"
+
+
+@pytest.mark.integration
 def test_main_screen_enter_on_an_unmanaged_foreign_file_does_not_set_a_ghost_default(
     monkeypatch,
 ):
@@ -1385,8 +1435,8 @@ def test_main_screen_groups_colliding_managed_wrapper_under_installed_agent(
             current = e.text
         elif e[0] not in (
             "add",
-            "add-agent",
-            "add-wrapper",
+            "__action:add-agent",
+            "__action:add-wrapper",
             "profile",
             "settings",
             "quit",
