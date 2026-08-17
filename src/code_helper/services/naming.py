@@ -30,6 +30,7 @@ import re
 from urllib.parse import urlsplit
 
 from code_helper.errors import CodeHelperError
+from code_helper.services.model import AGENTS
 
 __all__ = [
     "validate_alias",
@@ -49,21 +50,60 @@ MAX_ALIAS_LENGTH = 64
 #: Names that must never become a wrapper, independent of shape:
 #:
 #: - ``code-helper`` — the tool would overwrite its own entry point.
-#: - agent binaries (``claude``, ``codex``) — a wrapper named after the binary
-#:   it execs is an **infinite recursion** whenever ``~/.local/bin`` precedes
-#:   the real binary on ``PATH``: the script re-invokes itself forever. This is
-#:   not hypothetical here — ``~/.local/bin/claude`` is a real, working symlink
-#:   on a typical install, and clobbering it also breaks Claude Code itself.
+#: - every agent's ``binary`` — reserving it protects against two distinct
+#:   hazards, not one:
 #:
-#: Kept as a literal rather than derived from the agent registry so that
-#: importing this module stays dependency-free (and so the reason above is
-#: readable at the point of definition).
-RESERVED_ALIASES = frozenset({"code-helper", "claude", "codex"})
+#:   - For a shape that ``exec``'s the agent by its bare name on ``PATH``
+#:     (:attr:`~code_helper.services.model.ConfigShape.ANTHROPIC_ENV` renders
+#:     ``claude "$@"``; ``OPENAI_TOML`` renders ``exec codex ...``), a wrapper
+#:     named after that same binary is an **infinite recursion** whenever
+#:     ``~/.local/bin`` precedes the real binary on ``PATH``: the script
+#:     re-invokes itself forever. Not hypothetical — ``~/.local/bin/claude``
+#:     is a real, working symlink on a typical install, and clobbering it also
+#:     breaks Claude Code itself.
+#:   - For :attr:`~code_helper.services.model.ConfigShape.OLLAMA_LAUNCH`
+#:     (``exec ollama launch <agent> ...`` — see ``render.py``) there is no
+#:     recursion, since the script execs ``ollama``, never the agent — but a
+#:     wrapper named e.g. ``opencode`` still permanently **shadows** the real
+#:     ``opencode`` on ``PATH`` with one fixed model, silently rather than by
+#:     hanging, which is its own kind of surprising.
+#:
+#: Derived from :data:`~code_helper.services.model.AGENTS` (rather than kept
+#: as a hand-maintained literal) so a future agent added to that registry can
+#: never be forgotten here — the only genuinely NON-agent-derived name is
+#: ``code-helper`` itself.
+_RESERVED_LITERAL = frozenset({"code-helper"})
+RESERVED_ALIASES = _RESERVED_LITERAL | {a.binary for a in AGENTS}
 
 #: Must start alphanumeric (no leading ``-``/``.``), then alphanumerics plus
 #: ``.``/``_``/``-``. Excludes: path separators, whitespace, control bytes,
 #: NUL, shell metacharacters, and non-ASCII look-alikes.
 _ALIAS_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+
+
+def is_valid_alias_shape(alias: str) -> bool:
+    """True iff ``alias`` is structurally a usable ``~/.local/bin`` file name.
+
+    The structural half of :func:`validate_alias` — empty, ``.``/``..``, path
+    separator, leading ``-``, over-length, or a character the regex rejects —
+    WITHOUT the reserved-name check. Discovery and removal of an EXISTING
+    managed wrapper must not be blocked by reservation: a wrapper created
+    before a name became reserved (e.g. ``opencode`` after the agent registry
+    grew) is still a real, marker-verified file the user must be able to see
+    and remove. Reservation gates NEW creation (:func:`validate_alias`), never
+    cleanup of what already exists.
+    """
+    if not alias or not alias.strip():
+        return False
+    if alias in (".", ".."):
+        return False
+    if "/" in alias or "\\" in alias:
+        return False
+    if alias.startswith("-"):
+        return False
+    if len(alias) > MAX_ALIAS_LENGTH:
+        return False
+    return bool(_ALIAS_RE.match(alias))
 
 
 def validate_alias(alias: str) -> str:
@@ -106,8 +146,9 @@ def validate_alias(alias: str) -> str:
 
     if alias in RESERVED_ALIASES:
         raise CodeHelperError(
-            f"{alias!r} is a reserved name — a wrapper named after the agent "
-            f"binary it runs would call itself forever"
+            f"{alias!r} is a reserved name — a wrapper named after an agent's "
+            f"own binary would either re-invoke itself forever or permanently "
+            f"shadow the real one on PATH"
         )
 
     return alias

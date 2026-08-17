@@ -122,6 +122,18 @@ def test_incompatible_pairing_is_refused(tmp_path, capsys):
 
 
 @pytest.mark.integration
+def test_launch_only_agent_incompatible_with_zai(tmp_path, capsys):
+    """A launch-only agent has no shape in common with a non-ollama provider,
+    and the error's hint names `ollama` as what it DOES work with."""
+    assert (
+        main(["add", "--agent", "opencode", "--provider", "zai", "--model", "x"]) == 1
+    )
+    err = capsys.readouterr().err
+    assert "no common configuration" in err
+    assert "ollama" in err
+
+
+@pytest.mark.integration
 def test_incompatible_pairing_never_prompts_for_a_token(tmp_path, monkeypatch):
     """Validation must happen BEFORE any interactive secret prompt."""
     import code_helper.services.secrets as secrets
@@ -644,6 +656,33 @@ def test_list_matrix_includes_litellm_with_no_gap(tmp_path, capsys):
     # +1: each data row's first word is the agent name, not a provider column.
     assert claude_row[litellm_idx + 1] == "anthropic-env"
     assert codex_row[litellm_idx + 1] == "openai-toml"
+
+
+@pytest.mark.integration
+def test_list_agents_includes_every_ollama_launch_integration(tmp_path, capsys):
+    """`list agents` shows all 15 registered agents, not just claude/codex."""
+    assert main(["list", "agents"]) == 0
+    out = capsys.readouterr().out
+    for name in ("opencode", "copilot", "droid", "cline", "qwen"):
+        assert name in out
+
+
+@pytest.mark.integration
+def test_list_matrix_launch_only_agent_row(tmp_path, capsys):
+    """A launch-only agent's row: ollama-launch for ollama, a gap elsewhere.
+
+    `resolve_shape` renders this row, so it cannot disagree with what `add`
+    actually accepts.
+    """
+    assert main(["list", "matrix"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    header_cols = lines[0].split()
+    ollama_idx = header_cols.index("ollama")
+    zai_idx = header_cols.index("zai")
+    row = next(line for line in lines if line.startswith("opencode")).split()
+    # +1: each data row's first word is the agent name, not a provider column.
+    assert row[ollama_idx + 1] == "ollama-launch"
+    assert row[zai_idx + 1] == "—"
 
 
 @pytest.mark.integration

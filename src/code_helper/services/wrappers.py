@@ -35,6 +35,7 @@ from urllib.parse import unquote
 
 from code_helper.backends._atomic import atomic_write, read_text_or_none, remove_file
 from code_helper.errors import CodeHelperError
+from code_helper.services.agents import get_agent as get_any_agent
 from code_helper.services.model import (
     Agent,
     BaseUrlPolicy,
@@ -43,7 +44,7 @@ from code_helper.services.model import (
     get_provider,
     with_base_url,
 )
-from code_helper.services.naming import validate_alias
+from code_helper.services.naming import is_valid_alias_shape
 from code_helper.services.paths import Paths
 from code_helper.services.render import (
     CATALOG_MANAGED_BY_KEY,
@@ -334,9 +335,20 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     if provider_obj is None:
         return None
 
+    # Resolve the agent through the MERGED registry (built-ins + user-defined
+    # agents), not model.get_agent's built-in-only lookup: a wrapper created
+    # for a user-defined agent records that agent's name in its marker, and
+    # build_spec would otherwise reject it as unknown, hiding the wrapper from
+    # the TUI's list/remove/token actions. Pass the resolved Agent object so
+    # build_spec skips its own string resolution.
+    try:
+        agent_obj = get_any_agent(paths, fields["agent"])
+    except CodeHelperError:
+        return None
+
     try:
         return build_spec(
-            agent=fields["agent"],
+            agent=agent_obj,
             provider=provider_obj,
             model=model,
             alias=name,
@@ -1444,10 +1456,12 @@ def discover_managed(paths: Paths) -> list[str]:
     — the preset registry cannot know about it, and there is no state file.
     The marker in the script body is the only record that it is ours.
 
-    A marked file whose name is not a usable alias (a reserved name like
-    ``claude``, or anything ``validate_alias`` rejects) is skipped: no command
-    in the tool can act on it, so listing it advertises a wrapper the user
-    cannot then edit or reinstall.
+    A marked file whose name is not structurally a usable alias
+    (:func:`is_valid_alias_shape`) is skipped: no command in the tool can act
+    on it, so listing it advertises a wrapper the user cannot then edit or
+    reinstall. A RESERVED name (e.g. ``opencode``) is still listed — it is a
+    real, removable wrapper, and hiding it would strand it on PATH with no way
+    to clean it up.
     """
     if not paths.bin_dir.is_dir():
         return []
@@ -1499,9 +1513,12 @@ def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
 
 
 def _is_usable_alias(name: str) -> bool:
-    """True iff ``name`` is one the rest of the tool can still act on."""
-    try:
-        validate_alias(name)
-    except CodeHelperError:
-        return False
-    return True
+    """True iff ``name`` is one the rest of the tool can still act on.
+
+    Structural validity only — NOT the reserved-name check. A managed wrapper
+    whose name became reserved (``opencode`` after the agent registry grew)
+    must stay discoverable and removable so the user can clean it up; only
+    NEW creation under a reserved name is blocked, by ``validate_alias`` at
+    the install boundary.
+    """
+    return is_valid_alias_shape(name)

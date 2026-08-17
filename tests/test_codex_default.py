@@ -262,6 +262,18 @@ def test_resolve_default_patch_rejects_claude():
 
 
 @pytest.mark.unit
+def test_resolve_default_patch_rejects_launch_only_agent():
+    """A launch-only agent (opencode, droid, …) shares OLLAMA_LAUNCH with
+    ollama but not OPENAI_TOML — same failure shape as claude above, now for
+    an agent that only ever declares one shape at all."""
+    opencode = get_agent("opencode")
+    with pytest.raises(
+        CodeHelperError, match="cannot use shape openai-toml.*ollama-launch"
+    ):
+        resolve_default_patch(opencode, OLLAMA, "glm-5.2:cloud", "/x/model.json")
+
+
+@pytest.mark.unit
 def test_resolve_default_patch_rejects_missing_wire_api():
     bad_provider = Provider(
         name="ollama",

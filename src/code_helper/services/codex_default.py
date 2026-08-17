@@ -101,10 +101,19 @@ def resolve_default_patch(
 
     Reuses :func:`resolve_shape` — the SAME compatibility check ``add`` uses —
     so ``set-default`` cannot silently accept a pairing ``add`` would reject.
-    For today's registry this only ever resolves for ``codex``: ``claude``
-    declares no ``OPENAI_TOML`` shape, so it fails here with the same
-    "no common configuration mechanism" message a bad ``add`` invocation gets,
-    not a bespoke error.
+    For today's registry this only ever resolves for ``codex``: every other
+    agent declares no ``OPENAI_TOML`` shape. Two distinct failures follow from
+    that, both surfaced by ``resolve_shape`` itself rather than a bespoke
+    error here:
+
+    - an agent with NO shape in common with ``provider`` at all (e.g.
+      ``claude`` + ``zai`` is fine for ``add`` but has no ``OPENAI_TOML``
+      story) fails with "no common configuration mechanism";
+    - an agent that shares a DIFFERENT shape with ``provider`` — every
+      ``ollama launch``-only agent (``opencode``, ``droid``, …) against
+      ``ollama`` shares ``OLLAMA_LAUNCH`` but not ``OPENAI_TOML`` — fails with
+      "cannot use shape openai-toml (available: ollama-launch)" instead, since
+      ``preferred`` was supplied and is simply not among the shared shapes.
 
     Raises:
         CodeHelperError: incompatible pairing, or (defense-in-depth, mirrors

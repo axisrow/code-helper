@@ -63,6 +63,7 @@ __all__ = [
     "PROVIDERS",
     "get_agent",
     "get_provider",
+    "validate_agent_binary",
     "resolve_shape",
     "compatible_providers",
     "switchable_providers",
@@ -153,8 +154,33 @@ _SHAPE_PRIORITY: tuple[ConfigShape, ...] = (
 
 #: An agent's binary name is interpolated into a generated script UNQUOTED (see
 #: ``render.py``), so it must be a registry constant of a boring shape — not
-#: user input. Enforced at import time by :func:`_validate_registries`.
+#: user input. Enforced at import time by :func:`_validate_registries`, and
+#: reused (via :func:`validate_agent_binary`) by ``services/agents.py`` to
+#: gate a user-supplied agent the exact same way — a hand-duplicated copy of
+#: this pattern there would be one edit away from drifting out of sync with
+#: the actual shell-injection guard.
 _BINARY_RE = re.compile(r"\A[a-z][a-z0-9_-]*\Z")
+
+
+def validate_agent_binary(binary: str) -> None:
+    """Raise unless ``binary`` is safe to interpolate unquoted into a script.
+
+    The single public gate on the pattern :data:`_BINARY_RE` encodes — lower-
+    case alphanumerics, ``_``/``-``, starting with a letter. Any caller that
+    accepts an agent name/binary from outside the registry (today: a
+    user-defined agent in ``services/agents.py``) MUST run it through this
+    before persisting or using it; skipping it is a shell-injection hole,
+    since ``agent.binary`` is later interpolated unquoted (see ``render.py``).
+
+    Raises:
+        CodeHelperError: ``binary`` does not match the required pattern.
+    """
+    if not _BINARY_RE.match(binary):
+        raise CodeHelperError(
+            f"invalid agent binary {binary!r} — must start with a lowercase "
+            f"letter and contain only lowercase letters, digits, '_' and '-'"
+        )
+
 
 #: ``token_env_var`` is now interpolated into a generated script UNQUOTED too
 #: (``export {token_env_var}={quoted token}`` — the shape's OPENAI_TOML
@@ -236,6 +262,16 @@ class Agent:
     name: str
     #: Executable name. Interpolated into generated scripts unquoted; see
     #: :data:`_BINARY_RE`.
+    #:
+    #: For :attr:`ConfigShape.OLLAMA_LAUNCH` this value does DOUBLE DUTY: it is
+    #: both the executable ``exec``'d directly by other shapes and the
+    #: *integration name* passed as ``ollama launch <this>`` (see
+    #: ``render._render_ollama_launch``). The two happen to coincide for every
+    #: agent in the registry today. If a future agent's ``ollama launch``
+    #: integration name ever diverges from its executable (e.g. VS Code: the
+    #: binary is ``code``, the integration is ``vscode``), the fix is a
+    #: separate ``launch_name`` field defaulting to ``binary`` — not overloading
+    #: this one further.
     binary: str
     #: Config shapes this agent can CONSUME.
     shapes: frozenset[ConfigShape]
@@ -284,6 +320,17 @@ class Provider:
     #: reader of this field branches on ``provider.env_reset``, never on
     #: ``provider.name == "anthropic"``.
     env_reset: bool = False
+    #: Fallback model names offered when :func:`~code_helper.services.
+    #: models_api.list_models` returns none — either because the provider
+    #: structurally cannot publish a list (``model_list_api is NONE``, e.g.
+    #: zai's Anthropic-compatible endpoint) or because discovery failed for
+    #: this call (daemon down, no base URL yet). Discovery is always tried
+    #: FIRST; this is what keeps the model step a menu instead of a bare
+    #: prompt when discovery comes back empty. The TUI is responsible for
+    #: labelling the source ("known models" vs "discovered") so a stale
+    #: built-in entry is never presented as if it were live — see
+    #: ``cli/tui.py``'s ``_choose_add_model``.
+    known_models: tuple[str, ...] = ()
     description: str = ""
 
 
@@ -303,6 +350,47 @@ AGENTS: tuple[Agent, ...] = (
         # `codex × z.ai` is (correctly) impossible today.
         shapes=frozenset({ConfigShape.OPENAI_TOML, ConfigShape.OLLAMA_LAUNCH}),
         description="OpenAI Codex CLI",
+    ),
+    # The remaining 13 are every OTHER *CLI* integration `ollama launch`
+    # supports (verified against `ollama launch --help`, ollama 0.32.13) —
+    # GUI/desktop integrations (chatgpt/codex-app, hermes-desktop, vscode)
+    # are deliberately excluded: they have no CLI binary, so `"$@"` in a
+    # generated wrapper would be meaningless for them.
+    #
+    # Every one of these declares ONLY OLLAMA_LAUNCH, never OPENAI_TOML: that
+    # shape means "this agent reads Codex's own `--profile <alias>` TOML
+    # convention" (see render._render_openai_toml), and none of them does —
+    # each has its own native config format that only `ollama launch` itself
+    # knows how to write (verified by hand against `--help` for opencode,
+    # copilot, droid, cline, pi). Reaching a non-Ollama provider (z.ai,
+    # litellm) is therefore correctly impossible for all 13, exactly like
+    # `codex × z.ai` above — do not "fix" that by adding OPENAI_TOML here.
+    #
+    # binary == name for every one of these (there is no GUI/CLI name split
+    # to account for yet — see Agent.binary's docstring), so each is just a
+    # (name, description) pair rather than a hand-repeated Agent(...) call.
+    *(
+        Agent(
+            name=name,
+            binary=name,
+            shapes=frozenset({ConfigShape.OLLAMA_LAUNCH}),
+            description=description,
+        )
+        for name, description in (
+            ("hermes", "Hermes Agent"),
+            ("openclaw", "OpenClaw"),
+            ("opencode", "OpenCode"),
+            ("copilot", "GitHub Copilot CLI"),
+            ("omp", "OMP"),
+            ("droid", "Droid"),
+            ("dsh", "DeepSeek Harness"),
+            ("kimi", "Kimi Code CLI"),
+            ("muse", "Muse Code"),
+            ("pi", "Pi"),
+            ("pool", "Pool"),
+            ("cline", "Cline"),
+            ("qwen", "Qwen Code"),
+        )
     ),
 )
 
@@ -350,6 +438,12 @@ PROVIDERS: tuple[Provider, ...] = (
         token_env_var="ZAI_API_KEY",
         # The Anthropic-compatible path exposes no OpenAI-style model list.
         model_list_api=ModelListAPI.NONE,
+        # Discovery is structurally unavailable (model_list_api is NONE
+        # above), so these are the ONLY models the model step can ever offer
+        # besides manual entry. Seeded from what is already known-good in
+        # this codebase: glm-5-turbo (the `glm` preset) and glm-5.2 (an
+        # installed glm52-litellm wrapper).
+        known_models=("glm-5-turbo", "glm-5.2"),
         description="Z.ai (Anthropic-compatible)",
     ),
     Provider(
@@ -521,6 +615,15 @@ def _validate_provider(provider: Provider) -> None:
             raise CodeHelperError(
                 f"{prefix}model_list_api={provider.model_list_api.value!r} — "
                 f"a reset provider has no endpoint to list models from"
+            )
+    # Same class of check as every other registry field: an empty/whitespace
+    # entry would render as a blank, unselectable-looking menu row in the
+    # fallback picker — catch it at import time, not when a user hits it.
+    for known in provider.known_models:
+        if not known or not known.strip():
+            raise CodeHelperError(
+                f"provider {provider.name!r} has an empty/blank known_models "
+                f"entry: {known!r}"
             )
 
 

@@ -15,10 +15,11 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final, Literal
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from code_helper.services.paths import Paths
+    from code_helper.services.spec import WrapperSpec
 
 __all__ = ["run_tui"]
 
@@ -27,7 +28,7 @@ _SETTINGS = "settings"
 _PROFILE = "profile"
 _HELP = "help"
 _QUIT = "quit"
-_BACK = "__back__"
+_BACK: Final = "__back__"
 _NEW_PROFILE = "__new_profile__"
 _USE_PROFILE = "__use_profile__"
 _REPLACE_TOKEN = "__replace_token__"
@@ -42,12 +43,24 @@ _AGENT_ROW = "agent:"
 #: through that agent's own reset mechanism (see :class:`_AgentBackend`).
 _NATIVE_CHIP = "native"
 
+#: The trailing ACTION chip on every agent row — not a backend, never
+#: "applied", Enter opens Add pre-scoped to that row's agent instead of
+#: switching to anything. Exists so an agent with no wrappers yet (e.g. a
+#: fresh install's `codex` row, which otherwise renders as a single bare
+#: `native` chip) advertises how to get its first one, instead of reading as
+#: broken. See ``CLAUDE.md``'s amended chip-strip rule: a row carries backend
+#: chips plus exactly one of these, visually distinct, never applied.
+_ADD_CHIP = "+ add"
+
 #: SGR codes for the chip strip: reverse video marks the chip under the
 #: cursor (fzf/less-style), bold marks the chip currently applied when the
-#: cursor is elsewhere. `menu._fit` is ANSI-aware and strips these safely
-#: when a row is truncated to the terminal width.
+#: cursor is elsewhere, dim marks the action chip so it reads as "not a
+#: backend" even before you notice it never carries a `✓`. `menu._fit` is
+#: ANSI-aware and strips these safely when a row is truncated to the
+#: terminal width.
 _REVERSE = "\033[7m"
 _BOLD = "\033[1m"
+_DIM = "\033[2m"
 _RESET = "\033[0m"
 
 # profile name, token typed in this flow, old profile name, new old-profile name
@@ -130,11 +143,16 @@ def _hint(
     elif chips:
         # The editing keys are named here rather than left behind `?`: on the
         # main screen they are the only way to add or change a wrapper, and a
-        # key nobody can see is a key nobody presses. Kept to a single
-        # "a/e/d" cluster and short arrows to stay well inside 80 columns —
-        # `_fit` would otherwise truncate the tail and silently eat the exit
-        # hint, which is exactly the bug a PTY run caught here.
-        hint = f"↑↓ row · ←→ chip · Enter apply · a/e/d edit · ? keys · Esc {exit_word}"
+        # key nobody can see is a key nobody presses. `a` is split OUT of the
+        # `e/d` cluster rather than folded into "edit" — `e` only rotates a
+        # token (it dispatches to the same handler as `t`), so grouping `a`
+        # under "edit" mislabels what pressing it does. Kept short (`?` alone,
+        # not `? keys`) to stay well inside 80 columns — `_fit` would
+        # otherwise truncate the tail and silently eat the exit hint, which is
+        # exactly the bug a PTY run caught here.
+        hint = (
+            f"↑↓ row · ←→ chip · Enter apply · a add · e/d edit · ? · Esc {exit_word}"
+        )
     else:
         hint = f"Up/Down · Enter select · Esc {exit_word} · Ctrl-C quit"
     if has_token_key:
@@ -370,7 +388,7 @@ class TuiSession:
 
     def _new_profile(
         self, names: list[str], provider_name: str
-    ) -> ProfileChoice | str | None:
+    ) -> ProfileChoice | Literal["__back__"] | None:
         """Collect a new profile and token before model discovery."""
         from code_helper.services.profiles import (
             NewProfileOutcome,
@@ -443,7 +461,8 @@ class TuiSession:
             self._recover_default(provider_name)
             names = list(profile_names(Paths.default(), provider_name))
             if not names:
-                return self._new_profile(names, provider_name)
+                created = self._new_profile(names, provider_name)
+                return None if created == _BACK else created
 
             # The stored active profile is the pre-selection: put it FIRST
             # with a marker so the cursor (index 0) lands on it.
@@ -515,13 +534,14 @@ class TuiSession:
     def _wrapper_rows(self, paths) -> list:
         """Menu items for the main screen's wrapper list, grouped by agent."""
         from code_helper.cli.menu import Section
-        from code_helper.services.model import AGENTS
+        from code_helper.services.agents import all_agents
         from code_helper.services.wrappers import (
             column_header,
             describe_all_columns,
             valid_default_wrapper,
         )
 
+        agents = all_agents(paths)
         specs = self._all_wrapper_specs()
         # Columns are aligned across ALL agents in one describe_all_columns
         # call, not one call per agent — a per-agent call would compute its
@@ -532,12 +552,12 @@ class TuiSession:
             paths,
             specs,
             defaults={
-                agent.name: valid_default_wrapper(paths, agent.name) for agent in AGENTS
+                agent.name: valid_default_wrapper(paths, agent.name) for agent in agents
             },
         )
         by_name = dict(described)
         rows: list = []
-        for agent in AGENTS:
+        for agent in agents:
             agent_specs = [s for s in specs if s.agent.name == agent.name]
             if not agent_specs:
                 continue
@@ -556,7 +576,7 @@ class TuiSession:
             )
         return rows
 
-    def _resolve_spec(self, alias: str) -> object | None:
+    def _resolve_spec(self, alias: str) -> WrapperSpec | None:
         """Resolve ``alias`` to a spec — installed wrapper first, else preset."""
         from code_helper.errors import CodeHelperError
         from code_helper.services.paths import Paths
@@ -695,25 +715,22 @@ class TuiSession:
             None,
         )
 
-    def _add_provider_choices(self):
-        """Return provider menu rows and their runtime-auth choices.
+    def _add_provider_choices(self, agent):
+        """Return provider menu rows and their runtime-auth choices for ``agent``.
 
-        Filtered to ``compatible_providers(claude)`` — NOT raw ``PROVIDERS``
-        — so a switch-only entry (``native``: presents only
+        Filtered to ``compatible_providers(agent)`` — NOT raw ``PROVIDERS`` —
+        so a switch-only entry (``native``: presents only
         ``ANTHROPIC_SETTINGS``, which no ``Agent`` consumes) never appears as
-        an ``add`` choice. ``add`` always builds a claude wrapper here, so
-        this is equivalent to what `resolve_shape` would accept, computed
-        without actually calling it.
+        an ``add`` choice, and so a provider that only a DIFFERENT agent can
+        reach never appears either. This is equivalent to what
+        ``resolve_shape`` would accept for each provider, computed without
+        actually calling it per provider.
         """
-        from code_helper.services.model import (
-            AuthPolicy,
-            compatible_providers,
-            get_agent,
-        )
+        from code_helper.services.model import AuthPolicy, compatible_providers
 
         items: list[tuple[str, str]] = []
         choices = {}
-        for provider in compatible_providers(get_agent("claude")):
+        for provider in compatible_providers(agent):
             items.append((provider.name, f"{provider.name} — {provider.description}"))
             choices[provider.name] = (provider, False)
             if (
@@ -730,13 +747,26 @@ class TuiSession:
                 choices[value] = (provider, True)
         return items, choices
 
-    def _choose_add_provider(self):
-        """Choose and configure a provider, or return ``_BACK``/``None``."""
+    @staticmethod
+    def _breadcrumb(*parts: str) -> str:
+        """``"codex › ollama "`` — a prefix naming choices already made.
+
+        Prepended to a wizard step's prompt so a user several screens into
+        Add still sees what they picked earlier (agent, provider, …) without
+        a dedicated summary screen. Empty when there is nothing to show yet
+        (the very first step), so it never dangles a bare ``"› "``.
+        """
+        return f"{' › '.join(parts)} › " if parts else ""
+
+    def _choose_add_provider(self, agent):
+        """Choose and configure a provider for ``agent``, or ``_BACK``/``None``."""
         from code_helper.errors import CodeHelperError
         from code_helper.services.model import BaseUrlPolicy, with_auth, with_base_url
 
-        items, choices = self._add_provider_choices()
-        selection = self._pick([*items, (_BACK, "Back")], "Select a provider:")
+        items, choices = self._add_provider_choices(agent)
+        selection = self._pick(
+            [*items, (_BACK, "Back")], f"Select a provider for {agent.name}:"
+        )
         if selection == _BACK:
             return _BACK
         provider, want_secret_auth = choices[selection]
@@ -768,7 +798,7 @@ class TuiSession:
                 return None
         return provider, want_secret_auth, typed_url
 
-    def _choose_add_model(self, provider, profile_name, profile_token):
+    def _choose_add_model(self, provider, profile_name, profile_token, agent_name: str):
         """Discover and choose a model; ``_BACK`` returns to profile choice."""
         from code_helper.services.models_api import list_models
         from code_helper.services.paths import Paths
@@ -778,43 +808,73 @@ class TuiSession:
             Paths.default(), provider, profile_name=profile_name or None
         )
         result = list_models(provider, token=discovery_token)
-        items = [(model, model) for model in result.models]
+        # Discovery is always tried first and is the source of truth; the
+        # registry's `known_models` is only consulted when discovery comes
+        # back with nothing (structurally unavailable, e.g. zai, or a
+        # transient failure) — never used to override a real result. Which
+        # source fed the menu is shown in the prompt so a stale built-in
+        # entry is never mistaken for something the endpoint just confirmed.
+        models = result.models
+        # Fall back to the registry's known_models only when discovery
+        # actually FAILED (not result.ok) — a successful discovery that
+        # legitimately returned zero models is a real answer, not a reason to
+        # substitute the built-in list and mislabel it "discovery unavailable".
+        using_known = not result.ok and provider.known_models
+        if using_known:
+            models = provider.known_models
+        items = [(model, model) for model in models]
         items.extend((("__custom__", "Enter model manually"), (_BACK, "Back")))
-        prompt = f"Select a model for {provider.name}:"
-        if not result.ok:
-            prompt = f"Model discovery unavailable for {provider.name}; enter a model:"
-        model = self._pick(items, prompt)
+        # The breadcrumb names the agent already scoped by the row that opened
+        # Add, so a model step reached several screens in still shows what it
+        # is for.
+        breadcrumb = self._breadcrumb(agent_name)
+        if using_known:
+            base = (
+                f"Select a model for {provider.name} "
+                "(known models — discovery unavailable):"
+            )
+        elif not result.ok:
+            base = f"Model discovery unavailable for {provider.name}; enter a model:"
+        else:
+            base = f"Select a model for {provider.name}:"
+        model = self._pick(items, f"{breadcrumb}{base}")
         if model != "__custom__":
             return model
         typed = self._read_text("Model: ")
         return typed or None
 
     def _choose_add_agent(
-        self, provider, model, profile_name, profile, typed_url, want_secret_auth
+        self,
+        provider,
+        model,
+        profile_name,
+        profile,
+        typed_url,
+        want_secret_auth,
+        agent_name: str,
     ):
-        """Choose an agent and alias, then dispatch the typed Add request."""
+        """Choose an alias and dispatch Add for the pre-scoped ``agent_name``.
+
+        ``agent_name`` is always resolved up front by :meth:`_run_add` (from a
+        chipset row's ``a``/``+ add``, or the unscoped wrapper picker), so this
+        step never asks "which agent" — it goes straight to the alias.
+        """
         from code_helper.cli.parser import _handle_add
         from code_helper.cli.requests import AddRequest
         from code_helper.errors import CodeHelperError
-        from code_helper.services.model import AGENTS, resolve_shape
         from code_helper.services.spec import suggest_alias
 
-        items = []
-        for agent in AGENTS:
-            try:
-                resolve_shape(agent, provider)
-            except CodeHelperError:
-                continue
-            items.append((agent.name, f"{agent.name} — {agent.description}"))
-        agent_name = self._pick([*items, (_BACK, "Back")], "Select an agent:")
-        if agent_name == _BACK:
-            return _BACK
         try:
             default_alias = suggest_alias(model, agent_name, profile_name or None)
         except CodeHelperError as exc:
             self._notify(f"error: {exc}")
             return _BACK
-        alias = self._read_text(f"Command name [{default_alias}]: ")
+        # The alias prompt is the last screen before a real filesystem write
+        # (`_handle_add` below), and the furthest from the choices that led
+        # here — the breadcrumb is what lets the user confirm "yes, this is
+        # the pairing I meant" without a dedicated summary screen.
+        breadcrumb = self._breadcrumb(agent_name, provider.name, model)
+        alias = self._read_text(f"{breadcrumb}Command name [{default_alias}]: ")
         if alias is None:
             return None
         _, profile_token, rename_from, rename_to = profile
@@ -841,8 +901,14 @@ class TuiSession:
         )
         return True
 
-    def _run_add_provider(self, provider, want_secret_auth, typed_url) -> bool:
-        """Run profile → model → agent for one selected provider."""
+    def _run_add_provider(
+        self, provider, want_secret_auth, typed_url, agent_name: str
+    ) -> bool:
+        """Run profile → model → alias for one pre-scoped agent.
+
+        ``agent_name`` is always resolved by :meth:`_run_add` before this is
+        called — the agent is never chosen here.
+        """
         while True:
             if provider.auth == "secret":
                 profile = self._select_profile(provider.name, editing=False)
@@ -852,7 +918,9 @@ class TuiSession:
                 profile = ("", None, None, None)
             profile_name, profile_token, _, _ = profile
             while True:
-                model = self._choose_add_model(provider, profile_name, profile_token)
+                model = self._choose_add_model(
+                    provider, profile_name, profile_token, agent_name=agent_name
+                )
                 if model == _BACK:
                     break
                 if model is None:
@@ -865,24 +933,120 @@ class TuiSession:
                         profile,
                         typed_url,
                         want_secret_auth,
+                        agent_name=agent_name,
                     )
                     if outcome is True:
                         return True
                     if outcome == _BACK:
                         break
-                    # A cancelled alias re-opens the agent menu for this model.
+                    if outcome is None:
+                        # Esc at the alias prompt: there is no agent menu to
+                        # re-open (the agent was resolved up front), so looping
+                        # here would spin silently on a screen that never
+                        # renders. Fall back to the model menu instead, the
+                        # nearest enclosing screen that still exists.
+                        break
 
-    def _run_add(self) -> None:
-        """Create a wrapper through provider → profile → model → agent → name."""
+    def _choose_add_kind(self):
+        """The `a` entry point: agent or wrapper? Returns ``_BACK`` on Esc.
+
+        A wrapper is an agent × provider × model pairing; an agent is a new
+        CLI integration entry. They are different objects and the user must
+        say which one they mean before anything else is asked — see
+        ``CLAUDE.md``'s "add is agent-first" note.
+        """
+        return self._pick(
+            [
+                ("wrapper", "Wrapper — an agent × provider × model pairing"),
+                ("agent", "Agent — a new CLI integration"),
+                (_BACK, "Back"),
+            ],
+            "What do you want to add?",
+        )
+
+    def _run_add(self, agent_name: str | None = None) -> None:
+        """Create a wrapper (or, unscoped, an agent) via the Add flow.
+
+        ``agent_name`` pre-scopes the agent — set when Add was entered from a
+        specific agent's row (``a`` on that row, or its ``+ add`` chip). That
+        already answers "wrapper for which agent", so the kind/agent screens
+        below are skipped and the flow goes straight to provider selection.
+        """
+        from code_helper.services.agents import get_agent
+        from code_helper.services.paths import Paths
+
+        if agent_name is None:
+            kind = self._choose_add_kind()
+            if kind == _BACK:
+                return
+            if kind == "agent":
+                self._run_add_agent()
+                return
+            agent_name = self._choose_add_agent_for_wrapper()
+            if agent_name is None:
+                return
+        agent = get_agent(Paths.default(), agent_name)
         while True:
-            selected = self._choose_add_provider()
+            selected = self._choose_add_provider(agent)
             if selected == _BACK:
                 return
             if selected is None:
                 continue
             provider, want_secret_auth, typed_url = selected
-            if self._run_add_provider(provider, want_secret_auth, typed_url):
+            if self._run_add_provider(
+                provider, want_secret_auth, typed_url, agent_name=agent_name
+            ):
                 return
+
+    def _choose_add_agent_for_wrapper(self) -> str | None:
+        """Which agent the new wrapper is for — the unscoped Wrapper branch.
+
+        Returns ``None`` on Esc/Back (caller re-shows the kind screen by
+        simply returning, same as every other Back in this flow).
+        """
+        from code_helper.services.agents import all_agents
+        from code_helper.services.paths import Paths
+
+        items = [
+            (agent.name, f"{agent.name} — {agent.description}")
+            for agent in all_agents(Paths.default())
+        ]
+        choice = self._pick([*items, (_BACK, "Back")], "Add a wrapper for which agent?")
+        return None if choice == _BACK else choice
+
+    def _run_add_agent(self) -> None:
+        """Register a new user-defined agent (the Agent branch of `a`).
+
+        Collects a name (and, only if it differs, a binary), persists it via
+        ``services/agents.py`` merged with the built-in registry, and reports
+        the honest degradation: the new agent gets `add`/`list`/`remove`
+        support immediately, but no chipset row (no live-patchable config
+        this project knows how to read for it — see ``_AgentBackend``'s
+        docstring).
+        """
+        from code_helper.errors import CodeHelperError
+        from code_helper.services.agents import add_user_agent
+        from code_helper.services.paths import Paths
+
+        name = (
+            self._read_text("Agent name (its executable name on PATH): ") or ""
+        ).strip()
+        if not name:
+            return
+        binary = self._read_text(f"Binary name [{name}]: ")
+        binary = (binary or "").strip() or name
+        description = self._read_text("Description (optional): ")
+        description = (description or "").strip()
+
+        try:
+            add_user_agent(Paths.default(), name, binary, description)
+        except CodeHelperError as exc:
+            self._notify(f"error: {exc}")
+            return
+        self._notify(
+            f"Added agent {name!r}. It has no chipset row (no live-patchable "
+            f"config to read), but `add`/`list`/`remove` work for it now."
+        )
 
     def _run_settings(self) -> None:
         while True:
@@ -1104,20 +1268,30 @@ class TuiSession:
                 self._chip_index[name] = max(0, len(chips) - 1)
 
     def _chips_for(self, agent_name: str, paths) -> list:
-        """The chip strip for ``agent_name``: native, then its wrappers.
+        """The chip strip for ``agent_name``: native, its wrappers, then Add.
 
-        A chip is an ALREADY-INSTALLED wrapper, never a bare provider: the
-        wrapper is where a backend's model, token and base URL were resolved
-        and frozen when it was created. That is what lets Enter apply a chip
-        with no prompts and no second guess about which model to use — and it
-        is why there is no "provider with no wrapper" chip to explain away.
+        A BACKEND chip is an ALREADY-INSTALLED wrapper, never a bare
+        provider: the wrapper is where a backend's model, token and base URL
+        were resolved and frozen when it was created. That is what lets Enter
+        apply a backend chip with no prompts and no second guess about which
+        model to use — and it is why there is no "provider with no wrapper"
+        chip to explain away.
+
+        The trailing :data:`_ADD_CHIP` is the one deliberate exception: not a
+        backend, never "applied", present on every row (including one with no
+        wrappers yet) so that row always has a visible way to get its first
+        one instead of reading as empty/broken.
         """
         from code_helper.services.wrappers import is_installed
 
-        return [_NATIVE_CHIP] + [
-            spec
-            for spec in self._all_wrapper_specs()
-            if spec.agent.name == agent_name and is_installed(paths, spec.name)
+        return [
+            _NATIVE_CHIP,
+            *(
+                spec
+                for spec in self._all_wrapper_specs()
+                if spec.agent.name == agent_name and is_installed(paths, spec.name)
+            ),
+            _ADD_CHIP,
         ]
 
     @staticmethod
@@ -1132,8 +1306,11 @@ class TuiSession:
         matches when its provider matches. Two wrappers on the same provider
         are therefore indistinguishable here and the first one is marked; the
         same honest limitation ``current_switch`` documents for two providers
-        sharing one base URL.
+        sharing one base URL. The action chip is never applied — it isn't a
+        backend at all.
         """
+        if chip == _ADD_CHIP:
+            return False
         applied = self._applied.get(agent_name)
         if chip == _NATIVE_CHIP:
             return applied is None
@@ -1160,6 +1337,7 @@ class TuiSession:
             cursor = self._chip_index.get(agent_name, 0)
             rendered = []
             for index, chip in enumerate(chips):
+                is_add = chip == _ADD_CHIP
                 name = self._chip_name(chip)
                 applied = self._chip_is_applied(agent_name, chip)
                 text = f"✓ {name}" if applied else name
@@ -1169,6 +1347,11 @@ class TuiSession:
                     )
                 elif applied:
                     rendered.append(f"{_BOLD}{text}{_RESET}" if ansi else text)
+                elif is_add:
+                    # Dim, never bold/`✓`: this is the one non-backend chip on
+                    # the strip, so it must never be mistaken for one that's
+                    # applied (see `_chip_is_applied`'s `_ADD_CHIP` case).
+                    rendered.append(f"{_DIM}{text}{_RESET}" if ansi else text)
                 else:
                     rendered.append(text)
             return f"{agent_name:<8}{'  '.join(rendered)}"
@@ -1211,6 +1394,11 @@ class TuiSession:
         if not chips:
             return
         chip = chips[min(self._chip_index.get(agent_name, 0), len(chips) - 1)]
+        if chip == _ADD_CHIP:
+            # Not a backend — opens Add pre-scoped to this row's agent,
+            # exactly what `a` on this row does (see `run()`'s "a" binding).
+            self._run_add(agent_name)
+            return
         backend = _AGENT_BACKENDS[agent_name]
         if chip == _NATIVE_CHIP:
             if self._chip_is_applied(agent_name, chip):
@@ -1236,7 +1424,8 @@ class TuiSession:
     def _show_help(self) -> None:
         from code_helper.cli.menu import press_any_key
 
-        print("a add · e edit · d delete · t token · p profiles · s settings")
+        print("a add (agent row: scoped to it) · t/e token · d delete")
+        print("p profiles · s settings · ←→ + Enter on the + add chip: same as a")
         print("Up/Down row · Left/Right chip · Enter apply · Esc quit · Ctrl-C quit")
         press_any_key("Press any key to continue...")
 
@@ -1256,7 +1445,16 @@ class TuiSession:
                 self._refresh_active_label()
                 paths = Paths.default()
                 keys = {
-                    "a": lambda _alias: _ADD,
+                    # `a` on an agent chipset row already answers "wrapper for
+                    # which agent" — skip straight to a scoped Add instead of
+                    # asking again. Elsewhere on the main screen (a wrapper
+                    # row, or no row at all) `a` opens the unscoped kind
+                    # picker (agent vs wrapper).
+                    "a": lambda value: (
+                        f"add:{value.removeprefix(_AGENT_ROW)}"
+                        if value.startswith(_AGENT_ROW)
+                        else _ADD
+                    ),
                     "p": lambda _alias: _PROFILE,
                     "s": lambda _alias: _SETTINGS,
                     "?": lambda _alias: _HELP,
@@ -1291,6 +1489,8 @@ class TuiSession:
                     return 0
                 if choice == _ADD:
                     self._run_add()
+                elif choice.startswith("add:"):
+                    self._run_add(choice.removeprefix("add:"))
                 elif choice == _PROFILE:
                     self._run_profile_screen()
                 elif choice.startswith(_AGENT_ROW):
