@@ -15,6 +15,8 @@ import json
 import pytest
 
 from code_helper.__main__ import main
+from code_helper.cli.parser import _handle_switch
+from code_helper.cli.requests import SwitchRequest
 from code_helper.services.paths import Paths
 
 
@@ -28,6 +30,28 @@ def _write_settings(tmp_path, data: dict) -> None:
     paths = Paths.from_home(tmp_path)
     paths.claude_dir.mkdir(parents=True, exist_ok=True)
     paths.claude_settings().write_text(json.dumps(data), encoding="utf-8")
+
+
+def _preset_request(name: str) -> SwitchRequest:
+    return SwitchRequest(
+        provider=None,
+        from_wrapper=None,
+        model=None,
+        haiku=None,
+        sonnet=None,
+        opus=None,
+        subagent_model=None,
+        base_url=None,
+        auth=None,
+        profile=None,
+        restore=False,
+        slot=None,
+        status=False,
+        dry_run=False,
+        force=True,
+        debug=False,
+        from_preset=name,
+    )
 
 
 @pytest.mark.integration
@@ -81,6 +105,59 @@ def test_switch_native_never_reads_env_or_prompts(tmp_path, monkeypatch):
         set(_settings(tmp_path).get("env", {}))
         & {"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"}
     )
+
+
+@pytest.mark.integration
+def test_chip_preset_deepseek_applies_without_a_wrapper_file(tmp_path):
+    foreign = Paths.from_home(tmp_path).script_for("deepseek")
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("#!/bin/sh\necho foreign\n", encoding="utf-8")
+    assert _handle_switch(_preset_request("deepseek")) == 0
+    env = _settings(tmp_path)["env"]
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:11434"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "deepseek-v4-flash:0731-cloud"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "deepseek-v4-flash:0731-cloud"
+
+
+@pytest.mark.integration
+def test_chip_preset_glm_ollama_applies_live_ollama_settings(tmp_path):
+    assert _handle_switch(_preset_request("glm-ollama")) == 0
+    env = _settings(tmp_path)["env"]
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:11434"
+    assert {
+        env[f"ANTHROPIC_DEFAULT_{tier}_MODEL"] for tier in ("HAIKU", "SONNET", "OPUS")
+    } == {"glm-5.2:cloud"}
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.2:cloud"
+
+
+@pytest.mark.integration
+def test_chip_preset_glm_never_prompts_for_a_token(tmp_path, monkeypatch):
+    """A token-bearing preset chip (glm / Z.ai) must resolve its token
+    non-interactively: a prompt inside the running menu would swallow the
+    user's keystrokes, breaking the no-prompt hot-apply a chip promises."""
+    import code_helper.services.secrets as secrets
+    from code_helper.cli.parser import _switch_axes_from_preset
+    from code_helper.errors import CodeHelperError
+
+    seen = {}
+    cached = {"value": "sk-cached", "source": "cache"}
+
+    def fake_resolve_token(*, env_var, prompt, paths, provider_name, **kwargs):
+        seen["env_var"] = env_var
+        seen["getpass_fn"] = kwargs.get("getpass_fn")
+        seen["prompt"] = prompt
+        # Simulate a cache hit so the spy never actually prompts.
+        return type("R", (), cached)()
+
+    monkeypatch.setattr(secrets, "resolve_token", fake_resolve_token)
+
+    _switch_axes_from_preset(_preset_request("glm"), Paths.from_home(tmp_path))
+    assert seen["env_var"] == "ZAI_API_KEY"
+    # A chip press must never block on a hidden token prompt: resolve_token
+    # must be handed a getpass_fn that raises rather than reads stdin.
+    assert seen["getpass_fn"] is not None
+    with pytest.raises(CodeHelperError):
+        seen["getpass_fn"](seen["prompt"])
 
 
 @pytest.mark.integration
@@ -171,10 +248,45 @@ def test_switch_from_wrapper_unknown_name_fails(tmp_path):
 
 
 @pytest.mark.integration
-def test_switch_from_wrapper_rejects_a_non_anthropic_env_wrapper(tmp_path):
+def test_switch_from_wrapper_lifts_an_ollama_launch_wrapper_to_live_settings(tmp_path):
     assert main(["add", "glm-ollama"]) == 0
     code = main(["switch", "--from-wrapper", "glm-ollama", "--force"])
+    assert code == 0
+    env = _settings(tmp_path)["env"]
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.2:cloud"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.2:cloud"
+
+
+@pytest.mark.integration
+def test_switch_from_wrapper_rejects_a_non_claude_wrapper(tmp_path, monkeypatch):
+    """switch retargets a LIVE CLAUDE session, so a wrapper that belongs to
+    another agent (codex shares Ollama) must fail closed — it must never
+    silently retarget claude to a foreign selection just because the provider
+    happens to declare the ANTHROPIC_SETTINGS shape."""
+    assert (
+        main(
+            [
+                "add",
+                "--agent",
+                "codex",
+                "--provider",
+                "ollama",
+                "--model",
+                "x",
+                "--alias",
+                "codex-ollama",
+            ]
+        )
+        == 0
+    )
+
+    code = main(["switch", "--from-wrapper", "codex-ollama", "--force"])
+
     assert code != 0
+    settings = Paths.from_home(tmp_path).claude_settings()
+    if settings.exists():
+        env = json.loads(settings.read_text(encoding="utf-8")).get("env", {})
+        assert not (set(env) & {"ANTHROPIC_BASE_URL", "ANTHROPIC_DEFAULT_SONNET_MODEL"})
 
 
 @pytest.mark.integration

@@ -1689,9 +1689,8 @@ def test_enter_on_the_add_chip_opens_add_scoped_to_that_agent(monkeypatch):
 
 
 @pytest.mark.integration
-def test_chips_are_installed_wrappers_not_bare_providers(monkeypatch):
-    """A chip is an already-resolved wrapper, which is what lets Enter apply
-    it with no model/token prompt. An uninstalled preset is not a chip."""
+def test_chips_include_claude_presets_without_wrapper_files(monkeypatch):
+    """Claude presets are live backend choices, not PATH entries."""
     from code_helper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
@@ -1700,9 +1699,38 @@ def test_chips_are_installed_wrappers_not_bare_providers(monkeypatch):
 
     claude = frames[0]["claude"]
     assert "glm" in claude
-    # `deepseek`/`glm-ollama` are presets that were never installed here.
-    assert "deepseek" not in claude
-    assert "glm-ollama" not in claude
+    assert "deepseek" in claude
+    assert "glm-ollama" in claude
+
+
+@pytest.mark.integration
+def test_litellm_chip_reads_a_runtime_url_instead_of_marking_native(monkeypatch):
+    from code_helper.services.claude_settings import apply_switch
+    from code_helper.services.model import get_provider, with_base_url
+    from code_helper.services.spec import build_spec
+    from code_helper.services.wrappers import install_wrapper
+
+    paths = Paths.default()
+    provider = with_base_url(get_provider("litellm"), "https://proxy.example")
+    spec = build_spec(
+        agent="claude", provider=provider, model="glm-5.2", alias="glm52-litellm"
+    )
+    install_wrapper(paths, spec, token="sk-test")
+    apply_switch(
+        paths,
+        provider=provider,
+        tier_models=spec.tier_models,
+        token="sk-test",
+        force=True,
+    )
+
+    frames = _capture_frames(monkeypatch, ["CANCEL"])
+    assert main(["tui"]) == 0
+
+    import code_helper.cli.tui as tui
+
+    assert f"{tui._BOLD}✓ glm52-litellm{tui._RESET}" in frames[0]["claude"]
+    assert "✓ native" not in frames[0]["claude"]
 
 
 @pytest.mark.integration
@@ -1710,7 +1738,7 @@ def test_right_moves_the_chip_cursor_and_wraps(monkeypatch):
     from code_helper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
-    # Strip is now [native, glm, + add] — one more RIGHT to wrap.
+    # Presets are always present, even before their launcher files exist.
     frames = _capture_frames(monkeypatch, ["RIGHT", "RIGHT", "RIGHT", "CANCEL"])
     assert main(["tui"]) == 0
 
@@ -1718,12 +1746,9 @@ def test_right_moves_the_chip_cursor_and_wraps(monkeypatch):
 
     # cursor on native
     assert f"{tui._REVERSE}✓ native{tui._RESET}" in frames[0]["claude"]
-    # moved to the wrapper chip
-    assert f"{tui._REVERSE}glm{tui._RESET}" in frames[1]["claude"]
-    # moved to the action chip
-    assert f"{tui._REVERSE}+ add{tui._RESET}" in frames[2]["claude"]
-    # wrapped back around
-    assert f"{tui._REVERSE}✓ native{tui._RESET}" in frames[3]["claude"]
+    assert f"{tui._REVERSE}deepseek{tui._RESET}" in frames[1]["claude"]
+    assert f"{tui._REVERSE}glm{tui._RESET}" in frames[2]["claude"]
+    assert f"{tui._REVERSE}glm-ollama{tui._RESET}" in frames[3]["claude"]
 
 
 @pytest.mark.integration
@@ -1769,6 +1794,7 @@ def test_moving_the_chip_cursor_does_no_io(monkeypatch):
             apply_wrapper=backend.apply_wrapper,
             apply_native=backend.apply_native,
             lifecycle=backend.lifecycle,
+            chip_is_applied=backend.chip_is_applied,
         )
     monkeypatch.setattr(tui, "_AGENT_BACKENDS", patched)
 
@@ -1790,9 +1816,9 @@ def test_chip_cursor_is_independent_per_agent(monkeypatch):
 
     import code_helper.cli.tui as tui
 
-    assert f"{tui._REVERSE}glm{tui._RESET}" in frames[1]["claude"]
+    assert f"{tui._REVERSE}deepseek{tui._RESET}" in frames[1]["claude"]
     assert (
-        f"{tui._REVERSE}glm{tui._RESET}" in frames[3]["claude"]
+        f"{tui._REVERSE}deepseek{tui._RESET}" in frames[3]["claude"]
     )  # survived the row round-trip
 
 
@@ -1842,9 +1868,8 @@ def test_enter_applies_the_second_wrapper_sharing_a_provider_with_the_first(
         "_apply_switch_wrapper",
         lambda self, spec: seen.append(spec.name),
     )
-    # RIGHT twice from native: native -> glm -> glm-air (order follows
-    # _all_wrapper_specs, alphabetical by alias: glm, glm-air).
-    _real_menu_keys(monkeypatch, ["RIGHT", "RIGHT", "ENTER", "CANCEL"])
+    # Presets are first, then ad-hoc chips alphabetically.
+    _real_menu_keys(monkeypatch, ["RIGHT"] * 4 + ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
     assert seen == ["glm-air"]
@@ -1883,7 +1908,36 @@ def test_enter_on_an_agent_row_applies_the_highlighted_chip(monkeypatch):
     _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
-    assert seen == ["glm"]
+    assert seen == ["deepseek"]
+
+
+@pytest.mark.unit
+def test_claude_chip_request_is_a_noninteractive_hot_apply():
+    import argparse
+
+    import code_helper.cli.tui as tui
+
+    request = tui.TuiSession(
+        argparse.Namespace(dry_run=False, debug=False)
+    )._switch_request(from_preset="deepseek")
+    assert request.force is True
+    assert request.from_preset == "deepseek"
+
+
+@pytest.mark.integration
+def test_enter_on_deepseek_chip_hot_applies_without_confirmation(monkeypatch):
+    from code_helper.services.paths import Paths
+
+    _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
+    assert main(["tui"]) == 0
+
+    import json
+
+    settings = json.loads(Paths.default().claude_settings().read_text(encoding="utf-8"))
+    assert (
+        settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"]
+        == "deepseek-v4-flash:0731-cloud"
+    )
 
 
 @pytest.mark.integration
@@ -1925,7 +1979,7 @@ def test_a_removed_wrapper_disappears_from_the_strip(monkeypatch):
             frames.append(_chip_rows(items))
             state["n"] += 1
             if state["n"] == 1:
-                return "RIGHT"  # park the cursor on the glm chip
+                return "RIGHT"  # park the cursor on the DeepSeek chip
             if state["n"] == 2:
                 remove_wrapper(paths, "glm", force=True)
                 return "CANCEL"  # leave the menu so the loop re-renders
@@ -1938,7 +1992,7 @@ def test_a_removed_wrapper_disappears_from_the_strip(monkeypatch):
 
     import code_helper.cli.tui as tui
 
-    assert f"{tui._REVERSE}glm{tui._RESET}" in frames[1]["claude"]
+    assert f"{tui._REVERSE}deepseek{tui._RESET}" in frames[1]["claude"]
 
 
 @pytest.mark.unit

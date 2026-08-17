@@ -66,6 +66,9 @@ __all__ = [
     "patch_settings",
     "diff_preview",
     "current_switch",
+    "active_switch_env",
+    "live_axes_for_spec",
+    "matches_switch_spec",
     "apply_switch",
     "restore_settings",
 ]
@@ -421,9 +424,8 @@ def current_switch(paths: Paths) -> str | None:
     Read-only, NEVER raises — a missing or corrupt file reads as ``None``,
     mirroring ``state.load_state``'s posture. Resolves by matching the live
     ``ANTHROPIC_BASE_URL`` against ``anthropic_base_url(p.base_url)`` for
-    each switchable, non-reset provider; no match (including a hand-edited
-    endpoint, or a ``native`` reset with no managed keys present) reports
-    ``None`` rather than guessing.
+    each switchable, non-reset provider. A managed but unrecognised endpoint
+    reports ``"custom"``; only the absence of managed keys is ``None``.
 
     Deliberately derives this from the FILE ITSELF, not from ``state.json``:
     a second source of truth for "what's active" would go stale the moment
@@ -436,12 +438,8 @@ def current_switch(paths: Paths) -> str | None:
     """
     from code_helper.services.model import switchable_providers
 
-    try:
-        _, parsed = read_settings(paths)
-    except CodeHelperError:
-        return None
-    env = parsed.get("env")
-    if not isinstance(env, dict):
+    env = _read_managed_env(paths)
+    if env is None:
         return None
     live_base_url = env.get("ANTHROPIC_BASE_URL")
     if not live_base_url:
@@ -451,7 +449,63 @@ def current_switch(paths: Paths) -> str | None:
             continue
         if anthropic_base_url(provider.base_url) == live_base_url:
             return provider.name
-    return None
+    return "custom"
+
+
+def _read_managed_env(paths: Paths) -> dict | None:
+    """The ``env`` block of settings.json, or None when unreadable/absent.
+
+    Shared by the read-only ``current_switch``/``active_switch_env`` so a
+    change to how a missing or corrupt settings.json reads (the ``None``
+    posture) is made in one place.
+    """
+    try:
+        _, parsed = read_settings(paths)
+    except CodeHelperError:
+        return None
+    env = parsed.get("env")
+    if not isinstance(env, dict):
+        return None
+    return env
+
+
+def active_switch_env(paths: Paths) -> dict[str, str] | None:
+    """Snapshot managed live settings, or None when no override is present."""
+    env = _read_managed_env(paths)
+    if env is None:
+        return None
+    managed = {key: value for key, value in env.items() if key in MANAGED_ENV_KEYS}
+    return managed or None
+
+
+def live_axes_for_spec(spec) -> tuple[Provider, TierModels, str | None]:
+    """Translate a Claude wrapper/preset into live-settings axes."""
+    if ConfigShape.ANTHROPIC_SETTINGS not in spec.provider.shapes:
+        raise CodeHelperError(
+            f"wrapper {spec.name!r} cannot switch a live Claude session"
+        )
+    tiers = spec.tier_models or TierModels.uniform(spec.model)
+    subagent = (
+        spec.model if spec.shape is ConfigShape.OLLAMA_LAUNCH else spec.subagent_model
+    )
+    return spec.provider, tiers, subagent
+
+
+def matches_switch_spec(active_env: dict[str, str] | None, spec) -> bool:
+    """True iff a managed snapshot exactly represents ``spec``'s target."""
+    if active_env is None:
+        return False
+    try:
+        provider, tiers, subagent = live_axes_for_spec(spec)
+        patch = resolve_switch_patch(
+            provider,
+            tier_models=tiers,
+            token=active_env.get("ANTHROPIC_AUTH_TOKEN", ""),
+            subagent_model=subagent,
+        )
+    except CodeHelperError:
+        return False
+    return active_env == patch.env
 
 
 def apply_switch(

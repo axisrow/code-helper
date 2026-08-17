@@ -904,7 +904,9 @@ def _handle_set_default(args: argparse.Namespace | SetDefaultRequest) -> int:
     return 0
 
 
-def _switch_resolve_token(provider, req: SwitchRequest, paths) -> str:
+def _switch_resolve_token(
+    provider, req: SwitchRequest, paths, *, non_interactive: bool = False
+) -> str:
     """The token for a `switch --provider ...` (explicit-axes) invocation.
 
     Mirrors ``_add_resolve_token`` exactly, but works off a bare
@@ -912,9 +914,24 @@ def _switch_resolve_token(provider, req: SwitchRequest, paths) -> str:
     :class:`~code_helper.services.spec.WrapperSpec` — `switch` never builds
     one (see ``_handle_switch``'s docstring on why). An `env_reset` provider
     never reaches this: :func:`_handle_switch` returns before calling it.
+
+    ``non_interactive=True`` is the chip hot-apply path (``from_preset``): a
+    token is taken from env/cache or the switch FAILS CLEANLY — it never
+    prompts, because a prompt inside the running menu would swallow the
+    user's keystrokes and block the very no-prompt apply the chip promises.
     """
     if provider.auth != "secret":
         return provider.auth_value
+    kwargs = {}
+    if non_interactive:
+
+        def _no_prompt(_prompt: str) -> str:
+            raise CodeHelperError(
+                f"no {provider.name} token available for a non-interactive "
+                f"switch — set {provider.token_env_var} or cache one first"
+            )
+
+        kwargs["getpass_fn"] = _no_prompt
     resolved = secrets.resolve_token(
         env_var=provider.token_env_var,
         prompt=f"{provider.name} token ({provider.token_env_var}): ",
@@ -922,6 +939,7 @@ def _switch_resolve_token(provider, req: SwitchRequest, paths) -> str:
         provider_name=provider.name,
         profile_name=req.profile,
         base_url_policy=provider.base_url_policy,
+        **kwargs,
     )
     return resolved.value
 
@@ -935,11 +953,11 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
     (``wrappers.spec_from_installed``) and the token from the same file
     (``wrappers.token_from_installed``) — zero prompts, zero re-derivation.
 
-    Raises:
-        CodeHelperError: no wrapper by that name, or it is not an
-            ``anthropic-env`` wrapper (an ``ollama-launch``/``openai-toml``
-            wrapper carries no tier models to lift — `switch` only ever
-            drives the ANTHROPIC_SETTINGS mechanism).
+    An ``ollama-launch`` claude wrapper is converted to Ollama's
+    Anthropic-compatible live-settings target, just like its preset chip.
+    ``switch`` drives a LIVE CLAUDE session, so a wrapper belonging to any
+    other agent (codex shares Ollama) fails closed rather than retargeting
+    claude to a foreign selection.
     """
     if not req.from_wrapper:
         raise CodeHelperError(
@@ -952,12 +970,12 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
         raise CodeHelperError(
             f"no installed wrapper named {name!r} — see `code-helper list`"
         )
-    if spec.shape is not ConfigShape.ANTHROPIC_ENV:
+    if spec.agent.name != "claude":
         raise CodeHelperError(
-            f"wrapper {name!r} is a {spec.shape.value} wrapper — "
-            f"`switch --from-wrapper` needs an anthropic-env one (see "
-            f"`code-helper list`)"
+            f"wrapper {name!r} is a {spec.agent.name} wrapper — "
+            f"`switch --from-wrapper` can only retarget a claude session"
         )
+    provider, tier_models, subagent_model = claude_settings.live_axes_for_spec(spec)
     token = ""
     if spec.auth == "secret":
         token = token_from_installed(paths, name, spec.provider.name) or ""
@@ -968,7 +986,35 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
             )
     elif spec.auth == "literal":
         token = spec.auth_value
-    return spec.provider, spec.tier_models, token, spec.subagent_model
+    return provider, tier_models, token, subagent_model
+
+
+def _switch_axes_from_preset(req: SwitchRequest, paths):
+    """Resolve a curated Claude chip without consulting ``~/.local/bin``.
+
+    Presets are backend choices in the chipset.  Their optional wrapper is a
+    separate convenience for launching a *new* process, so a foreign script
+    named ``deepseek`` must never make the DeepSeek chip disappear or fail.
+    ``ollama-launch`` presets are converted to Ollama's Anthropic-compatible
+    live-settings form; that is the only way to retarget an existing process.
+
+    A preset, unlike an installed wrapper, freezes no token — so the token is
+    resolved NON-interactively (env/cache or a clean error): a chip press is a
+    no-prompt hot-apply, and a hidden prompt inside the running menu would
+    swallow keystrokes.
+    """
+    if not req.from_preset:
+        raise CodeHelperError("internal error: missing preset for chipset switch")
+    spec = spec_from_preset(get_preset(req.from_preset))
+    if spec.agent.name != "claude":
+        raise CodeHelperError(f"preset {spec.name!r} is not a Claude backend")
+    provider, tier_models, subagent_model = claude_settings.live_axes_for_spec(spec)
+    return (
+        provider,
+        tier_models,
+        _switch_resolve_token(provider, req, paths, non_interactive=True),
+        subagent_model,
+    )
 
 
 def _switch_axes_from_flags(req: SwitchRequest, paths):
@@ -1052,8 +1098,11 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         )
     if req.slot is not None and not req.restore:
         raise CodeHelperError("--slot only applies together with --restore")
-    if req.provider and req.from_wrapper:
-        raise CodeHelperError("give either a provider or --from-wrapper, not both")
+    switch_sources = sum(
+        bool(value) for value in (req.provider, req.from_wrapper, req.from_preset)
+    )
+    if switch_sources > 1:
+        raise CodeHelperError("give exactly one switch source")
 
     if req.restore:
         slot = req.slot or 1
@@ -1068,7 +1117,11 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
             print("no changes")
         return 0
 
-    if req.from_wrapper:
+    if req.from_preset:
+        provider, tier_models, token, subagent_model = _switch_axes_from_preset(
+            req, paths
+        )
+    elif req.from_wrapper:
         provider, tier_models, token, subagent_model = _switch_axes_from_wrapper(
             req, paths
         )
@@ -1084,6 +1137,11 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         token=token,
         subagent_model=subagent_model,
         dry_run=req.dry_run,
+        # A provider switch is an explicitly requested hot-apply operation.
+        # A chip press (the TUI) opts in via force=True and skips the prompt;
+        # the interactive CLI command keeps its confirmation gate unless
+        # --force is passed. The service still validates the complete target,
+        # protects unrelated keys, snapshots a backup and rejects stale writes.
         force=req.force,
         confirm=_confirm_set_default,
     )
@@ -1418,7 +1476,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         default=False,
-        help="skip the confirmation prompt",
+        help="skip the confirmation prompt (the TUI chip hot-applies either way)",
     )
     p_switch.set_defaults(func=_handle_switch)
 
