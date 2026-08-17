@@ -935,11 +935,10 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
     (``wrappers.spec_from_installed``) and the token from the same file
     (``wrappers.token_from_installed``) — zero prompts, zero re-derivation.
 
-    Raises:
-        CodeHelperError: no wrapper by that name, or it is not an
-            ``anthropic-env`` wrapper (an ``ollama-launch``/``openai-toml``
-            wrapper carries no tier models to lift — `switch` only ever
-            drives the ANTHROPIC_SETTINGS mechanism).
+    An ``ollama-launch`` wrapper is converted to Ollama's
+    Anthropic-compatible live-settings target, just like its preset chip.
+    Other shapes still fail closed unless their provider explicitly supports
+    the live settings mechanism.
     """
     if not req.from_wrapper:
         raise CodeHelperError(
@@ -952,12 +951,7 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
         raise CodeHelperError(
             f"no installed wrapper named {name!r} — see `code-helper list`"
         )
-    if spec.shape is not ConfigShape.ANTHROPIC_ENV:
-        raise CodeHelperError(
-            f"wrapper {name!r} is a {spec.shape.value} wrapper — "
-            f"`switch --from-wrapper` needs an anthropic-env one (see "
-            f"`code-helper list`)"
-        )
+    provider, tier_models, subagent_model = claude_settings.live_axes_for_spec(spec)
     token = ""
     if spec.auth == "secret":
         token = token_from_installed(paths, name, spec.provider.name) or ""
@@ -968,7 +962,30 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
             )
     elif spec.auth == "literal":
         token = spec.auth_value
-    return spec.provider, spec.tier_models, token, spec.subagent_model
+    return provider, tier_models, token, subagent_model
+
+
+def _switch_axes_from_preset(req: SwitchRequest, paths):
+    """Resolve a curated Claude chip without consulting ``~/.local/bin``.
+
+    Presets are backend choices in the chipset.  Their optional wrapper is a
+    separate convenience for launching a *new* process, so a foreign script
+    named ``deepseek`` must never make the DeepSeek chip disappear or fail.
+    ``ollama-launch`` presets are converted to Ollama's Anthropic-compatible
+    live-settings form; that is the only way to retarget an existing process.
+    """
+    if not req.from_preset:
+        raise CodeHelperError("internal error: missing preset for chipset switch")
+    spec = spec_from_preset(get_preset(req.from_preset))
+    if spec.agent.name != "claude":
+        raise CodeHelperError(f"preset {spec.name!r} is not a Claude backend")
+    provider, tier_models, subagent_model = claude_settings.live_axes_for_spec(spec)
+    return (
+        provider,
+        tier_models,
+        _switch_resolve_token(provider, req, paths),
+        subagent_model,
+    )
 
 
 def _switch_axes_from_flags(req: SwitchRequest, paths):
@@ -1052,8 +1069,11 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         )
     if req.slot is not None and not req.restore:
         raise CodeHelperError("--slot only applies together with --restore")
-    if req.provider and req.from_wrapper:
-        raise CodeHelperError("give either a provider or --from-wrapper, not both")
+    switch_sources = sum(
+        bool(value) for value in (req.provider, req.from_wrapper, req.from_preset)
+    )
+    if switch_sources > 1:
+        raise CodeHelperError("give exactly one switch source")
 
     if req.restore:
         slot = req.slot or 1
@@ -1068,7 +1088,11 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
             print("no changes")
         return 0
 
-    if req.from_wrapper:
+    if req.from_preset:
+        provider, tier_models, token, subagent_model = _switch_axes_from_preset(
+            req, paths
+        )
+    elif req.from_wrapper:
         provider, tier_models, token, subagent_model = _switch_axes_from_wrapper(
             req, paths
         )
@@ -1084,8 +1108,12 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         token=token,
         subagent_model=subagent_model,
         dry_run=req.dry_run,
-        force=req.force,
-        confirm=_confirm_set_default,
+        # A provider switch is an explicitly requested hot-apply operation.
+        # The service still validates the complete target, protects unrelated
+        # keys, snapshots a backup and rejects stale writes; it must not turn
+        # a non-interactive CLI command into a confirmation prompt.
+        force=True,
+        confirm=None,
     )
     if not wrote:
         print("no changes")
@@ -1418,7 +1446,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         default=False,
-        help="skip the confirmation prompt",
+        help="accepted for compatibility; switch hot-applies without a prompt",
     )
     p_switch.set_defaults(func=_handle_switch)
 

@@ -21,9 +21,11 @@ from code_helper.errors import CodeHelperError
 from code_helper.services.claude_settings import (
     MANAGED_ENV_KEYS,
     SettingsPatch,
+    active_switch_env,
     apply_switch,
     current_switch,
     diff_preview,
+    matches_switch_spec,
     patch_settings,
     read_settings,
     resolve_switch_patch,
@@ -680,7 +682,31 @@ def test_current_switch_none_for_a_hand_configured_endpoint(tmp_path):
         paths,
         {"env": {"ANTHROPIC_BASE_URL": "https://not-a-registered-provider.example"}},
     )
-    assert current_switch(paths) is None
+    assert current_switch(paths) == "custom"
+
+
+@pytest.mark.unit
+def test_custom_litellm_target_is_not_native_and_matches_its_wrapper(tmp_path):
+    """A runtime URL has no registry URL, but the chip can still read itself."""
+    paths = Paths.from_home(tmp_path)
+    provider = with_base_url(LITELLM, "https://litellm.example.example")
+    spec = WrapperSpec(
+        alias="local-litellm",
+        agent=get_agent("claude"),
+        provider=provider,
+        shape=ConfigShape.ANTHROPIC_ENV,
+        model="glm-5.2",
+        tier_models=TierModels.uniform("glm-5.2"),
+    )
+    apply_switch(
+        paths,
+        provider=provider,
+        tier_models=spec.tier_models,
+        token="sk-test",
+        force=True,
+    )
+    assert current_switch(paths) == "custom"
+    assert matches_switch_spec(active_switch_env(paths), spec)
 
 
 # --------------------------------------------------------------------------- #

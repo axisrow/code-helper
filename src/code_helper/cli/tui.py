@@ -111,12 +111,18 @@ class _AgentBackend:
         lifecycle: When the change takes effect, rendered at the end of the
             row. The claude/codex difference (a running session vs. the next
             launch) is real and must be visible, not implied.
+        chip_is_applied: Method name taking ``(agent_name, chip)`` — whether a
+            backend chip is the one currently applied. Defaults to matching by
+            provider name; claude overrides it with an exact-env match because
+            its readback is richer than a provider name (see
+            :meth:`_chip_is_applied_switch`).
     """
 
     read_applied: Callable[[Paths], str | None]
     apply_wrapper: str
     apply_native: str
     lifecycle: str
+    chip_is_applied: str
 
 
 def _hint(
@@ -200,6 +206,7 @@ class TuiSession:
         "_tab_label",
         "_slot_label",
         "_applied",
+        "_claude_active_env",
         "_chips",
         "_chip_index",
     )
@@ -217,6 +224,8 @@ class TuiSession:
         self._slot_label: str = ""
         #: agent name -> the provider its config currently names, or None.
         self._applied: dict[str, str | None] = {}
+        #: Managed Claude env snapshot used for exact chip readback.
+        self._claude_active_env: dict[str, str] | None = None
         #: agent name -> its chip strip (`native` plus installed wrappers).
         self._chips: dict[str, list] = {}
         #: agent name -> chip cursor. Ephemeral on purpose: persisting it
@@ -633,8 +642,14 @@ class TuiSession:
     def _apply_switch_wrapper(self, spec) -> None:
         """claude: retarget the RUNNING session at ``spec``'s backend."""
         from code_helper.cli.parser import _handle_switch
+        from code_helper.services.spec import preset_names
 
-        self._run(_handle_switch, self._switch_request(from_wrapper=spec.name))
+        source = (
+            self._switch_request(from_preset=spec.name)
+            if spec.name in preset_names()
+            else self._switch_request(from_wrapper=spec.name)
+        )
+        self._run(_handle_switch, source)
 
     def _apply_switch_native(self) -> None:
         """claude: clear the managed ``env`` block from settings.json."""
@@ -642,7 +657,7 @@ class TuiSession:
 
         self._run(_handle_switch, self._switch_request(provider=_NATIVE_CHIP))
 
-    def _switch_request(self, *, provider=None, from_wrapper=None):
+    def _switch_request(self, *, provider=None, from_wrapper=None, from_preset=None):
         """A :class:`SwitchRequest` carrying only the axis a chip varies.
 
         Every other field is meaningless from the main screen (no model or
@@ -667,8 +682,12 @@ class TuiSession:
             slot=None,
             status=False,
             dry_run=getattr(self.args, "dry_run", False),
-            force=False,
+            # Chips are hot-apply controls.  The target has already been
+            # resolved and validated locally; a second interactive prompt
+            # turns a one-key backend switch into a blocking CLI flow.
+            force=True,
             debug=getattr(self.args, "debug", False),
+            from_preset=from_preset,
         )
 
     def _apply_set_default_wrapper(self, spec) -> None:
@@ -1268,6 +1287,9 @@ class TuiSession:
             name: backend.read_applied(paths)
             for name, backend in _AGENT_BACKENDS.items()
         }
+        from code_helper.services.claude_settings import active_switch_env
+
+        self._claude_active_env = active_switch_env(paths)
         self._chips = {name: self._chips_for(name, paths) for name in _AGENT_BACKENDS}
         # A wrapper can be removed (`d`) or added (`a`) between iterations, so
         # a chip cursor parked past the end of a now-shorter strip is normal,
@@ -1278,31 +1300,35 @@ class TuiSession:
                 self._chip_index[name] = max(0, len(chips) - 1)
 
     def _chips_for(self, agent_name: str, paths) -> list:
-        """The chip strip for ``agent_name``: native, its wrappers, then Add.
+        """The chip strip for ``agent_name``: native, targets, then Add.
 
-        A BACKEND chip is an ALREADY-INSTALLED wrapper, never a bare
-        provider: the wrapper is where a backend's model, token and base URL
-        were resolved and frozen when it was created. That is what lets Enter
-        apply a backend chip with no prompts and no second guess about which
-        model to use — and it is why there is no "provider with no wrapper"
-        chip to explain away.
+        Curated Claude presets are live backend targets in their own right;
+        they do not depend on an optional launch-wrapper file.  Managed ad-hoc
+        wrappers add their recovered target to the same strip.
 
         The trailing :data:`_ADD_CHIP` is the one deliberate exception: not a
         backend, never "applied", present on every row (including one with no
         wrappers yet) so that row always has a visible way to get its first
         one instead of reading as empty/broken.
         """
-        from code_helper.services.wrappers import is_installed
+        from code_helper.services.spec import PRESETS, spec_from_preset
+        from code_helper.services.wrappers import discover_managed, spec_from_installed
 
-        return [
-            _NATIVE_CHIP,
-            *(
-                spec
-                for spec in self._all_wrapper_specs()
-                if spec.agent.name == agent_name and is_installed(paths, spec.name)
-            ),
-            _ADD_CHIP,
+        presets = [
+            spec_from_preset(preset) for preset in PRESETS if preset.agent == agent_name
         ]
+        # A managed constructor wrapper has no registry entry and therefore
+        # is an additional chip.  A preset name is deliberately not recovered
+        # from disk: its chip means the canonical preset, never whatever file
+        # happens to have claimed the same alias.  ``discover_managed`` already
+        # excludes preset names, so every name here is an ad-hoc wrapper.
+        ad_hoc = [
+            spec
+            for name in discover_managed(paths)
+            if (spec := spec_from_installed(paths, name)) is not None
+            and spec.agent.name == agent_name
+        ]
+        return [_NATIVE_CHIP, *presets, *ad_hoc, _ADD_CHIP]
 
     @staticmethod
     def _chip_name(chip) -> str:
@@ -1318,13 +1344,34 @@ class TuiSession:
         same honest limitation ``current_switch`` documents for two providers
         sharing one base URL. The action chip is never applied — it isn't a
         backend at all.
+
+        The per-agent readback semantic (provider-name match vs. claude's
+        exact-env match) lives in ``_AgentBackend.chip_is_applied``, resolved
+        here by method name — never an ``if agent.name == ...`` branch.
         """
         if chip == _ADD_CHIP:
             return False
         applied = self._applied.get(agent_name)
         if chip == _NATIVE_CHIP:
             return applied is None
+        backend = _AGENT_BACKENDS[agent_name]
+        return getattr(self, backend.chip_is_applied)(agent_name, chip)
+
+    def _chip_is_applied_provider(self, agent_name: str, chip) -> bool:
+        """Default readback: a backend chip matches when its provider is applied."""
+        applied = self._applied.get(agent_name)
         return applied is not None and chip.provider.name == applied
+
+    def _chip_is_applied_switch(self, agent_name: str, chip) -> bool:
+        """claude readback: exact-env match against the managed snapshot.
+
+        ``_claude_active_env`` is refreshed once per main-loop iteration by
+        ``_refresh_active_label``, so this reads only the cache — never the
+        filesystem on a redraw frame.
+        """
+        from code_helper.services.claude_settings import matches_switch_spec
+
+        return matches_switch_spec(self._claude_active_env, chip)
 
     def _chip_row(self, agent_name: str) -> Callable[..., str]:
         """A label callable rendering one agent's chip strip.
@@ -1603,12 +1650,14 @@ def _register_agent_backends() -> None:
                 apply_wrapper="_apply_switch_wrapper",
                 apply_native="_apply_switch_native",
                 lifecycle="live",
+                chip_is_applied="_chip_is_applied_switch",
             ),
             "codex": _AgentBackend(
                 read_applied=current_default,
                 apply_wrapper="_apply_set_default_wrapper",
                 apply_native="_apply_set_default_native",
                 lifecycle="next launch",
+                chip_is_applied="_chip_is_applied_provider",
             ),
         }
     )
@@ -1616,9 +1665,13 @@ def _register_agent_backends() -> None:
     # at import, so a typo is an immediate ImportError rather than an
     # AttributeError the first time someone presses Enter on that row.
     for backend in _AGENT_BACKENDS.values():
-        for hook in (backend.apply_wrapper, backend.apply_native):
+        for hook in (
+            backend.apply_wrapper,
+            backend.apply_native,
+            backend.chip_is_applied,
+        ):
             if not callable(getattr(TuiSession, hook, None)):
-                raise AttributeError(f"TuiSession has no apply hook {hook!r}")
+                raise AttributeError(f"TuiSession has no hook {hook!r}")
 
 
 _register_agent_backends()

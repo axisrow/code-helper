@@ -15,6 +15,8 @@ import json
 import pytest
 
 from code_helper.__main__ import main
+from code_helper.cli.parser import _handle_switch
+from code_helper.cli.requests import SwitchRequest
 from code_helper.services.paths import Paths
 
 
@@ -30,10 +32,32 @@ def _write_settings(tmp_path, data: dict) -> None:
     paths.claude_settings().write_text(json.dumps(data), encoding="utf-8")
 
 
+def _preset_request(name: str) -> SwitchRequest:
+    return SwitchRequest(
+        provider=None,
+        from_wrapper=None,
+        model=None,
+        haiku=None,
+        sonnet=None,
+        opus=None,
+        subagent_model=None,
+        base_url=None,
+        auth=None,
+        profile=None,
+        restore=False,
+        slot=None,
+        status=False,
+        dry_run=False,
+        force=True,
+        debug=False,
+        from_preset=name,
+    )
+
+
 @pytest.mark.integration
 def test_switch_positional_provider_applies(tmp_path, monkeypatch):
     monkeypatch.setenv("ZAI_API_KEY", "sk-env")
-    code = main(["switch", "zai", "--model", "glm-5.2", "--force"])
+    code = main(["switch", "zai", "--model", "glm-5.2"])
     assert code == 0
     env = _settings(tmp_path)["env"]
     assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
@@ -81,6 +105,29 @@ def test_switch_native_never_reads_env_or_prompts(tmp_path, monkeypatch):
         set(_settings(tmp_path).get("env", {}))
         & {"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"}
     )
+
+
+@pytest.mark.integration
+def test_chip_preset_deepseek_applies_without_a_wrapper_file(tmp_path):
+    foreign = Paths.from_home(tmp_path).script_for("deepseek")
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("#!/bin/sh\necho foreign\n", encoding="utf-8")
+    assert _handle_switch(_preset_request("deepseek")) == 0
+    env = _settings(tmp_path)["env"]
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:11434"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "deepseek-v4-flash:0731-cloud"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "deepseek-v4-flash:0731-cloud"
+
+
+@pytest.mark.integration
+def test_chip_preset_glm_ollama_applies_live_ollama_settings(tmp_path):
+    assert _handle_switch(_preset_request("glm-ollama")) == 0
+    env = _settings(tmp_path)["env"]
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:11434"
+    assert {
+        env[f"ANTHROPIC_DEFAULT_{tier}_MODEL"] for tier in ("HAIKU", "SONNET", "OPUS")
+    } == {"glm-5.2:cloud"}
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.2:cloud"
 
 
 @pytest.mark.integration
@@ -171,10 +218,13 @@ def test_switch_from_wrapper_unknown_name_fails(tmp_path):
 
 
 @pytest.mark.integration
-def test_switch_from_wrapper_rejects_a_non_anthropic_env_wrapper(tmp_path):
+def test_switch_from_wrapper_lifts_an_ollama_launch_wrapper_to_live_settings(tmp_path):
     assert main(["add", "glm-ollama"]) == 0
     code = main(["switch", "--from-wrapper", "glm-ollama", "--force"])
-    assert code != 0
+    assert code == 0
+    env = _settings(tmp_path)["env"]
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.2:cloud"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.2:cloud"
 
 
 @pytest.mark.integration

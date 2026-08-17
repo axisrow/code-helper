@@ -237,6 +237,10 @@ class SwitchRequest:
     dry_run: bool
     force: bool
     debug: bool
+    # Internal TUI fast path.  Unlike ``from_wrapper``, a preset is registry
+    # data, not a pathname: selecting it must work even when no wrapper has
+    # been installed (or an unrelated executable owns that alias on PATH).
+    from_preset: str | None = None
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> SwitchRequest:
@@ -268,4 +272,5 @@ class SwitchRequest:
             dry_run=bool(_g(args, "dry_run", False)),
             force=bool(_g(args, "force", False)),
             debug=bool(_g(args, "debug", False)),
+            from_preset=None,
         )
