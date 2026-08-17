@@ -98,6 +98,41 @@ def _parse_entry(entry: object) -> _RawUserAgent | None:
     return _RawUserAgent(name=name, binary=binary, description=description)
 
 
+def _entries_to_agents(entries: list[object]) -> tuple[Agent, ...]:
+    """Turn a validated ``agents`` list into a tuple of :class:`Agent`.
+
+    Per-entry skip, shared by both readers: a stray bad entry (a non-dict, a
+    missing field, a name/binary that fails the regex) must not cost the user
+    every other agent in the file. Defense in depth: entries are validated
+    again on the way IN by :func:`add_user_agent`, but a hand-edited file
+    bypasses that gate, so a binary/name that fails the same regex checked at
+    write time is skipped here too rather than trusted.
+    """
+    agents: list[Agent] = []
+    seen_names: set[str] = set()
+    for raw_entry in entries:
+        parsed = _parse_entry(raw_entry)
+        if parsed is None:
+            continue
+        try:
+            validate_agent_binary(parsed.name)
+            validate_agent_binary(parsed.binary)
+        except CodeHelperError:
+            continue
+        if parsed.name in seen_names:
+            continue
+        seen_names.add(parsed.name)
+        agents.append(
+            Agent(
+                name=parsed.name,
+                binary=parsed.binary,
+                shapes=frozenset({ConfigShape.OLLAMA_LAUNCH}),
+                description=parsed.description,
+            )
+        )
+    return tuple(agents)
+
+
 def load_user_agents(paths: Paths) -> tuple[Agent, ...]:
     """Read ``agents.json`` as a tuple of :class:`Agent`.
 
@@ -121,34 +156,37 @@ def load_user_agents(paths: Paths) -> tuple[Agent, ...]:
     entries = data.get("agents")
     if not isinstance(entries, list):
         return ()
+    return _entries_to_agents(entries)
 
-    agents: list[Agent] = []
-    seen_names: set[str] = set()
-    for raw_entry in entries:
-        parsed = _parse_entry(raw_entry)
-        if parsed is None:
-            continue
-        # Defense in depth: entries are validated again on the way IN by
-        # add_user_agent, but a hand-edited file bypasses that gate, so a
-        # binary/name that fails the same regex checked at write time is
-        # skipped here too rather than trusted.
-        try:
-            validate_agent_binary(parsed.name)
-            validate_agent_binary(parsed.binary)
-        except CodeHelperError:
-            continue
-        if parsed.name in seen_names:
-            continue
-        seen_names.add(parsed.name)
-        agents.append(
-            Agent(
-                name=parsed.name,
-                binary=parsed.binary,
-                shapes=frozenset({ConfigShape.OLLAMA_LAUNCH}),
-                description=parsed.description,
-            )
-        )
-    return tuple(agents)
+
+def _load_user_agents_strict(paths: Paths) -> tuple[Agent, ...]:
+    """Read ``agents.json`` for MUTATION, failing closed on a corrupt file.
+
+    The permissive :func:`load_user_agents` (never raises, degrades to empty)
+    is right for listing/UI, but wrong as the read side of a read-modify-write:
+    a malformed file would read as "no agents" and the next add would overwrite
+    every prior entry with just the new one — silent, irreversible deletion.
+    This strict variant raises on a file that cannot be parsed, so a corrupt
+    registry is surfaced instead of destroyed. A MISSING file is fine (a fresh
+    registry); an unreadable one is not (we cannot know what it holds).
+    """
+    path = paths.agents_file()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ()
+    except OSError as exc:
+        raise CodeHelperError(f"cannot read agents registry: {exc}") from exc
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise CodeHelperError(f"agents registry is corrupt: {exc}") from exc
+    if not isinstance(data, dict):
+        raise CodeHelperError("agents registry is corrupt: expected an object")
+    entries = data.get("agents")
+    if not isinstance(entries, list):
+        raise CodeHelperError("agents registry is corrupt: expected an 'agents' list")
+    return _entries_to_agents(entries)
 
 
 def all_agents(paths: Paths) -> tuple[Agent, ...]:
@@ -220,7 +258,9 @@ def add_user_agent(
     with open(lock_path, "a+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
-            user_agents = load_user_agents(paths)
+            # Strict read: a corrupt registry must fail closed here, not read
+            # as "no agents" and be overwritten with just the new entry.
+            user_agents = _load_user_agents_strict(paths)
             existing = AGENTS + user_agents
             existing_names = {a.name for a in existing}
             existing_binaries = {a.binary for a in existing}

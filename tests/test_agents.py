@@ -255,6 +255,49 @@ def test_add_user_agent_returns_the_created_agent(tmp_path):
 
 
 @pytest.mark.unit
+def test_add_user_agent_fails_closed_on_a_corrupt_registry(tmp_path):
+    """A malformed agents.json must NOT read as "no agents" and be overwritten
+    with just the new entry — that would silently delete every prior agent.
+    The mutation path fails closed and leaves the corrupt file untouched."""
+    paths = _paths(tmp_path)
+    _write_agents_file(paths, "{not valid json")
+    with pytest.raises(CodeHelperError, match="corrupt"):
+        add_user_agent(paths, "myagent")
+    # The corrupt file is preserved, not clobbered.
+    assert paths.agents_file().read_text(encoding="utf-8") == "{not valid json"
+
+
+@pytest.mark.unit
+def test_add_user_agent_fails_closed_on_a_non_dict_registry(tmp_path):
+    paths = _paths(tmp_path)
+    _write_agents_file(paths, '["foo", "bar"]')
+    with pytest.raises(CodeHelperError, match="corrupt"):
+        add_user_agent(paths, "myagent")
+
+
+@pytest.mark.unit
+def test_add_user_agent_preserves_valid_entries_alongside_a_bad_one(tmp_path):
+    """A stray bad ENTRY (not a corrupt file) must not block the add nor cost
+    the user the valid entries — only a file that cannot be parsed fails
+    closed."""
+    paths = _paths(tmp_path)
+    _write_agents_file(
+        paths,
+        json.dumps(
+            {
+                "agents": [
+                    {"name": "good-agent", "binary": "good-agent", "description": "ok"},
+                    "not-a-dict",
+                ]
+            }
+        ),
+    )
+    add_user_agent(paths, "myagent")
+    names = {a.name for a in load_user_agents(paths)}
+    assert names == {"good-agent", "myagent"}
+
+
+@pytest.mark.unit
 def test_add_user_agent_concurrent_adds_all_survive(tmp_path):
     """The read-modify-write must be serialized: N concurrent adds, each
     reading the same empty registry and passing the duplicate checks, must

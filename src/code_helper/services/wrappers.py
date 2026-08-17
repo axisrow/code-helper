@@ -43,7 +43,7 @@ from code_helper.services.model import (
     get_provider,
     with_base_url,
 )
-from code_helper.services.naming import validate_alias
+from code_helper.services.naming import is_valid_alias_shape
 from code_helper.services.paths import Paths
 from code_helper.services.render import (
     CATALOG_MANAGED_BY_KEY,
@@ -1444,10 +1444,12 @@ def discover_managed(paths: Paths) -> list[str]:
     — the preset registry cannot know about it, and there is no state file.
     The marker in the script body is the only record that it is ours.
 
-    A marked file whose name is not a usable alias (a reserved name like
-    ``claude``, or anything ``validate_alias`` rejects) is skipped: no command
-    in the tool can act on it, so listing it advertises a wrapper the user
-    cannot then edit or reinstall.
+    A marked file whose name is not structurally a usable alias
+    (:func:`is_valid_alias_shape`) is skipped: no command in the tool can act
+    on it, so listing it advertises a wrapper the user cannot then edit or
+    reinstall. A RESERVED name (e.g. ``opencode``) is still listed — it is a
+    real, removable wrapper, and hiding it would strand it on PATH with no way
+    to clean it up.
     """
     if not paths.bin_dir.is_dir():
         return []
@@ -1499,9 +1501,12 @@ def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
 
 
 def _is_usable_alias(name: str) -> bool:
-    """True iff ``name`` is one the rest of the tool can still act on."""
-    try:
-        validate_alias(name)
-    except CodeHelperError:
-        return False
-    return True
+    """True iff ``name`` is one the rest of the tool can still act on.
+
+    Structural validity only — NOT the reserved-name check. A managed wrapper
+    whose name became reserved (``opencode`` after the agent registry grew)
+    must stay discoverable and removable so the user can clean it up; only
+    NEW creation under a reserved name is blocked, by ``validate_alias`` at
+    the install boundary.
+    """
+    return is_valid_alias_shape(name)

@@ -81,6 +81,31 @@ RESERVED_ALIASES = _RESERVED_LITERAL | {a.binary for a in AGENTS}
 _ALIAS_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 
+def is_valid_alias_shape(alias: str) -> bool:
+    """True iff ``alias`` is structurally a usable ``~/.local/bin`` file name.
+
+    The structural half of :func:`validate_alias` — empty, ``.``/``..``, path
+    separator, leading ``-``, over-length, or a character the regex rejects —
+    WITHOUT the reserved-name check. Discovery and removal of an EXISTING
+    managed wrapper must not be blocked by reservation: a wrapper created
+    before a name became reserved (e.g. ``opencode`` after the agent registry
+    grew) is still a real, marker-verified file the user must be able to see
+    and remove. Reservation gates NEW creation (:func:`validate_alias`), never
+    cleanup of what already exists.
+    """
+    if not alias or not alias.strip():
+        return False
+    if alias in (".", ".."):
+        return False
+    if "/" in alias or "\\" in alias:
+        return False
+    if alias.startswith("-"):
+        return False
+    if len(alias) > MAX_ALIAS_LENGTH:
+        return False
+    return bool(_ALIAS_RE.match(alias))
+
+
 def validate_alias(alias: str) -> str:
     """Return ``alias`` unchanged if it is safe as a ``~/.local/bin`` file name.
 

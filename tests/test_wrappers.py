@@ -444,6 +444,26 @@ def test_discover_managed_finds_ad_hoc_wrappers(tmp_path):
     assert discover_managed(paths) == ["qwen3.5-codex"]
 
 
+@pytest.mark.integration
+def test_reserved_named_managed_wrapper_stays_discoverable_and_removable(tmp_path):
+    """A wrapper whose name became reserved (e.g. ``opencode`` after the agent
+    registry grew) must remain discoverable and removable. Reservation gates
+    NEW creation (``validate_alias`` at the install boundary); it must never
+    strand a pre-existing managed file on PATH with no way to list or remove
+    it."""
+    from code_helper.services.wrappers import remove_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    paths.bin_dir.mkdir(parents=True, exist_ok=True)
+    paths.script_for("opencode").write_text(
+        "# code-helper: managed wrapper\n#!/bin/sh\n", encoding="utf-8"
+    )
+    assert is_managed(paths, "opencode") is True
+    assert "opencode" in discover_managed(paths)
+    assert remove_wrapper(paths, "opencode") is True
+    assert not paths.script_for("opencode").exists()
+
+
 # --------------------------------------------------------------------------- #
 # valid_default_wrapper — staleness cross-check (issue #28)
 # --------------------------------------------------------------------------- #

@@ -316,14 +316,18 @@ def test_model_override_refreshes_the_description(tmp_path):
     assert "qwen3" in spec.description
 
 
-def test_discover_managed_skips_unusable_names(tmp_path):
-    """Don't advertise a wrapper no command in the tool can act on."""
+def test_discover_managed_skips_structurally_invalid_names(tmp_path):
+    """Don't advertise a wrapper no command in the tool can act on — a name
+    that is not a valid alias shape (whitespace, a leading dash) is skipped.
+    A RESERVED name is still listed: it is a real, removable wrapper, and
+    hiding it would strand it on PATH (see
+    test_reserved_named_managed_wrapper_stays_discoverable_and_removable)."""
     from code_helper.services.render import MARKER_PREFIX
     from code_helper.services.wrappers import discover_managed
 
     paths = _bin(tmp_path)
-    for reserved in ("claude", "code-helper"):
-        (paths.bin_dir / reserved).write_text(
+    for bad in ("has space", "-leading-dash"):
+        (paths.bin_dir / bad).write_text(
             f"#!/bin/bash\n{MARKER_PREFIX} "
             f"(agent=claude, provider=ollama, shape=anthropic-env)\n"
             f'claude "$@"\n'
