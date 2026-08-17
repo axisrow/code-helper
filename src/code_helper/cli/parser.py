@@ -51,10 +51,11 @@ from code_helper.errors import CodeHelperError
 
 # Modules, not names — see this module's docstring on late binding.
 from code_helper.services import claude_settings, codex_default, models_api, secrets
+from code_helper.services.agents import all_agents
+from code_helper.services.agents import get_agent as get_any_agent
 from code_helper.services.claude_settings import current_switch
 from code_helper.services.codex_default import restore_default
 from code_helper.services.model import (
-    AGENTS,
     PROVIDERS,
     ConfigShape,
     get_agent,
@@ -112,7 +113,7 @@ def _handle_list_axes(what: str) -> int:
     """
 
     if what == "agents":
-        for agent in AGENTS:
+        for agent in all_agents(Paths.default()):
             shapes = ", ".join(sorted(s.value for s in agent.shapes))
             print(f"{agent.name:10} {agent.description:24} [{shapes}]")
         return 0
@@ -135,8 +136,9 @@ def _handle_list_axes(what: str) -> int:
 
     # Resolve every cell first: the column has to be as wide as the widest
     # SHAPE it will hold, not the widest provider name, or the values collide.
+    agents = all_agents(Paths.default())
     rows: list[tuple[str, list[str]]] = []
-    for agent in AGENTS:
+    for agent in agents:
         cells = []
         for provider in PROVIDERS:
             try:
@@ -145,7 +147,7 @@ def _handle_list_axes(what: str) -> int:
                 cells.append("—")  # genuinely impossible, not merely unbuilt
         rows.append((agent.name, cells))
 
-    label_width = max([len(a.name) for a in AGENTS] + [0]) + 2
+    label_width = max([len(a.name) for a in agents] + [0]) + 2
     widths = [
         max([len(p.name)] + [len(cells[i]) for _, cells in rows]) + 2
         for i, p in enumerate(PROVIDERS)
@@ -297,7 +299,7 @@ def _add_resolve_provider(req, paths):
 
     if not req.agent or not req.provider:
         raise CodeHelperError("--agent and --provider must be given together")
-    agent = get_agent(req.agent)
+    agent = get_any_agent(paths, req.agent)
     provider = with_base_url(get_provider(req.provider), req.base_url)
     provider = with_auth(provider, want_secret=req.auth == "secret")
     return agent, provider
@@ -369,7 +371,7 @@ def _add_spec_from_preset(req, paths, profile_name):
         # A bare agent name is a likely mistake worth teaching, not just
         # rejecting.
         try:
-            get_agent(req.name)
+            get_any_agent(paths, req.name)
         except CodeHelperError:
             # Re-raise get_preset's own message: it names the known presets,
             # and that hint matters most in exactly this case.

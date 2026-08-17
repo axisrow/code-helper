@@ -67,7 +67,7 @@ def test_main_menu_lists_wrappers_grouped_by_agent_and_quit_exits(monkeypatch, c
     output = capsys.readouterr().out
     # Wrappers appear directly on the main screen, grouped by agent section.
     assert "claude" in output
-    assert "? keys" in output
+    assert "· ? · Esc" in output
     assert "Quit" not in output
     # The old indirection is gone.
     assert "Wrappers:" not in output
@@ -78,9 +78,12 @@ def test_main_menu_lists_wrappers_grouped_by_agent_and_quit_exits(monkeypatch, c
 
 
 @pytest.mark.integration
-def test_add_order_is_provider_model_agent_alias(monkeypatch):
+def test_add_order_is_agent_provider_model_alias(monkeypatch):
+    """`add` is agent-first: kind (wrapper/agent), then which agent, then the
+    old provider -> model -> alias order — with no separate agent screen
+    after the model, since the agent is already scoped by then."""
     seen: list[str] = []
-    answers = iter(["add", "ollama", "model-x", "codex", "quit"])
+    answers = iter(["add", "wrapper", "codex", "ollama", "model-x", "quit"])
 
     def _select(_items, *, prompt, **_kwargs):
         # The main-menu header is a callable (live active-profile display).
@@ -103,17 +106,102 @@ def test_add_order_is_provider_model_agent_alias(monkeypatch):
     assert seen[0].startswith("code-helper")
     assert "Live:" not in seen[0]
     assert seen[1:4] == [
-        "Select a provider:",
-        "Select a model for ollama:",
-        "Select an agent:",
+        "What do you want to add?",
+        "Add a wrapper for which agent?",
+        "Select a provider for codex:",
     ]
+    assert "codex › Select a model for ollama:" in seen
+    assert not any(p == "Select an agent:" for p in seen)
     assert Paths.default().script_for("my-codex").exists()
+
+
+@pytest.mark.integration
+def test_add_agent_branch_persists_a_user_agent_end_to_end(monkeypatch):
+    """`a` → Agent registers a new CLI integration that immediately shows up
+    in the merged agent list (Stage 1.3) — verified by then adding a wrapper
+    FOR that new agent via the unscoped Wrapper branch."""
+    answers = iter(
+        [
+            "add",
+            "agent",  # kind: Agent, not Wrapper
+            "add",
+            "wrapper",
+            "myagent",  # the just-added agent appears in the picker
+            "ollama",
+            "model-x",
+            "quit",
+        ]
+    )
+
+    def _select(_items, *, prompt="", **_kwargs):
+        return next(answers)
+
+    agent_field_answers = iter(["myagent", "", ""])  # name, binary, description
+
+    def _read_line(prompt, **_kwargs):
+        if prompt.startswith(("Agent name", "Binary name", "Description")):
+            return next(agent_field_answers)
+        return "my-myagent-wrapper"  # the alias prompt
+
+    import code_helper.services.models_api as api
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("code_helper.cli.menu.read_line", _read_line)
+    monkeypatch.setattr(
+        api,
+        "list_models",
+        lambda *_args, **_kwargs: api.ModelListResult(("model-x",), "fake"),
+    )
+    monkeypatch.setattr("code_helper.cli.menu.press_any_key", lambda *_a, **_k: None)
+
+    assert main(["tui"]) == 0
+
+    from code_helper.services.agents import load_user_agents
+
+    agents = load_user_agents(Paths.default())
+    assert len(agents) == 1
+    assert agents[0].name == "myagent"
+    assert agents[0].binary == "myagent"
+    assert Paths.default().script_for("my-myagent-wrapper").exists()
+
+
+@pytest.mark.integration
+def test_alias_prompt_carries_a_breadcrumb_of_earlier_choices(monkeypatch):
+    """The alias prompt is the last screen before a real filesystem write and
+    the furthest from the choices that led there — it must show them, since
+    there is no separate summary screen."""
+    seen: list[str] = []
+    answers = iter(["add", "wrapper", "codex", "ollama", "model-x", "quit"])
+
+    def _select(_items, *, prompt, **_kwargs):
+        seen.append(prompt() if callable(prompt) else prompt)
+        return next(answers)
+
+    import code_helper.services.models_api as api
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr(
+        api,
+        "list_models",
+        lambda *_args, **_kwargs: api.ModelListResult(("model-x",), "fake"),
+    )
+
+    captured_prompt: dict = {}
+
+    def _read_line(prompt, **_kwargs):
+        captured_prompt["value"] = prompt
+        return "my-codex"
+
+    monkeypatch.setattr("code_helper.cli.menu.read_line", _read_line)
+
+    assert main(["tui"]) == 0
+    assert captured_prompt["value"].startswith("codex › ollama › model-x › ")
 
 
 @pytest.mark.integration
 def test_literal_provider_skips_profile_screen(monkeypatch):
     seen: list[str] = []
-    answers = iter(["add", "ollama", "model-x", "claude", "quit"])
+    answers = iter(["add", "wrapper", "claude", "ollama", "model-x", "quit"])
 
     def _select(_items, *, prompt, **_kwargs):
         # The main-menu header is a callable (live active-profile display).
@@ -135,16 +223,22 @@ def test_literal_provider_skips_profile_screen(monkeypatch):
 
 
 @pytest.mark.integration
-def test_escape_from_alias_returns_to_agent_without_creating_wrapper(monkeypatch):
+def test_escape_from_alias_reprompts_the_model_when_agent_is_prescoped(monkeypatch):
+    """With the agent pre-scoped (agent-first Add), there is no agent menu
+    to fall back to on an alias Esc — the guard in `_run_add_provider` must
+    fall back to the model menu instead of spinning on a screen that no
+    longer renders (see the plan's Stage 1.4)."""
     import code_helper.services.models_api as api
     from code_helper.cli.menu import MenuCancelled
 
-    answers = iter(["add", "ollama", "__custom__", "claude", "claude", "quit"])
+    answers = iter(
+        ["add", "wrapper", "claude", "ollama", "__custom__", "__custom__", "quit"]
+    )
 
     def _select(_items, **_kwargs):
         return next(answers)
 
-    text = iter(["model-x", "__escape__", "final-wrapper"])
+    text = iter(["model-x", "__escape__", "model-x", "final-wrapper"])
 
     def _read_line(_prompt, **_kwargs):
         value = next(text)
@@ -178,8 +272,40 @@ def test_ctrl_c_from_tui_propagates_as_hard_cancel(monkeypatch):
 
 
 @pytest.mark.integration
+def test_model_step_falls_back_to_known_models_when_discovery_is_unavailable(
+    monkeypatch,
+):
+    """zai has no discovery endpoint at all — the model menu must still offer
+    the registry's `known_models` instead of forcing manual entry, and the
+    prompt must say the list is known-not-discovered (Stage 3)."""
+    seen_prompts: list[str] = []
+
+    def _select(items, *, prompt="", **_kwargs):
+        text = prompt() if callable(prompt) else prompt
+        seen_prompts.append(text)
+        if "Select a model for zai" in text:
+            return "glm-5-turbo"
+        return next(answers)
+
+    answers = iter(["add", "wrapper", "claude", "zai", "quit"])
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-first")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "known-wrapper")
+
+    assert main(["tui"]) == 0
+
+    assert any(
+        "Select a model for zai (known models — discovery unavailable):" in p
+        for p in seen_prompts
+    )
+    assert "glm-5-turbo" in Paths.default().script_for("known-wrapper").read_text()
+
+
+@pytest.mark.integration
 def test_first_secret_token_creates_default_before_model(monkeypatch):
-    _menu_sequence(monkeypatch, ["add", "zai", "__custom__", "claude", "quit"])
+    _menu_sequence(
+        monkeypatch, ["add", "wrapper", "claude", "zai", "__custom__", "quit"]
+    )
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-first")
     typed = iter(["glm-5", "glm-work"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(typed))
@@ -199,14 +325,16 @@ def test_second_profile_names_both_keys_and_preserves_them(monkeypatch):
         monkeypatch,
         [
             "add",
+            "wrapper",
+            "claude",
             "zai",
             "__custom__",
-            "claude",
             "add",
+            "wrapper",
+            "claude",
             "zai",
             "__new_profile__",
             "__custom__",
-            "claude",
             "quit",
         ],
     )
@@ -236,7 +364,16 @@ def test_replacing_selected_profile_changes_only_that_profile(monkeypatch):
     secrets.save_credential(paths, "zai", "sk-personal", "personal")
     _menu_sequence(
         monkeypatch,
-        ["add", "zai", "work", "__replace_token__", "__custom__", "claude", "quit"],
+        [
+            "add",
+            "wrapper",
+            "claude",
+            "zai",
+            "work",
+            "__replace_token__",
+            "__custom__",
+            "quit",
+        ],
     )
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-work-new")
     typed = iter(["glm-5", "work-wrapper"])
@@ -268,7 +405,16 @@ def test_litellm_uses_selected_profile_for_model_discovery(monkeypatch):
 
     _menu_sequence(
         monkeypatch,
-        ["add", "litellm", "work", "__use_profile__", "gpt-test", "codex", "quit"],
+        [
+            "add",
+            "wrapper",
+            "codex",
+            "litellm",
+            "work",
+            "__use_profile__",
+            "gpt-test",
+            "quit",
+        ],
     )
     monkeypatch.setattr(api, "list_models", _models)
     typed = iter(["http://proxy.example/v1", "litellm-wrapper"])
@@ -299,6 +445,65 @@ def test_t_rotates_token_for_secret_wrapper_from_main_screen(monkeypatch):
     assert main(["tui"]) == 0
     assert secrets.credential_for(paths, "zai", "default") == "sk-new"
     assert "sk-new" in paths.script_for("glm").read_text()
+
+
+@pytest.mark.integration
+def test_a_on_the_codex_row_scopes_add_to_codex(monkeypatch):
+    """`a` on the codex chipset row already answers "wrapper for which
+    agent" — it must skip both the kind screen (wrapper/agent) and the
+    agent picker, landing straight on a provider list scoped to codex."""
+    seen: list[str] = []
+
+    # Main screen: DOWN moves off claude onto codex, `a` triggers the scoped
+    # Add. The provider screen that follows returns Back (below), which
+    # lands back on the main screen — CANCEL then quits.
+    real_menu_keys = iter(["DOWN", "a", "CANCEL"])
+
+    def _select(items, *, prompt, **kwargs):
+        text = prompt() if callable(prompt) else prompt
+        seen.append(text)
+        if text == "Select a provider for codex:":
+            return "__back__"
+        return real_select(items, read_key=lambda: next(real_menu_keys), **kwargs)
+
+    import code_helper.cli.menu as menu
+
+    real_select = menu.select_from_menu
+    monkeypatch.setattr(menu, "select_from_menu", _select)
+
+    assert main(["tui"]) == 0
+    assert "Select a provider for codex:" in seen
+    assert "What do you want to add?" not in seen
+    assert "Add a wrapper for which agent?" not in seen
+    assert "Select an agent:" not in seen
+
+
+@pytest.mark.integration
+def test_a_without_row_context_asks_what_to_add_first(monkeypatch):
+    """`a` pressed anywhere that isn't an agent chip row (here: the wrapper
+    row list, no chipset row focused) must open the unscoped kind picker —
+    it has no agent to infer, so it cannot skip straight to a provider."""
+    assert main(["add", "glm", "--profile", "default"]) == 0
+    seen: list[str] = []
+    # DOWN x3 reaches the `glm` wrapper row (past the 2 chipset rows + blank
+    # Section), `a` there still opens the kind picker since a wrapper row
+    # carries no agent scope of its own.
+    real_menu_keys = iter(["DOWN", "DOWN", "DOWN", "a", "CANCEL"])
+
+    def _select(items, *, prompt, **kwargs):
+        text = prompt() if callable(prompt) else prompt
+        seen.append(text)
+        if text == "What do you want to add?":
+            return "__back__"
+        return real_select(items, read_key=lambda: next(real_menu_keys), **kwargs)
+
+    import code_helper.cli.menu as menu
+
+    real_select = menu.select_from_menu
+    monkeypatch.setattr(menu, "select_from_menu", _select)
+
+    assert main(["tui"]) == 0
+    assert "What do you want to add?" in seen
 
 
 @pytest.mark.integration
@@ -796,7 +1001,16 @@ def test_tui_add_preselects_the_active_profile_first(monkeypatch):
 
     seen_items: list[list] = []
     answers = iter(
-        ["add", "litellm", "work", "__use_profile__", "gpt-test", "codex", "quit"]
+        [
+            "add",
+            "wrapper",
+            "codex",
+            "litellm",
+            "work",
+            "__use_profile__",
+            "gpt-test",
+            "quit",
+        ]
     )
 
     def _select(_items, **_kwargs):
@@ -815,8 +1029,9 @@ def test_tui_add_preselects_the_active_profile_first(monkeypatch):
 
     assert main(["tui"]) == 0
     assert paths.script_for("litellm-wrapper").exists()
-    # seen_items order: [0] main, [1] provider, [2] profile picker, ...
-    profile_picker = seen_items[2]
+    # seen_items order: [0] main, [1] kind, [2] agent, [3] provider,
+    # [4] profile picker, ...
+    profile_picker = seen_items[4]
     # The active profile is FIRST, pre-selected (cursor lands on it), marked.
     assert profile_picker[0] == ("work", "work (active)")
     assert "personal" in [value for value, _ in profile_picker]
@@ -836,7 +1051,16 @@ def test_tui_stale_active_profile_falls_back_without_crashing(monkeypatch):
 
     seen_items: list[list] = []
     answers = iter(
-        ["add", "litellm", "work", "__use_profile__", "gpt-test", "codex", "quit"]
+        [
+            "add",
+            "wrapper",
+            "codex",
+            "litellm",
+            "work",
+            "__use_profile__",
+            "gpt-test",
+            "quit",
+        ]
     )
 
     def _select(_items, **_kwargs):
@@ -855,7 +1079,7 @@ def test_tui_stale_active_profile_falls_back_without_crashing(monkeypatch):
 
     assert main(["tui"]) == 0
     assert paths.script_for("litellm-wrapper").exists()
-    profile_picker = seen_items[2]
+    profile_picker = seen_items[4]
     # No (active) marker, and the stale "ghost" was never offered.
     assert all("(active)" not in label for _v, label in profile_picker)
     assert "ghost" not in [value for value, _ in profile_picker]
@@ -870,7 +1094,7 @@ def test_tui_provider_list_offers_ollama_with_a_token(monkeypatch):
     extra interstitial screen — the common "just want ollama" path stays a
     single Enter (see cli/tui.py's _run_add)."""
     seen_items: list[list] = []
-    answers = iter(["add", "__back__", "quit"])
+    answers = iter(["add", "wrapper", "claude", "__back__", "quit"])
 
     def _select(_items, **_kwargs):
         seen_items.append(list(_items))
@@ -878,8 +1102,8 @@ def test_tui_provider_list_offers_ollama_with_a_token(monkeypatch):
 
     monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
-    # seen_items order: [0] main menu, [1] provider list.
-    provider_list = seen_items[1]
+    # seen_items order: [0] main menu, [1] kind, [2] agent, [3] provider list.
+    provider_list = seen_items[3]
     values = [value for value, _label in provider_list]
     assert "ollama" in values
     assert "ollama:secret" in values
@@ -892,7 +1116,7 @@ def test_tui_provider_list_offers_ollama_with_a_token(monkeypatch):
 def test_tui_add_ollama_with_token_installs_a_secret_wrapper(monkeypatch):
     import code_helper.services.models_api as api
 
-    answers = iter(["add", "ollama:secret", "model-x", "claude", "quit"])
+    answers = iter(["add", "wrapper", "claude", "ollama:secret", "model-x", "quit"])
 
     def _select(_items, **_kwargs):
         return next(answers)
@@ -1100,7 +1324,7 @@ def test_main_screen_no_dead_end_for_non_secret_wrapper(monkeypatch, capsys):
 
 @pytest.mark.integration
 def test_main_screen_hint_advertises_token_key(monkeypatch):
-    """The main screen's hint mentions `t: token` so the key is discoverable."""
+    """The main screen's hint mentions the `?` help key so it's discoverable."""
     captured: dict = {}
 
     def _select(_items, *, hint, **_kwargs):
@@ -1109,7 +1333,26 @@ def test_main_screen_hint_advertises_token_key(monkeypatch):
 
     monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
     assert main(["tui"]) == 0
-    assert "? keys" in captured["hint"]
+    assert "· ? ·" in captured["hint"]
+
+
+@pytest.mark.integration
+def test_main_screen_hint_names_a_as_add_not_edit(monkeypatch):
+    """`a` used to be folded into the `a/e/d edit` cluster, which mislabelled
+    it — `e` only rotates a token (same handler as `t`), `a` adds. They must
+    be named separately, and every key named MUST stay in `_PASSTHROUGH`
+    (pinned elsewhere by `test_every_main_screen_key_survives_translation`)."""
+    captured: dict = {}
+
+    def _select(_items, *, hint, **_kwargs):
+        captured["hint"] = hint() if callable(hint) else hint
+        return "quit"
+
+    monkeypatch.setattr("code_helper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+    assert "a add" in captured["hint"]
+    assert "a/e/d" not in captured["hint"]
+    assert len(captured["hint"]) <= 80
 
 
 # --- the chipset frame ------------------------------------------------------
@@ -1267,6 +1510,49 @@ def test_chipset_row_has_no_lifecycle_tail(monkeypatch):
 
 
 @pytest.mark.integration
+def test_add_chip_present_and_never_marked_applied(monkeypatch):
+    """Every agent row carries a trailing `+ add` action chip — including an
+    agent with zero wrappers, which is the codex empty-state fix — and it is
+    never rendered as applied, since it isn't a backend at all."""
+    import code_helper.cli.tui as tui
+
+    frames = _capture_frames(monkeypatch, ["CANCEL"])
+    assert main(["tui"]) == 0
+
+    rows = frames[0]
+    for agent_name in ("claude", "codex"):
+        assert "+ add" in rows[agent_name]
+        assert "✓ + add" not in rows[agent_name]
+        assert f"{tui._BOLD}+ add{tui._RESET}" not in rows[agent_name]
+
+
+@pytest.mark.integration
+def test_enter_on_the_add_chip_opens_add_scoped_to_that_agent(monkeypatch):
+    """Enter on the `+ add` chip is equivalent to `a` on that row: it opens
+    Add pre-scoped to the agent, no kind/agent picker in between."""
+    seen: list[str] = []
+    # Main screen: DOWN reaches codex, RIGHT moves past native to `+ add`,
+    # ENTER applies it.
+    real_menu_keys = iter(["DOWN", "RIGHT", "ENTER", "CANCEL"])
+
+    def _select(items, *, prompt, **kwargs):
+        text = prompt() if callable(prompt) else prompt
+        seen.append(text)
+        if text == "Select a provider for codex:":
+            return "__back__"
+        return real_select(items, read_key=lambda: next(real_menu_keys), **kwargs)
+
+    import code_helper.cli.menu as menu
+
+    real_select = menu.select_from_menu
+    monkeypatch.setattr(menu, "select_from_menu", _select)
+
+    assert main(["tui"]) == 0
+    assert "Select a provider for codex:" in seen
+    assert "What do you want to add?" not in seen
+
+
+@pytest.mark.integration
 def test_chips_are_installed_wrappers_not_bare_providers(monkeypatch):
     """A chip is an already-resolved wrapper, which is what lets Enter apply
     it with no model/token prompt. An uninstalled preset is not a chip."""
@@ -1288,7 +1574,8 @@ def test_right_moves_the_chip_cursor_and_wraps(monkeypatch):
     from code_helper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
-    frames = _capture_frames(monkeypatch, ["RIGHT", "RIGHT", "CANCEL"])
+    # Strip is now [native, glm, + add] — one more RIGHT to wrap.
+    frames = _capture_frames(monkeypatch, ["RIGHT", "RIGHT", "RIGHT", "CANCEL"])
     assert main(["tui"]) == 0
 
     import code_helper.cli.tui as tui
@@ -1297,8 +1584,10 @@ def test_right_moves_the_chip_cursor_and_wraps(monkeypatch):
     assert f"{tui._REVERSE}✓ native{tui._RESET}" in frames[0]["claude"]
     # moved to the wrapper chip
     assert f"{tui._REVERSE}glm{tui._RESET}" in frames[1]["claude"]
+    # moved to the action chip
+    assert f"{tui._REVERSE}+ add{tui._RESET}" in frames[2]["claude"]
     # wrapped back around
-    assert f"{tui._REVERSE}✓ native{tui._RESET}" in frames[2]["claude"]
+    assert f"{tui._REVERSE}✓ native{tui._RESET}" in frames[3]["claude"]
 
 
 @pytest.mark.integration

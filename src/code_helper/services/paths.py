@@ -253,3 +253,17 @@ class Paths:
         every other accessor here.
         """
         return self.config_dir / "state.json"
+
+    def agents_file(self) -> Path:
+        """``~/.config/code-helper/agents.json`` — user-defined agents.
+
+        A ``{"agents": [{"name", "binary", "description"}, ...]}`` JSON object
+        holding CLI integrations the built-in :data:`~code_helper.services.
+        model.AGENTS` registry does not know about (any other ``ollama
+        launch``-only integration). Owned and written only by
+        ``services/agents.py``, which merges its contents with ``AGENTS`` at
+        read time — never mutates the registry itself. Holds no secrets.
+        Pure arithmetic, no IO, no existence check — same contract as every
+        other accessor here.
+        """
+        return self.config_dir / "agents.json"

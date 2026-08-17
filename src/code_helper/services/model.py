@@ -63,6 +63,7 @@ __all__ = [
     "PROVIDERS",
     "get_agent",
     "get_provider",
+    "validate_agent_binary",
     "resolve_shape",
     "compatible_providers",
     "switchable_providers",
@@ -153,8 +154,33 @@ _SHAPE_PRIORITY: tuple[ConfigShape, ...] = (
 
 #: An agent's binary name is interpolated into a generated script UNQUOTED (see
 #: ``render.py``), so it must be a registry constant of a boring shape — not
-#: user input. Enforced at import time by :func:`_validate_registries`.
+#: user input. Enforced at import time by :func:`_validate_registries`, and
+#: reused (via :func:`validate_agent_binary`) by ``services/agents.py`` to
+#: gate a user-supplied agent the exact same way — a hand-duplicated copy of
+#: this pattern there would be one edit away from drifting out of sync with
+#: the actual shell-injection guard.
 _BINARY_RE = re.compile(r"\A[a-z][a-z0-9_-]*\Z")
+
+
+def validate_agent_binary(binary: str) -> None:
+    """Raise unless ``binary`` is safe to interpolate unquoted into a script.
+
+    The single public gate on the pattern :data:`_BINARY_RE` encodes — lower-
+    case alphanumerics, ``_``/``-``, starting with a letter. Any caller that
+    accepts an agent name/binary from outside the registry (today: a
+    user-defined agent in ``services/agents.py``) MUST run it through this
+    before persisting or using it; skipping it is a shell-injection hole,
+    since ``agent.binary`` is later interpolated unquoted (see ``render.py``).
+
+    Raises:
+        CodeHelperError: ``binary`` does not match the required pattern.
+    """
+    if not _BINARY_RE.match(binary):
+        raise CodeHelperError(
+            f"invalid agent binary {binary!r} — must start with a lowercase "
+            f"letter and contain only lowercase letters, digits, '_' and '-'"
+        )
+
 
 #: ``token_env_var`` is now interpolated into a generated script UNQUOTED too
 #: (``export {token_env_var}={quoted token}`` — the shape's OPENAI_TOML
@@ -294,6 +320,17 @@ class Provider:
     #: reader of this field branches on ``provider.env_reset``, never on
     #: ``provider.name == "anthropic"``.
     env_reset: bool = False
+    #: Fallback model names offered when :func:`~code_helper.services.
+    #: models_api.list_models` returns none — either because the provider
+    #: structurally cannot publish a list (``model_list_api is NONE``, e.g.
+    #: zai's Anthropic-compatible endpoint) or because discovery failed for
+    #: this call (daemon down, no base URL yet). Discovery is always tried
+    #: FIRST; this is what keeps the model step a menu instead of a bare
+    #: prompt when discovery comes back empty. The TUI is responsible for
+    #: labelling the source ("known models" vs "discovered") so a stale
+    #: built-in entry is never presented as if it were live — see
+    #: ``cli/tui.py``'s ``_choose_add_model``.
+    known_models: tuple[str, ...] = ()
     description: str = ""
 
 
@@ -401,6 +438,12 @@ PROVIDERS: tuple[Provider, ...] = (
         token_env_var="ZAI_API_KEY",
         # The Anthropic-compatible path exposes no OpenAI-style model list.
         model_list_api=ModelListAPI.NONE,
+        # Discovery is structurally unavailable (model_list_api is NONE
+        # above), so these are the ONLY models the model step can ever offer
+        # besides manual entry. Seeded from what is already known-good in
+        # this codebase: glm-5-turbo (the `glm` preset) and glm-5.2 (an
+        # installed glm52-litellm wrapper).
+        known_models=("glm-5-turbo", "glm-5.2"),
         description="Z.ai (Anthropic-compatible)",
     ),
     Provider(
@@ -572,6 +615,15 @@ def _validate_provider(provider: Provider) -> None:
             raise CodeHelperError(
                 f"{prefix}model_list_api={provider.model_list_api.value!r} — "
                 f"a reset provider has no endpoint to list models from"
+            )
+    # Same class of check as every other registry field: an empty/whitespace
+    # entry would render as a blank, unselectable-looking menu row in the
+    # fallback picker — catch it at import time, not when a user hits it.
+    for known in provider.known_models:
+        if not known or not known.strip():
+            raise CodeHelperError(
+                f"provider {provider.name!r} has an empty/blank known_models "
+                f"entry: {known!r}"
             )
 
 
