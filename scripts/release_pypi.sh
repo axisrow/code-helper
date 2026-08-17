@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Local release script for `code-helper`.
+# Local release script for `codehelper`.
 #
 # First-party package (not a fork), so the version is NOT derived from a git
-# tag: it lives in src/code_helper/__init__.py (`dynamic = ["version"]` +
+# tag: it lives in src/codehelper/__init__.py (`dynamic = ["version"]` +
 # hatchling), and this script reads it straight from there. Same token-based
 # release_pypi.sh pattern as the other axisrow projects (direct-cli,
 # hermes-agent-axisrow, tg_content_factory, tg_messenger, ...).
@@ -12,7 +12,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ROOT_DIR}/.env"
-INIT_FILE="${ROOT_DIR}/src/code_helper/__init__.py"
+INIT_FILE="${ROOT_DIR}/src/codehelper/__init__.py"
 
 usage() {
   cat <<'EOF'
@@ -23,7 +23,7 @@ Usage:
 
 Behavior:
   - loads .env from the repository root when present
-  - derives the package version from src/code_helper/__init__.py
+  - derives the package version from src/codehelper/__init__.py
     (`__version__`), the single source of truth for the hatch `dynamic` field
   - rebuilds dist artifacts from scratch
   - runs twine checks before upload
@@ -97,7 +97,7 @@ build_artifacts() {
 
   local version
   version="$(resolve_version)"
-  echo "package version -> ${version} (from src/code_helper/__init__.py)"
+  echo "package version -> ${version} (from src/codehelper/__init__.py)"
 
   echo "Cleaning old build artifacts"
   rm -rf "${ROOT_DIR}/dist" "${ROOT_DIR}/build" "${ROOT_DIR}"/*.egg-info
