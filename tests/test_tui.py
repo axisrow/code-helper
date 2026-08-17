@@ -483,6 +483,16 @@ def test_a_without_row_context_asks_what_to_add_first(monkeypatch):
     """`a` pressed anywhere that isn't an agent chip row (here: the wrapper
     row list, no chipset row focused) must open the unscoped kind picker —
     it has no agent to infer, so it cannot skip straight to a provider."""
+    # The `add glm` setup must not hit a real getpass prompt: resolve_token
+    # falls through to a prompt only when no env var / cached profile supplies
+    # the token, and CI has neither. Mock it like test_cli_add.py does.
+    import code_helper.services.secrets as secrets
+
+    monkeypatch.setattr(
+        secrets,
+        "resolve_token",
+        lambda **kwargs: secrets.ResolvedToken("sk-test", secrets.SOURCE_PROMPT),
+    )
     assert main(["add", "glm", "--profile", "default"]) == 0
     seen: list[str] = []
     # DOWN x3 reaches the `glm` wrapper row (past the 2 chipset rows + blank
