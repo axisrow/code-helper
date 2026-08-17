@@ -610,7 +610,8 @@ def apply_switch(
     if original_text:
         rotate_backups(_backup_slots(paths), current=original_text)
     atomic_write(settings_path, patched_text, mode=0o600)
-    print(f"wrote {settings_path} (backup: {paths.claude_settings_backup(1)})")
+    action = "reset to native" if patch.is_reset else "wrote"
+    print(f"{action} {settings_path} (backup: {paths.claude_settings_backup(1)})")
     return True
 
 

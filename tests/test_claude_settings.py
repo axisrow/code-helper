@@ -237,7 +237,9 @@ def test_patch_settings_native_explicitly_blanks_only_managed_keys():
     }
     patched = patch_settings(
         original,
-        SettingsPatch(provider_name="native", env={key: "" for key in MANAGED_ENV_KEYS}),
+        SettingsPatch(
+            provider_name="native", env={key: "" for key in MANAGED_ENV_KEYS}
+        ),
     )
     assert patched["env"] == {
         **_FOREIGN_ENV,
@@ -250,7 +252,9 @@ def test_patch_settings_native_keeps_empty_managed_keys_for_live_reset():
     original = {"env": {"ANTHROPIC_BASE_URL": "https://x"}}
     patched = patch_settings(
         original,
-        SettingsPatch(provider_name="native", env={key: "" for key in MANAGED_ENV_KEYS}),
+        SettingsPatch(
+            provider_name="native", env={key: "" for key in MANAGED_ENV_KEYS}
+        ),
     )
     assert patched["env"] == {key: "" for key in MANAGED_ENV_KEYS}
 
@@ -614,6 +618,30 @@ def test_apply_switch_native_explicitly_blanks_managed_keys(tmp_path):
     assert {key: result["env"].get(key) for key in MANAGED_ENV_KEYS} == {
         key: "" for key in MANAGED_ENV_KEYS
     }
+
+
+@pytest.mark.unit
+def test_apply_switch_native_reset_prints_reset_message(tmp_path, capsys):
+    """The write confirmation names the reset explicitly, not a generic write.
+
+    ``SettingsPatch.is_reset`` exists to answer exactly this — "was this
+    write a reset" — so it should drive the message the user sees, not sit
+    unused outside tests.
+    """
+    paths = Paths.from_home(tmp_path)
+    apply_switch(
+        paths,
+        provider=ZAI,
+        tier_models=TierModels.uniform("glm-5.2"),
+        token="sk-test",
+        force=True,
+    )
+    capsys.readouterr()
+
+    apply_switch(paths, provider=NATIVE, force=True)
+
+    out = capsys.readouterr().out
+    assert "reset to native" in out
 
 
 @pytest.mark.unit
