@@ -605,6 +605,82 @@ def test_set_default_rolls_back_catalog_when_config_write_fails(tmp_path, monkey
 
 
 @pytest.mark.integration
+def test_set_default_reports_when_catalog_rollback_also_fails(tmp_path, monkeypatch):
+    """A rollback failure must surface BOTH failures, not silently replace one.
+
+    If the config.toml write fails and the catalog rollback meant to undo the
+    already-committed catalog write ALSO fails, the caller must be told the
+    pair is left inconsistent — not just see the rollback's own OSError with
+    no indication the original config write (or the pair mismatch) happened.
+    """
+    from codehelper.services import codex_default
+
+    paths = Paths.from_home(tmp_path)
+    _install(paths, model="glm-4.7", force=True)
+    catalog_path = paths.codex_dir / "model.json"
+    original_catalog = catalog_path.read_text(encoding="utf-8")
+
+    real_atomic_write = codex_default.atomic_write
+    calls = {"catalog_writes": 0}
+
+    def _fail_config_then_rollback(path, content, mode=None):
+        if path == paths.codex_main_config():
+            raise OSError("disk full")
+        if path == catalog_path:
+            calls["catalog_writes"] += 1
+            if calls["catalog_writes"] == 2:
+                # The 2nd catalog write is the rollback attempt.
+                raise OSError("rollback also failed: read-only FS")
+        return real_atomic_write(path, content, mode=mode)
+
+    monkeypatch.setattr(codex_default, "atomic_write", _fail_config_then_rollback)
+
+    with pytest.raises(CodeHelperError, match="disk full") as excinfo:
+        _install(paths, model="glm-5.2:cloud", force=True)
+    # Both the original failure and the rollback failure must be visible.
+    assert "rollback also failed" in str(excinfo.value)
+    assert "inconsistent" in str(excinfo.value)
+    # The catalog was left in the NEW (unrolled-back) state — the error must
+    # not claim a successful rollback.
+    assert catalog_path.read_text(encoding="utf-8") != original_catalog
+
+
+@pytest.mark.integration
+def test_restore_reports_when_config_rollback_also_fails(tmp_path, monkeypatch):
+    """Same double-failure guard on the ``restore_default`` rollback path."""
+    from codehelper.services import codex_default
+
+    paths = Paths.from_home(tmp_path)
+    _install(paths, model="glm-4.7", force=True)
+    _install(paths, model="glm-5.2:cloud", force=True)
+    config_path = paths.codex_main_config()
+    original_config = config_path.read_text(encoding="utf-8")
+
+    real_atomic_write = codex_default.atomic_write
+    calls = {"config_writes": 0}
+
+    def _fail_catalog_then_rollback(path, content, mode=None):
+        if path == config_path:
+            calls["config_writes"] += 1
+            if calls["config_writes"] == 2:
+                raise OSError("rollback also failed: read-only FS")
+            return real_atomic_write(path, content, mode=mode)
+        if path == paths.codex_dir / "model.json":
+            raise OSError("disk full")
+        return real_atomic_write(path, content, mode=mode)
+
+    monkeypatch.setattr(codex_default, "atomic_write", _fail_catalog_then_rollback)
+
+    with pytest.raises(CodeHelperError, match="disk full") as excinfo:
+        restore_default(paths, slot=1, force=True)
+    assert "rollback also failed" in str(excinfo.value)
+    assert "inconsistent" in str(excinfo.value)
+    # config.toml was left in the RESTORED state — the error must not claim a
+    # successful rollback.
+    assert config_path.read_text(encoding="utf-8") != original_config
+
+
+@pytest.mark.integration
 def test_restore_ignores_catalog_change_when_catalog_not_restored(
     tmp_path, monkeypatch
 ):

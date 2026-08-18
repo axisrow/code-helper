@@ -978,12 +978,23 @@ def apply_set_default(
                 )
             else:
                 print("no changes to config.toml")
-        except BaseException:
+        except BaseException as config_exc:
             # The catalog was committed first; if the config.toml write then
             # fails (disk full, permissions, read-only FS), roll the catalog
-            # back so the pair cannot be left inconsistent.
+            # back so the pair cannot be left inconsistent. If the rollback
+            # ITSELF fails, the original failure must not be silently
+            # replaced by the rollback's — both are surfaced, and the caller
+            # is told explicitly the pair was left inconsistent.
             if catalog_wrote:
-                _rollback_catalog(catalog_plan)
+                try:
+                    _rollback_catalog(catalog_plan)
+                except BaseException as rollback_exc:
+                    raise CodeHelperError(
+                        f"{config_path} write failed ({config_exc}), and rolling "
+                        f"back the already-written {catalog_path} ALSO failed "
+                        f"({rollback_exc}) — the config<->catalog pair is left "
+                        "inconsistent; manual recovery required"
+                    ) from config_exc
             raise
 
     return config_changed or catalog_wrote
@@ -1163,11 +1174,22 @@ def restore_default(
                 )  # implied by catalog_changed
                 atomic_write(plan.catalog_path, plan.catalog_backup_body, mode=None)
                 print(f"restored {plan.catalog_path} from {plan.catalog_backup_path}")
-        except BaseException:
+        except BaseException as restore_exc:
             # config.toml was written first; if the catalog write then fails,
-            # roll the config back so the pair cannot be left inconsistent.
+            # roll the config back so the pair cannot be left inconsistent. If
+            # the rollback ITSELF fails, the original failure must not be
+            # silently replaced by the rollback's — both are surfaced, and the
+            # caller is told explicitly the pair was left inconsistent.
             if config_wrote and plan.catalog_changed:
-                atomic_write(plan.config_path, plan.current, mode=None)
+                try:
+                    atomic_write(plan.config_path, plan.current, mode=None)
+                except BaseException as rollback_exc:
+                    raise CodeHelperError(
+                        f"{plan.catalog_path} restore failed ({restore_exc}), and "
+                        f"rolling back the already-restored {plan.config_path} "
+                        f"ALSO failed ({rollback_exc}) — the config<->catalog "
+                        "pair is left inconsistent; manual recovery required"
+                    ) from restore_exc
             raise
 
     return True
