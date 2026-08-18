@@ -166,9 +166,7 @@ def _hint(
         # not `? keys`) to stay well inside 80 columns — `_fit` would
         # otherwise truncate the tail and silently eat the exit hint, which is
         # exactly the bug a PTY run caught here.
-        hint = (
-            f"↑↓ row · ←→ chip · Enter apply · a add · e/t token · d delete · ? · Esc {exit_word}"
-        )
+        hint = f"↑↓ row · ←→ chip · Enter apply · a add · e/t token · d delete · ? · Esc {exit_word}"
     else:
         hint = f"Up/Down · Enter select · Esc {exit_word} · Ctrl-C quit"
     if has_token_key:
