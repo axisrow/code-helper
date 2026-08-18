@@ -51,7 +51,12 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from codehelper.backends._atomic import atomic_write, read_text_or_none, rotate_backups
+from codehelper.backends._atomic import (
+    atomic_write,
+    file_lock,
+    read_text_or_none,
+    rotate_backups,
+)
 from codehelper.errors import CodeHelperError
 from codehelper.services.model import ConfigShape, Provider
 from codehelper.services.paths import Paths
@@ -614,17 +619,21 @@ def apply_switch(
     # window to change the file in between. Without this recheck that
     # concurrent write is silently lost — this refuses instead of clobbering
     # it, mirroring codex_default's own stale-file guard.
-    current_text = read_text_or_none(settings_path) or ""
-    if current_text != original_text:
-        raise CodeHelperError(
-            f"{settings_path} changed since it was read — refusing to write "
-            f"a patch computed off a stale snapshot (a concurrent switch or "
-            f"hand-edit may have run; re-run to patch the current file)"
-        )
+    # The lock must cover the final check, backup rotation, and replacement.
+    # Locking only the check still permits two cooperating writers to both
+    # pass it and then rotate/write stale snapshots.
+    with file_lock(settings_path):
+        current_text = read_text_or_none(settings_path) or ""
+        if current_text != original_text:
+            raise CodeHelperError(
+                f"{settings_path} changed since it was read — refusing to write "
+                f"a patch computed off a stale snapshot (a concurrent switch or "
+                f"hand-edit may have run; re-run to patch the current file)"
+            )
 
-    if original_text:
-        rotate_backups(_backup_slots(paths), current=original_text)
-    atomic_write(settings_path, patched_text, mode=0o600)
+        if original_text:
+            rotate_backups(_backup_slots(paths), current=original_text)
+        atomic_write(settings_path, patched_text, mode=0o600)
     action = "reset to native" if patch.is_reset else "wrote"
     print(f"{action} {settings_path} (backup: {paths.claude_settings_backup(1)})")
     return True
@@ -720,14 +729,15 @@ def restore_settings(
     # Re-read immediately before writing — same stale-snapshot guard as
     # apply_switch: a concurrent switch/restore or hand-edit during the
     # confirm prompt must not be silently clobbered.
-    current_now = read_text_or_none(settings_path) or ""
-    if current_now != current:
-        raise CodeHelperError(
-            f"{settings_path} changed since it was read — refusing to "
-            f"restore over a concurrent change (a concurrent switch or "
-            f"hand-edit may have run; re-run to restore over the current file)"
-        )
+    with file_lock(settings_path):
+        current_now = read_text_or_none(settings_path) or ""
+        if current_now != current:
+            raise CodeHelperError(
+                f"{settings_path} changed since it was read — refusing to "
+                f"restore over a concurrent change (a concurrent switch or "
+                f"hand-edit may have run; re-run to restore over the current file)"
+            )
 
-    atomic_write(settings_path, backup_body, mode=0o600)
+        atomic_write(settings_path, backup_body, mode=0o600)
     print(f"restored {settings_path} from {backup_path}")
     return True

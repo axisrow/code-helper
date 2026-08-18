@@ -794,6 +794,30 @@ def test_custom_litellm_target_is_not_native_and_matches_its_wrapper(tmp_path):
     assert matches_switch_spec(active_switch_env(paths), spec)
 
 
+@pytest.mark.unit
+def test_matches_switch_spec_distinguishes_same_provider_base_urls(tmp_path):
+    """Claude chip readback must include the wrapper's resolved endpoint."""
+    paths = Paths.from_home(tmp_path)
+    first = with_base_url(LITELLM, "https://proxy-one.example")
+    second = with_base_url(LITELLM, "https://proxy-two.example")
+    spec = WrapperSpec(
+        alias="proxy-two",
+        agent=get_agent("claude"),
+        provider=second,
+        shape=ConfigShape.ANTHROPIC_ENV,
+        model="glm-5.2",
+        tier_models=TierModels.uniform("glm-5.2"),
+    )
+    apply_switch(
+        paths,
+        provider=first,
+        tier_models=TierModels.uniform("glm-5.2"),
+        token="sk-test",
+        force=True,
+    )
+    assert not matches_switch_spec(active_switch_env(paths), spec)
+
+
 # --------------------------------------------------------------------------- #
 # restore_settings — IO
 # --------------------------------------------------------------------------- #

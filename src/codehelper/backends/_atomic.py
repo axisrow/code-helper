@@ -25,12 +25,34 @@ The helper never prints or logs ``data``: tokens pass through it unchanged.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import stat
 import tempfile
 from pathlib import Path
 
-__all__ = ["atomic_write", "read_text_or_none", "remove_file", "rotate_backups"]
+__all__ = [
+    "atomic_write",
+    "file_lock",
+    "read_text_or_none",
+    "remove_file",
+    "rotate_backups",
+]
+
+
+@contextlib.contextmanager
+def file_lock(path: str | Path):
+    """Hold an advisory exclusive lock on the stable sibling *path*."""
+    lock_path = Path(path).with_suffix(Path(path).suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as handle:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def remove_file(path: str | Path) -> None:

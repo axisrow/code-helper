@@ -36,7 +36,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from codehelper.backends._atomic import atomic_write, read_text_or_none
+from codehelper.backends._atomic import atomic_write, file_lock, read_text_or_none
 from codehelper.backends._atomic import rotate_backups as _rotate_backups
 from codehelper.errors import CodeHelperError
 from codehelper.services.model import (
@@ -776,8 +776,15 @@ def clear_default(
             f"(use --force, or re-run interactively)"
         )
 
-    _rotate_backups(_config_backup_slots(paths), current=original)
-    atomic_write(config_path, cleared, mode=None)
+    with file_lock(config_path):
+        current_now = read_text_or_none(config_path) or ""
+        if current_now != original:
+            raise CodeHelperError(
+                f"{config_path} changed since it was read — refusing to write "
+                "a stale config snapshot; re-run to patch the current file"
+            )
+        _rotate_backups(_config_backup_slots(paths), current=original)
+        atomic_write(config_path, cleared, mode=None)
     print(f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})")
     return True
 
@@ -922,14 +929,21 @@ def apply_set_default(
             print("no changes to config.toml")
         return not catalog_plan.no_op or config_changed
 
-    catalog_wrote = _commit_catalog_write(catalog_plan)
+    with file_lock(config_path):
+        current_now = read_text_or_none(config_path) or ""
+        if current_now != original:
+            raise CodeHelperError(
+                f"{config_path} changed since it was read — refusing to write "
+                "a stale config snapshot; re-run to patch the current file"
+            )
+        catalog_wrote = _commit_catalog_write(catalog_plan)
 
-    if config_changed:
-        _rotate_backups(_config_backup_slots(paths), current=original)
-        atomic_write(config_path, patched, mode=None)
-        print(f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})")
-    else:
-        print("no changes to config.toml")
+        if config_changed:
+            _rotate_backups(_config_backup_slots(paths), current=original)
+            atomic_write(config_path, patched, mode=None)
+            print(f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})")
+        else:
+            print("no changes to config.toml")
 
     return config_changed or catalog_wrote
 
@@ -1079,12 +1093,25 @@ def restore_default(
 
     _confirm_restore(plan, force=force, confirm=confirm)
 
-    if plan.config_changed:
-        atomic_write(plan.config_path, plan.backup_body, mode=None)
-        print(f"restored {plan.config_path} from {plan.backup_path}")
-    if plan.catalog_changed:
-        assert plan.catalog_backup_body is not None  # implied by catalog_changed
-        atomic_write(plan.catalog_path, plan.catalog_backup_body, mode=None)
-        print(f"restored {plan.catalog_path} from {plan.catalog_backup_path}")
+    with file_lock(plan.config_path):
+        current_config = read_text_or_none(plan.config_path) or ""
+        if current_config != plan.current:
+            raise CodeHelperError(
+                f"{plan.config_path} changed since it was read — refusing to "
+                "restore over a concurrent change; re-run to restore"
+            )
+        current_catalog = read_text_or_none(plan.catalog_path)
+        if current_catalog != plan.catalog_current:
+            raise CodeHelperError(
+                f"{plan.catalog_path} changed since it was read — refusing to "
+                "restore over a concurrent change; re-run to restore"
+            )
+        if plan.config_changed:
+            atomic_write(plan.config_path, plan.backup_body, mode=None)
+            print(f"restored {plan.config_path} from {plan.backup_path}")
+        if plan.catalog_changed:
+            assert plan.catalog_backup_body is not None  # implied by catalog_changed
+            atomic_write(plan.catalog_path, plan.catalog_backup_body, mode=None)
+            print(f"restored {plan.catalog_path} from {plan.catalog_backup_path}")
 
     return True
