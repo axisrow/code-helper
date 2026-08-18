@@ -1066,6 +1066,29 @@ def test_openai_toml_body_for_non_ollama_provider_pins_extension_point():
 
 
 @pytest.mark.unit
+def test_openai_toml_body_gemini_keeps_full_openai_root():
+    """Gemini's base_url IS the complete OpenAI root — /v1/ must NOT be appended.
+
+    openai_base_url would otherwise rewrite
+    https://generativelanguage.googleapis.com/v1beta/openai/ to a nonexistent
+    .../openai/v1/ and every Codex request would 404. The provider declares
+    base_url_is_openai_root=True (data, not a name check) and the renderer
+    honours it.
+    """
+    spec = build_spec(
+        agent="codex", provider="gemini", model="gemini-2.5-pro", alias="gem"
+    )
+    body = openai_toml_body(spec, "/home/u/.codex/gem.model.json")
+    assert 'model_provider = "gemini"' in body
+    assert "[model_providers.gemini]" in body
+    assert (
+        'base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"' in body
+    )
+    assert "/v1beta/openai/v1/" not in body
+    assert 'wire_api = "chat"' in body
+
+
+@pytest.mark.unit
 def test_openai_toml_body_quotes_wire_api():
     """wire_api is a quoted TOML string, never a bare token (F2).
 

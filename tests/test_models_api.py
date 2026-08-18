@@ -12,7 +12,7 @@ import urllib.error
 
 import pytest
 
-from codehelper.services.model import ModelListAPI, Provider
+from codehelper.services.model import ModelListAPI, Provider, get_provider
 from codehelper.services.models_api import list_models
 
 _OLLAMA = Provider(
@@ -281,6 +281,19 @@ def test_ollama_tags_are_never_v1_normalized():
     calls = []
     list_models(_OLLAMA, fetch=_fetch_returning({"models": []}, record=calls))
     assert calls[0][0] == "http://127.0.0.1:11434/api/tags"
+
+
+@pytest.mark.unit
+def test_gemini_openai_root_is_not_v1_normalized():
+    """Gemini's base_url IS the complete OpenAI root — discovery must hit
+    .../openai/models, not a nonexistent .../openai/v1/models."""
+    calls = []
+    list_models(
+        get_provider("gemini"), fetch=_fetch_returning({"data": []}, record=calls)
+    )
+    assert calls[0][0] == (
+        "https://generativelanguage.googleapis.com/v1beta/openai/models"
+    )
 
 
 @pytest.mark.unit

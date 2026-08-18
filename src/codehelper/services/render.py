@@ -178,7 +178,7 @@ _DEFAULT_CONTEXT_WINDOW = 128000
 _DEFAULT_MAX_OUTPUT = 32768
 
 
-def openai_base_url(provider_base_url: str) -> str:
+def openai_base_url(provider_base_url: str, is_openai_root: bool = False) -> str:
     """Derive the OpenAI-compatible ``base_url`` for the TOML profile.
 
     A dual-shape provider like ollama serves both the Anthropic protocol and
@@ -188,12 +188,21 @@ def openai_base_url(provider_base_url: str) -> str:
     would double it (``.../v1/v1/``) and every request 404s. Detect the suffix
     and append only when it is absent — one renderer serving both shapes.
 
+    ``is_openai_root`` is the third case: a provider whose ``base_url`` IS the
+    complete OpenAI-compatible root (e.g. Gemini's
+    ``https://generativelanguage.googleapis.com/v1beta/openai/``) must be
+    returned unchanged — appending ``/v1/`` would rewrite it to a nonexistent
+    ``.../openai/v1/`` and every request 404s. It is declared data
+    (``Provider.base_url_is_openai_root``), never a provider-name check.
+
     Public (not ``_``-prefixed): ``services/codex_default.py`` reuses this
     exact derivation for ``set-default``, so the two OPENAI_TOML writers (a
     per-alias profile here, Codex's own default config there) cannot disagree
     on how a provider's ``base_url`` becomes a ``/v1/`` endpoint.
     """
     root = provider_base_url.rstrip("/")
+    if is_openai_root:
+        return root + "/"
     if root.endswith("/v1"):
         return root + "/"
     return root + "/v1/"
@@ -301,7 +310,9 @@ def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
     """
     table = spec.provider.name
     display_name = spec.provider.description or spec.provider.name
-    base_url = openai_base_url(spec.provider.base_url)
+    base_url = openai_base_url(
+        spec.provider.base_url, spec.provider.base_url_is_openai_root
+    )
     lines = [
         f"{_marker(spec)}\n",
         f'model = "{toml_string(spec.model)}"\n',
