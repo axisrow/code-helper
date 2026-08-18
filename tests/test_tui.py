@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1492,6 +1493,23 @@ def test_main_screen_hint_names_a_as_add_not_edit(monkeypatch):
 
 
 # --- the chipset frame ------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_e_on_chip_row_targets_highlighted_wrapper():
+    """Editing a chip row must resolve its selected chip, not the row key."""
+    from codehelper.cli.tui import TuiSession
+
+    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session._chips = {"claude": ["native", "deepseek", "glm", "+ add"]}
+    session._chip_index = {"claude": 2}
+
+    assert session._token_action("agent:claude") == "token:glm"
+    session._chip_index["claude"] = 0
+    assert session._token_action("agent:claude") is None
+    session._chip_index["claude"] = 3
+    assert session._token_action("agent:claude") is None
+    assert session._token_action("glm") == "token:glm"
 
 
 def _chip_rows(items, *, cursor_pair: int = 0, ansi: bool = True) -> dict[str, str]:

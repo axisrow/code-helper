@@ -166,9 +166,7 @@ def _hint(
         # not `? keys`) to stay well inside 80 columns — `_fit` would
         # otherwise truncate the tail and silently eat the exit hint, which is
         # exactly the bug a PTY run caught here.
-        hint = (
-            f"↑↓ row · ←→ chip · Enter apply · a add · e/d edit · ? · Esc {exit_word}"
-        )
+        hint = f"↑↓ row · ←→ chip · Enter apply · a add · e/t token · d delete · ? · Esc {exit_word}"
     else:
         hint = f"Up/Down · Enter select · Esc {exit_word} · Ctrl-C quit"
     if has_token_key:
@@ -1463,6 +1461,40 @@ class TuiSession:
             self._chip_index[agent_name] = (current + delta) % len(chips)
         return None
 
+    def _focused_chip(self, value: str) -> object | None:
+        """Return the chip focused by the chip cursor, or None.
+
+        For non-agent rows, returns the value itself (alias string).
+        For agent rows with a chip cursor, resolves the cursor position to
+        the actual chip object. Returns None for agent rows with no chips,
+        or when focused on _NATIVE_CHIP/_ADD_CHIP.
+        """
+        if not value.startswith(_AGENT_ROW):
+            return value
+        agent_name = value.removeprefix(_AGENT_ROW)
+        chips = self._chips.get(agent_name, [])
+        if not chips:
+            return None
+        chip_idx = self._chip_index.get(agent_name, 0)
+        chip = chips[chip_idx % len(chips)]
+        if chip in (_NATIVE_CHIP, _ADD_CHIP):
+            return None
+        return chip
+
+    def _token_action(self, value: str) -> str | None:
+        """Return the token action for the focused row/chip.
+
+        Agent rows are namespaced as ``agent:<name>`` and carry a horizontal
+        chip cursor.  Passing that row key directly to ``_on_token`` makes it
+        look for a wrapper literally named ``agent:claude``.  Resolve the
+        highlighted backend to its real preset/wrapper alias first; native
+        and the trailing add chip have no token to edit.
+        """
+        chip = self._focused_chip(value)
+        if chip is None:
+            return None
+        return f"token:{self._chip_name(chip)}"
+
     def _apply_chip(self, agent_name: str) -> None:
         """Apply the highlighted chip of ``agent_name`` (Enter on its row).
 
@@ -1475,9 +1507,12 @@ class TuiSession:
         chips = self._chips.get(agent_name, [])
         if not chips:
             return
-        chip = chips[min(self._chip_index.get(agent_name, 0), len(chips) - 1)]
+
+        chip_idx = self._chip_index.get(agent_name, 0)
+        chip = chips[chip_idx % len(chips)]
+
         if chip == _ADD_CHIP:
-            # Not a backend — opens Add pre-scoped to this row's agent,
+            # The + add action — opens Add pre-scoped to this row's agent,
             # exactly what `a` on this row does (see `run()`'s "a" binding).
             self._run_add(agent_name)
             return
@@ -1542,8 +1577,9 @@ class TuiSession:
                     "p": lambda _alias: _PROFILE,
                     "s": lambda _alias: _SETTINGS,
                     "?": lambda _alias: _HELP,
-                    "TOKEN": lambda alias: f"token:{alias}",
-                    "e": lambda alias: f"token:{alias}",
+                    "TOKEN": self._token_action,
+                    "e": self._token_action,
+                    "t": self._token_action,
                     "d": lambda alias: f"remove:{alias}",
                     # Left/Right (and Shift+Tab, the same move backwards) only
                     # ever reposition the chip cursor and return None, so the
