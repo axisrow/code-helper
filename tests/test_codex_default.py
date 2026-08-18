@@ -534,6 +534,162 @@ def test_set_default_restore_also_restores_the_paired_catalog(tmp_path):
 
 
 @pytest.mark.integration
+def test_set_default_refuses_stale_catalog_snapshot(tmp_path, monkeypatch):
+    """A catalog edited after the gate snapshot must not be silently clobbered.
+
+    The lock serializes codehelper's own ``set-default`` calls, but a hand-edit
+    (or another tool) landing between ``_gate_catalog_write``'s read and the
+    commit would otherwise be overwritten from the stale snapshot — the same
+    stale-write race the config.toml re-check already closes.
+    """
+    from codehelper.services import codex_default
+
+    paths = Paths.from_home(tmp_path)
+    _install(paths, model="glm-4.7", force=True)
+    catalog_path = paths.codex_dir / "model.json"
+
+    real_gate = codex_default._gate_catalog_write
+
+    def _gate_then_edit(
+        patch, agent, provider, catalog_path, *, dry_run, force, confirm
+    ):
+        plan = real_gate(
+            patch,
+            agent,
+            provider,
+            catalog_path,
+            dry_run=dry_run,
+            force=force,
+            confirm=confirm,
+        )
+        # Simulate a concurrent hand-edit landing after the gate snapshot.
+        catalog_path.write_text('{"hand": "edited"}', encoding="utf-8")
+        return plan
+
+    monkeypatch.setattr(codex_default, "_gate_catalog_write", _gate_then_edit)
+
+    with pytest.raises(CodeHelperError, match="stale catalog snapshot"):
+        _install(paths, model="glm-5.2:cloud", force=True)
+    # The concurrent edit survives — nothing was clobbered.
+    assert catalog_path.read_text(encoding="utf-8") == '{"hand": "edited"}'
+
+
+@pytest.mark.integration
+def test_set_default_rolls_back_catalog_when_config_write_fails(tmp_path, monkeypatch):
+    """A failed config.toml write must not leave the catalog half-updated.
+
+    The catalog is committed first; if the config write then fails (disk full,
+    permissions, read-only FS), the catalog is rolled back so the pair cannot
+    be left inconsistent.
+    """
+    from codehelper.services import codex_default
+
+    paths = Paths.from_home(tmp_path)
+    _install(paths, model="glm-4.7", force=True)
+    catalog_path = paths.codex_dir / "model.json"
+    original_catalog = catalog_path.read_text(encoding="utf-8")
+
+    real_atomic_write = codex_default.atomic_write
+
+    def _fail_config_write(path, content, mode=None):
+        if path == paths.codex_main_config():
+            raise OSError("disk full")
+        return real_atomic_write(path, content, mode=mode)
+
+    monkeypatch.setattr(codex_default, "atomic_write", _fail_config_write)
+
+    with pytest.raises(OSError, match="disk full"):
+        _install(paths, model="glm-5.2:cloud", force=True)
+    # The catalog was rolled back to its pre-write content.
+    assert catalog_path.read_text(encoding="utf-8") == original_catalog
+
+
+@pytest.mark.integration
+def test_restore_ignores_catalog_change_when_catalog_not_restored(
+    tmp_path, monkeypatch
+):
+    """A concurrent hand-edit to the catalog must not abort a config-only restore.
+
+    When the catalog is not going to be restored (no catalog backup at the
+    slot), its staleness is irrelevant — the mandatory config.toml restore must
+    proceed.
+    """
+    from codehelper.services import codex_default
+
+    paths = Paths.from_home(tmp_path)
+    _install(paths, model="glm-4.7", force=True)
+    catalog_path = paths.codex_dir / "model.json"
+    assert catalog_path.exists()
+
+    def _edit_catalog(plan, *, force, confirm):
+        catalog_path.write_text('{"hand": "edited"}', encoding="utf-8")
+
+    monkeypatch.setattr(codex_default, "_confirm_restore", _edit_catalog)
+
+    restore_default(paths, slot=1, force=True)
+    assert "glm-4.7" not in paths.codex_main_config().read_text(encoding="utf-8")
+
+
+@pytest.mark.integration
+def test_restore_still_refuses_catalog_change_when_catalog_restored(
+    tmp_path, monkeypatch
+):
+    """The catalog stale-check is preserved when the catalog IS being restored.
+
+    Gating the check on ``catalog_changed`` must not weaken it for the case it
+    exists to protect — a concurrent catalog edit still aborts a restore that
+    would overwrite that catalog.
+    """
+    from codehelper.services import codex_default
+
+    paths = Paths.from_home(tmp_path)
+    _install(paths, model="glm-4.7", force=True)
+    _install(paths, model="glm-5.2:cloud", force=True)
+    _install(paths, model="glm-5.3:cloud", force=True)
+    catalog_path = paths.codex_dir / "model.json"
+
+    def _edit_catalog(plan, *, force, confirm):
+        catalog_path.write_text('{"hand": "edited"}', encoding="utf-8")
+
+    monkeypatch.setattr(codex_default, "_confirm_restore", _edit_catalog)
+
+    with pytest.raises(CodeHelperError, match="changed since it was read"):
+        restore_default(paths, slot=2, force=True)
+
+
+@pytest.mark.integration
+def test_restore_rolls_back_config_when_catalog_write_fails(tmp_path, monkeypatch):
+    """A failed catalog write must not leave config.toml half-restored.
+
+    config.toml is written first; if the catalog write then fails, the config
+    is rolled back so the pair cannot be left inconsistent.
+    """
+    from codehelper.services import codex_default
+
+    paths = Paths.from_home(tmp_path)
+    _install(paths, model="glm-4.7", force=True)
+    _install(paths, model="glm-5.2:cloud", force=True)
+    _install(paths, model="glm-5.3:cloud", force=True)
+    catalog_path = paths.codex_dir / "model.json"
+    config_path = paths.codex_main_config()
+    current_config = config_path.read_text(encoding="utf-8")
+
+    real_atomic_write = codex_default.atomic_write
+
+    def _fail_catalog_write(path, content, mode=None):
+        if path == catalog_path:
+            raise OSError("disk full")
+        return real_atomic_write(path, content, mode=mode)
+
+    monkeypatch.setattr(codex_default, "atomic_write", _fail_catalog_write)
+
+    with pytest.raises(OSError, match="disk full"):
+        restore_default(paths, slot=2, force=True)
+    # config.toml was rolled back to its pre-restore content.
+    assert config_path.read_text(encoding="utf-8") == current_config
+
+
+@pytest.mark.integration
 def test_set_default_restore_declining_catalog_leaves_both_files_untouched(
     tmp_path,
 ):

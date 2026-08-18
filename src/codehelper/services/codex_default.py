@@ -36,7 +36,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from codehelper.backends._atomic import atomic_write, file_lock, read_text_or_none
+from codehelper.backends._atomic import (
+    atomic_write,
+    file_lock,
+    read_text_or_none,
+    remove_file,
+)
 from codehelper.backends._atomic import rotate_backups as _rotate_backups
 from codehelper.errors import CodeHelperError
 from codehelper.services.model import (
@@ -630,6 +635,20 @@ def _commit_catalog_write(plan: _CatalogPlan) -> bool:
     return True
 
 
+def _rollback_catalog(plan: _CatalogPlan) -> None:
+    """Undo a catalog write that succeeded but whose paired config write failed.
+
+    Best-effort: restores the catalog to its pre-write content (or removes it
+    if it did not exist), so a failed ``config.toml`` write cannot leave a live
+    config<->catalog mismatch. The extra backup slot rotated by the original
+    write is left in place — the ring is append-only and harmless.
+    """
+    if plan.existing is None:
+        remove_file(plan.catalog_path)
+    else:
+        atomic_write(plan.catalog_path, plan.existing, mode=None)
+
+
 def clear_config_toml(original: str, provider_table: str | None) -> str:
     """``original`` with this command's managed region removed. Pure, no IO.
 
@@ -936,14 +955,36 @@ def apply_set_default(
                 f"{config_path} changed since it was read — refusing to write "
                 "a stale config snapshot; re-run to patch the current file"
             )
+        # The catalog is written from a snapshot captured at gate time; a
+        # concurrent hand-edit (or another tool) landing after that snapshot
+        # must not be silently clobbered. Re-read it under the same lock and
+        # refuse if it moved — the same stale-snapshot guard as config.toml.
+        if not catalog_plan.no_op:
+            current_catalog = read_text_or_none(catalog_path)
+            if current_catalog != catalog_plan.existing:
+                raise CodeHelperError(
+                    f"{catalog_path} changed since it was read — refusing to "
+                    "write a stale catalog snapshot; re-run to patch the "
+                    "current file"
+                )
         catalog_wrote = _commit_catalog_write(catalog_plan)
 
-        if config_changed:
-            _rotate_backups(_config_backup_slots(paths), current=original)
-            atomic_write(config_path, patched, mode=None)
-            print(f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})")
-        else:
-            print("no changes to config.toml")
+        try:
+            if config_changed:
+                _rotate_backups(_config_backup_slots(paths), current=original)
+                atomic_write(config_path, patched, mode=None)
+                print(
+                    f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})"
+                )
+            else:
+                print("no changes to config.toml")
+        except BaseException:
+            # The catalog was committed first; if the config.toml write then
+            # fails (disk full, permissions, read-only FS), roll the catalog
+            # back so the pair cannot be left inconsistent.
+            if catalog_wrote:
+                _rollback_catalog(catalog_plan)
+            raise
 
     return config_changed or catalog_wrote
 
@@ -1100,18 +1141,33 @@ def restore_default(
                 f"{plan.config_path} changed since it was read — refusing to "
                 "restore over a concurrent change; re-run to restore"
             )
-        current_catalog = read_text_or_none(plan.catalog_path)
-        if current_catalog != plan.catalog_current:
-            raise CodeHelperError(
-                f"{plan.catalog_path} changed since it was read — refusing to "
-                "restore over a concurrent change; re-run to restore"
-            )
-        if plan.config_changed:
-            atomic_write(plan.config_path, plan.backup_body, mode=None)
-            print(f"restored {plan.config_path} from {plan.backup_path}")
+        # Only re-check the catalog when it is actually going to be restored —
+        # a concurrent hand-edit to a catalog this restore will NOT touch must
+        # not spuriously abort the mandatory config.toml restore.
         if plan.catalog_changed:
-            assert plan.catalog_backup_body is not None  # implied by catalog_changed
-            atomic_write(plan.catalog_path, plan.catalog_backup_body, mode=None)
-            print(f"restored {plan.catalog_path} from {plan.catalog_backup_path}")
+            current_catalog = read_text_or_none(plan.catalog_path)
+            if current_catalog != plan.catalog_current:
+                raise CodeHelperError(
+                    f"{plan.catalog_path} changed since it was read — refusing to "
+                    "restore over a concurrent change; re-run to restore"
+                )
+        config_wrote = False
+        try:
+            if plan.config_changed:
+                atomic_write(plan.config_path, plan.backup_body, mode=None)
+                config_wrote = True
+                print(f"restored {plan.config_path} from {plan.backup_path}")
+            if plan.catalog_changed:
+                assert (
+                    plan.catalog_backup_body is not None
+                )  # implied by catalog_changed
+                atomic_write(plan.catalog_path, plan.catalog_backup_body, mode=None)
+                print(f"restored {plan.catalog_path} from {plan.catalog_backup_path}")
+        except BaseException:
+            # config.toml was written first; if the catalog write then fails,
+            # roll the config back so the pair cannot be left inconsistent.
+            if config_wrote and plan.catalog_changed:
+                atomic_write(plan.config_path, plan.current, mode=None)
+            raise
 
     return True
