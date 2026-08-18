@@ -281,9 +281,7 @@ PRESETS: tuple[Preset, ...] = (
         shape=ConfigShape.ANTHROPIC_ENV,
         model="glm-5-turbo",
         # Genuinely different models per tier — the reason TierModels exists.
-        tier_models=TierModels(
-            haiku="glm-4.7", sonnet="glm-5-turbo", opus="glm-5.1"
-        ),
+        tier_models=TierModels(haiku="glm-4.7", sonnet="glm-5-turbo", opus="glm-5.1"),
         subagent_model=None,
         description="Claude Code → Z.ai",
     ),
