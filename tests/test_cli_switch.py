@@ -288,7 +288,7 @@ def test_switch_from_wrapper_lifts_tier_models_and_token(tmp_path, monkeypatch):
     assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-zai-secret"
     assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5-turbo"
-    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.2[1m]"
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.1"
 
 
 @pytest.mark.integration

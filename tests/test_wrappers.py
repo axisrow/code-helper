@@ -148,7 +148,7 @@ def test_glm_keeps_distinct_models_per_tier():
     assert (tiers.haiku, tiers.sonnet, tiers.opus) == (
         "glm-4.7",
         "glm-5-turbo",
-        "glm-5.2[1m]",
+        "glm-5.1",
     )
 
 

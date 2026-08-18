@@ -441,9 +441,8 @@ PROVIDERS: tuple[Provider, ...] = (
         # Discovery is structurally unavailable (model_list_api is NONE
         # above), so these are the ONLY models the model step can ever offer
         # besides manual entry. Seeded from what is already known-good in
-        # this codebase: glm-5-turbo (the `glm` preset) and glm-5.2 (an
-        # installed glm52-litellm wrapper).
-        known_models=("glm-5-turbo", "glm-5.2"),
+        # this codebase: glm-5-turbo and glm-5.1 (the `glm` preset).
+        known_models=("glm-5-turbo", "glm-5.1"),
         description="Z.ai (Anthropic-compatible)",
     ),
     Provider(
