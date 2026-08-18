@@ -108,6 +108,11 @@ def test_gemini_is_openai_only_and_uses_documented_conventions():
     assert gemini.base_url == (
         "https://generativelanguage.googleapis.com/v1beta/openai/"
     )
+    # The stored base_url IS the complete OpenAI root — the renderer must not
+    # append /v1/ to it (that would 404). Pinned here so a regression to a
+    # bare-root convention (which openai_base_url would rewrite to
+    # .../openai/v1/) is caught at the registry level.
+    assert gemini.base_url_is_openai_root is True
     assert gemini.auth == "secret"
     assert gemini.token_env_var == "GEMINI_API_KEY"
     assert gemini.model_list_api is ModelListAPI.OPENAI_V1

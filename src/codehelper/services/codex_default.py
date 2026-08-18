@@ -145,7 +145,7 @@ def resolve_default_patch(
         model=model,
         provider_table=provider.name,
         display_name=provider.description or provider.name,
-        base_url=openai_base_url(provider.base_url),
+        base_url=openai_base_url(provider.base_url, provider.base_url_is_openai_root),
         wire_api=provider.wire_api,
         catalog_json=catalog_path,
     )

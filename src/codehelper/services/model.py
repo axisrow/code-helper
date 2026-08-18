@@ -289,6 +289,16 @@ class Provider:
     #: See :class:`BaseUrlPolicy`. Constrains what ``base_url`` may hold —
     #: enforced at import time by :func:`_validate_provider`.
     base_url_policy: BaseUrlPolicy = BaseUrlPolicy.FIXED
+    #: ``base_url`` is already the complete OpenAI-compatible root, so the
+    #: OPENAI_TOML renderer must NOT append ``/v1/`` to it. Most OpenAI-only
+    #: providers follow the ``/v1``-suffix convention (``render.openai_base_url``
+    #: appends ``/v1/`` to a bare root and ``/`` to a ``/v1``-suffixed one), but
+    #: a provider whose documented endpoint IS the full OpenAI surface (e.g.
+    #: Gemini's ``https://generativelanguage.googleapis.com/v1beta/openai/``)
+    #: would otherwise be rewritten to a nonexistent ``.../openai/v1/`` and
+    #: every request 404s. Declared data, never a provider-name check — the
+    #: renderer branches on this field, exactly like ``env_reset``.
+    base_url_is_openai_root: bool = False
     #: ``"literal"`` — a non-secret token baked into the script (Ollama's local
     #: daemon accepts ``"ollama"``); ``"secret"`` — resolved from env/prompt and
     #: the script is written 0o700; ``"none"`` — the launcher authenticates.
@@ -484,6 +494,10 @@ PROVIDERS: tuple[Provider, ...] = (
         # shape intersection rather than a provider-name special case.
         shapes=frozenset({ConfigShape.OPENAI_TOML}),
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        # The stored base_url IS the complete OpenAI-compatible root — the
+        # renderer must not append /v1/ to it (that would 404). See the field
+        # docstring on Provider.base_url_is_openai_root.
+        base_url_is_openai_root=True,
         auth="secret",
         token_env_var="GEMINI_API_KEY",
         model_list_api=ModelListAPI.OPENAI_V1,
