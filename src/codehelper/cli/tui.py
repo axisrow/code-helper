@@ -1581,6 +1581,7 @@ class TuiSession:
                     "?": lambda _alias: _HELP,
                     "TOKEN": self._token_action,
                     "e": self._token_action,
+                    "t": self._token_action,
                     "d": lambda alias: f"remove:{alias}",
                     # Left/Right (and Shift+Tab, the same move backwards) only
                     # ever reposition the chip cursor and return None, so the
