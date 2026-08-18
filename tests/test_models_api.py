@@ -288,7 +288,9 @@ def test_gemini_openai_root_is_not_v1_normalized():
     """Gemini's base_url IS the complete OpenAI root — discovery must hit
     .../openai/models, not a nonexistent .../openai/v1/models."""
     calls = []
-    list_models(get_provider("gemini"), fetch=_fetch_returning({"data": []}, record=calls))
+    list_models(
+        get_provider("gemini"), fetch=_fetch_returning({"data": []}, record=calls)
+    )
     assert calls[0][0] == (
         "https://generativelanguage.googleapis.com/v1beta/openai/models"
     )

@@ -1075,13 +1075,14 @@ def test_openai_toml_body_gemini_keeps_full_openai_root():
     base_url_is_openai_root=True (data, not a name check) and the renderer
     honours it.
     """
-    spec = build_spec(agent="codex", provider="gemini", model="gemini-2.5-pro", alias="gem")
+    spec = build_spec(
+        agent="codex", provider="gemini", model="gemini-2.5-pro", alias="gem"
+    )
     body = openai_toml_body(spec, "/home/u/.codex/gem.model.json")
     assert 'model_provider = "gemini"' in body
     assert "[model_providers.gemini]" in body
     assert (
-        'base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"'
-        in body
+        'base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"' in body
     )
     assert "/v1beta/openai/v1/" not in body
     assert 'wire_api = "chat"' in body
