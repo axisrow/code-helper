@@ -19,7 +19,7 @@ They are not a parallel mechanism — each one is just a named argument bundle
 that expands into the same axes. They earn their place because:
 
 - ``glm`` uses a *different model per tier* (``glm-4.7`` / ``glm-5-turbo`` /
-  ``glm-5.2[1m]``); that is not expressible as a single ``--model``, and
+  ``glm-5.1``); that is not expressible as a single ``--model``, and
   demanding three flags for the common case would be absurd;
 - ``codehelper add glm`` must keep working as one word.
 """
@@ -281,9 +281,7 @@ PRESETS: tuple[Preset, ...] = (
         shape=ConfigShape.ANTHROPIC_ENV,
         model="glm-5-turbo",
         # Genuinely different models per tier — the reason TierModels exists.
-        tier_models=TierModels(
-            haiku="glm-4.7", sonnet="glm-5-turbo", opus="glm-5.2[1m]"
-        ),
+        tier_models=TierModels(haiku="glm-4.7", sonnet="glm-5-turbo", opus="glm-5.1"),
         subagent_model=None,
         description="Claude Code → Z.ai",
     ),

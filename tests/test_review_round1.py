@@ -169,7 +169,7 @@ def test_edit_token_preserves_non_uniform_tier_models(tmp_path, monkeypatch):
     paths = _bin(tmp_path)
     install_wrapper(paths, "glm", token="tok1")
     before = (paths.bin_dir / "glm").read_text()
-    assert "'glm-4.7'" in before and "'glm-5.2[1m]'" in before
+    assert "'glm-4.7'" in before and "'glm-5.1'" in before
 
     monkeypatch.setattr("getpass.getpass", lambda *a, **k: "tok2")
     assert main(["edit-token", "glm"]) == 0
