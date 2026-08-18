@@ -681,6 +681,92 @@ def test_restore_reports_when_config_rollback_also_fails(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_set_default_reports_post_replace_catalog_write_failure(tmp_path, monkeypatch):
+    """A CATALOG write failing AFTER its content already landed must be
+
+    surfaced clearly, not let the raw post-replace exception propagate as if
+    nothing had happened. ``atomic_write`` performs ``os.replace`` (which
+    commits the new content) before an optional trailing ``chmod`` — a
+    chmod-stage failure raises, but the content is already committed. Before
+    the fix, ``catalog_wrote = _commit_catalog_write(catalog_plan)`` never
+    completed its assignment when the call raised, so the surrounding
+    ``except`` block (which needs ``catalog_wrote`` to decide whether to roll
+    back) was never even reached — the exception propagated straight out of
+    ``apply_set_default`` with no framing, despite the catalog content having
+    actually been replaced.
+    """
+    from codehelper.services import codex_default
+
+    paths = Paths.from_home(tmp_path)
+    _install(paths, model="glm-4.7", force=True)
+    catalog_path = paths.codex_dir / "model.json"
+
+    real_atomic_write = codex_default.atomic_write
+
+    def _write_then_fail_post_replace(path, content, mode=None):
+        if path == catalog_path:
+            # Simulate atomic_write's os.replace succeeding (content lands)
+            # and then its trailing chmod raising.
+            path.write_text(content, encoding="utf-8")
+            raise OSError("chmod failed: operation not permitted")
+        return real_atomic_write(path, content, mode=mode)
+
+    monkeypatch.setattr(codex_default, "atomic_write", _write_then_fail_post_replace)
+
+    with pytest.raises(CodeHelperError, match="chmod failed") as excinfo:
+        _install(paths, model="glm-5.2:cloud", force=True)
+    # The error must say the catalog's committed state is now uncertain,
+    # rather than silently proceeding as if the catalog write never landed.
+    assert "may or may not" in str(excinfo.value)
+    # The content actually DID land (os.replace succeeded before chmod
+    # raised) — config.toml must NOT have been written on top of it.
+    config_path = paths.codex_main_config()
+    assert "glm-4.7" in config_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.integration
+def test_restore_attempts_rollback_when_config_write_fails_post_replace(
+    tmp_path, monkeypatch
+):
+    """A CONFIG restore write failing AFTER its content already landed must
+
+    still be tracked as written, so the ``except`` block's rollback gate
+    (``if config_wrote and plan.catalog_changed``) correctly fires a rollback
+    ATTEMPT. ``atomic_write`` performs ``os.replace`` (which commits the new
+    content) before an optional trailing ``chmod`` — a chmod-stage failure
+    raises, but the content is already committed. Before the fix,
+    ``config_wrote = True`` was only set once ``atomic_write`` returned
+    cleanly, so this exact failure left ``config_wrote`` at ``False`` and
+    the rollback attempt below was skipped entirely — the raw chmod OSError
+    propagated with no framing and no attempt to reconcile the pair, despite
+    config.toml having already been overwritten with the restored content.
+    """
+    from codehelper.services import codex_default
+
+    paths = Paths.from_home(tmp_path)
+    _install(paths, model="glm-4.7", force=True)
+    _install(paths, model="glm-5.2:cloud", force=True)
+    config_path = paths.codex_main_config()
+
+    real_atomic_write = codex_default.atomic_write
+
+    def _write_then_fail_post_replace(path, content, mode=None):
+        if path == config_path:
+            path.write_text(content, encoding="utf-8")
+            raise OSError("chmod failed: operation not permitted")
+        return real_atomic_write(path, content, mode=mode)
+
+    monkeypatch.setattr(codex_default, "atomic_write", _write_then_fail_post_replace)
+
+    # The rollback write also goes through the same (always-failing) mock,
+    # so the double-failure path fires — proving the rollback was ATTEMPTED
+    # (config_wrote was correctly True), which is what this test guards.
+    with pytest.raises(CodeHelperError, match="rolling back") as excinfo:
+        restore_default(paths, slot=1, force=True)
+    assert "inconsistent" in str(excinfo.value)
+
+
+@pytest.mark.integration
 def test_restore_ignores_catalog_change_when_catalog_not_restored(
     tmp_path, monkeypatch
 ):

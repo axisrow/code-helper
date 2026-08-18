@@ -967,7 +967,25 @@ def apply_set_default(
                     "write a stale catalog snapshot; re-run to patch the "
                     "current file"
                 )
-        catalog_wrote = _commit_catalog_write(catalog_plan)
+        # ``atomic_write`` can raise AFTER its content-committing ``os.replace``
+        # — the trailing chmod that restores an existing destination's prior
+        # mode bits is not inside that call's replace-guarded try/except. So a
+        # raised exception does not prove the write never landed: treat the
+        # catalog as possibly-written the moment we ask it to write, not only
+        # when the call returns cleanly, and surface (rather than propagate
+        # unrolled) a post-replace failure so the pair's state is never
+        # silently ambiguous.
+        catalog_wrote = not catalog_plan.no_op
+        if catalog_wrote:
+            try:
+                _commit_catalog_write(catalog_plan)
+            except BaseException as catalog_exc:
+                raise CodeHelperError(
+                    f"writing {catalog_path} failed ({catalog_exc}) — its "
+                    "content may or may not have been replaced (the failure "
+                    "could be pre- or post-commit); re-run to verify and "
+                    "reconcile before writing config.toml"
+                ) from catalog_exc
 
         try:
             if config_changed:
@@ -1162,11 +1180,19 @@ def restore_default(
                     f"{plan.catalog_path} changed since it was read — refusing to "
                     "restore over a concurrent change; re-run to restore"
                 )
+        # ``atomic_write`` can raise AFTER its content-committing ``os.replace``
+        # (the trailing chmod that restores an existing destination's prior
+        # mode bits sits outside that call's replace-guarded try/except), so a
+        # raised exception does not prove the write never landed. Mark
+        # ``config_wrote`` the moment the write is attempted, not only once it
+        # returns cleanly — otherwise a post-replace chmod failure here would
+        # skip the config rollback below despite config.toml already having
+        # been replaced.
         config_wrote = False
         try:
             if plan.config_changed:
-                atomic_write(plan.config_path, plan.backup_body, mode=None)
                 config_wrote = True
+                atomic_write(plan.config_path, plan.backup_body, mode=None)
                 print(f"restored {plan.config_path} from {plan.backup_path}")
             if plan.catalog_changed:
                 assert (
