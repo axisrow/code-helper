@@ -607,8 +607,9 @@ def set_proxy_state(
     # value, and `apply_proxy`'s own stale-snapshot guard still refuses a
     # patch computed off a superseded read — so a concurrent writer cannot
     # have its endpoint disabled while this command banks the old one.
-    if destroys_the_address and to_save != status.saved_url and not dry_run:
-        set_saved_proxy(paths, to_save)
+    if destroys_the_address and to_save and to_save != status.saved_url:
+        if not dry_run:
+            set_saved_proxy(paths, to_save)
 
     wrote = apply_proxy(
         paths,
