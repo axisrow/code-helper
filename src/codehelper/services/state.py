@@ -64,6 +64,8 @@ __all__ = [
     "default_wrapper",
     "set_default_wrapper",
     "clear_default_wrapper",
+    "saved_proxy",
+    "set_saved_proxy",
 ]
 
 
@@ -145,6 +147,41 @@ def set_active_selection(paths: Paths, provider_name: str, profile_name: str) ->
     state.pop("active_provider", None)
     state.pop("active_profiles", None)
     state["active"] = {"provider": provider_name, "profile": profile_name}
+    _write_state(paths, state)
+
+
+def saved_proxy(paths: Paths) -> str | None:
+    """The proxy address remembered for the next ``proxy on``, or ``None``.
+
+    A third independent top-level pointer, alongside ``active`` and
+    ``default_wrapper`` — the named-key schema this module adopted from the
+    start exists precisely so a new field costs no migration.
+
+    Turning the proxy off blanks the values in ``settings.json`` rather than
+    deleting the keys (see ``services/proxy.py`` on why), which means the
+    address itself would be gone and ``proxy on`` would have nothing to
+    restore. This is where it survives the round trip. Raw read, no
+    validation: ``proxy.validate_proxy_url`` is the one gate, and it runs
+    before any write rather than on every read.
+    """
+    state = load_state(paths)
+    proxy = state.get("proxy")
+    if not isinstance(proxy, dict):
+        return None
+    return _string_or_none(proxy.get("url"))
+
+
+def set_saved_proxy(paths: Paths, url: str) -> None:
+    """Remember ``url`` as the address to restore on the next ``proxy on``.
+
+    Plain read-modify-write through ``atomic_write`` — no ``flock``. A proxy
+    URL may carry basic-auth credentials, which is why ``settings.json``
+    itself is written ``0o600``; this file is not treated as a secret store,
+    so a caller that must not leak credentials here should say so rather than
+    relying on this function to redact (it does not).
+    """
+    state = load_state(paths)
+    state["proxy"] = {"url": url}
     _write_state(paths, state)
 
 

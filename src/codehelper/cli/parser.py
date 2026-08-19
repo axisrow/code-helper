@@ -43,6 +43,7 @@ from dataclasses import replace
 from codehelper.cli.requests import (
     AddRequest,
     EditTokenRequest,
+    ProxyRequest,
     RemoveRequest,
     SetDefaultRequest,
     SwitchRequest,
@@ -1151,6 +1152,58 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
     return 0
 
 
+def _handle_proxy(args: argparse.Namespace | ProxyRequest) -> int:
+    """Toggle / configure the proxy keys in ``~/.claude/settings.json``.
+
+    Patches the SAME file as ``switch`` but a disjoint set of keys: this
+    command owns ``PROXY_ENV_KEYS`` + ``NO_PROXY_ENV_KEYS``, ``switch`` owns
+    the ``ANTHROPIC_*`` block. Neither can disturb the other — see
+    ``services/proxy.py`` for why that is enforced mechanically rather than
+    by convention.
+
+    Thin by design: the verb-to-address resolution and the
+    save-before-blank ordering both live in ``proxy.set_proxy_state``, so
+    every entry point (this command and the TUI's three) gets them from one
+    place rather than by routing discipline. What stays here is what is
+    genuinely CLI-shaped — the flag contradiction check and status printing.
+    """
+    from codehelper.services import proxy as proxy_service
+
+    req = args if isinstance(args, ProxyRequest) else ProxyRequest.from_namespace(args)
+    paths = Paths.default()
+
+    if req.status or (req.action is None and req.url is None and req.no_proxy is None):
+        status = proxy_service.proxy_status(paths)
+        if status.enabled:
+            print(f"on — {status.display_url}")
+        elif status.saved_url:
+            print(f"off (saved: {status.display_saved_url})")
+        else:
+            print("off (no address configured)")
+        if status.no_proxy:
+            print(f"NO_PROXY: {status.no_proxy}")
+        return 0
+
+    # `--url` is "set the address", which only means something switched on;
+    # an explicit `off` alongside it would be contradictory rather than
+    # merely redundant, so it is rejected instead of silently picking one.
+    if req.url is not None and req.action == "off":
+        raise CodeHelperError("--url sets an address to use — it cannot go with `off`")
+
+    wrote = proxy_service.set_proxy_state(
+        paths,
+        action=req.action,
+        url=req.url,
+        no_proxy=req.no_proxy,
+        dry_run=req.dry_run,
+        force=req.force,
+        confirm=_confirm_set_default,
+    )
+    if not wrote:
+        print("no changes")
+    return 0
+
+
 def _handle_tui(args: argparse.Namespace) -> int:
     """``tui`` subcommand (and bare ``codehelper``) → the arrow-key menu.
 
@@ -1480,6 +1533,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the confirmation prompt (the TUI chip hot-applies either way)",
     )
     p_switch.set_defaults(func=_handle_switch)
+
+    p_proxy = subparsers.add_parser(
+        "proxy",
+        help="turn the proxy in ~/.claude/settings.json on or off, set its "
+        "address, or edit NO_PROXY (independent of `switch`, which owns the "
+        "ANTHROPIC_* keys in the same file)",
+        parents=[sub_flags],
+    )
+    p_proxy.add_argument(
+        "action",
+        metavar="on|off|toggle",
+        nargs="?",
+        choices=("on", "off", "toggle"),
+        default=None,
+        help="turn the proxy on, off, or flip it; omit to report status",
+    )
+    p_proxy.add_argument(
+        "--url",
+        default=None,
+        help="set the proxy address, e.g. http://127.0.0.1:8118, and turn it "
+        "on (validated first — Claude Code refuses to start on a URL it "
+        "cannot parse, and does not support SOCKS)",
+    )
+    p_proxy.add_argument(
+        "--no-proxy",
+        dest="no_proxy",
+        default=None,
+        help="set the bypass list, e.g. 'localhost,127.0.0.1,.example.com' "
+        "(space- or comma-separated, '*' bypasses everything); written to "
+        "both NO_PROXY and no_proxy, and never touched by on/off",
+    )
+    p_proxy.add_argument(
+        "--status",
+        action="store_true",
+        default=False,
+        help="print the current proxy state and exit (writes nothing)",
+    )
+    p_proxy.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="skip the confirmation prompt",
+    )
+    p_proxy.set_defaults(func=_handle_proxy)
 
     p_tui = subparsers.add_parser(
         "tui",
