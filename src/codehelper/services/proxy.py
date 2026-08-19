@@ -54,13 +54,18 @@ entries nobody set and turn a no-op into a real write.
 
 The address is not lost: it is banked in ``state.json``
 (``state.set_saved_proxy``), which is what lets ``proxy on`` put it back.
-That write happens AFTER ``settings.json`` was successfully patched, never
-before — see :func:`set_proxy_state` for why the ordering is load-bearing
-against a refused confirmation and against a concurrent writer.
+``off`` banks BEFORE it blanks, and refuses outright if the bank fails —
+blanking first and reporting success while the address went nowhere is the
+one outcome that cannot be undone. The settings backup is NOT a second copy
+to fall back on: that ring rotates on the very next write, so an address
+left only there is gone within one command. Every other direction banks
+best-effort AFTER the write, because it writes the address INTO
+settings.json and so never risks it. See :func:`set_proxy_state`.
 """
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
 
@@ -410,15 +415,7 @@ def proxy_status(paths: Paths) -> ProxyStatus:
         ),
         None,
     )
-    # `saved_url` has a second source deliberately. `off` blanks the live
-    # values and banks the address in state.json, so that bank is normally
-    # the only copy — but it is a SEPARATE file, and a write to it can fail
-    # (disk full, permissions) or be lost after the settings write already
-    # landed. The address is still in the backup `off` just rotated, so fall
-    # back to it rather than reporting "no address configured" while the
-    # value sits one file over. This is why the two writes need no
-    # cross-file transaction: the settings backup already IS the redundancy.
-    saved = saved_proxy(paths) or _url_from_backup(paths)
+    saved = saved_proxy(paths)
     no_proxy = next(
         (
             value
@@ -431,39 +428,6 @@ def proxy_status(paths: Paths) -> ProxyStatus:
         url=url,
         saved_url=saved,
         no_proxy=no_proxy,
-    )
-
-
-def _url_from_backup(paths: Paths) -> str | None:
-    """The proxy address in the most recent settings.json backup, if any.
-
-    Read-only and never raises — an absent or unparseable backup is simply
-    "no fallback", the same posture :func:`proxy_status` takes toward the
-    live file. Only slot 1 is consulted: it is the state `off` rotated away
-    moments earlier, so it is the copy that matters; an older slot could hold
-    an address the user has since deliberately changed.
-    """
-    import json
-
-    body = read_text_or_none(paths.claude_settings_backup(1))
-    if not body:
-        return None
-    try:
-        parsed = json.loads(body)
-    except ValueError:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    env = parsed.get("env")
-    if not isinstance(env, dict):
-        return None
-    return next(
-        (
-            value
-            for key in PROXY_ENV_KEYS
-            if isinstance(value := env.get(key), str) and value
-        ),
-        None,
     )
 
 
@@ -626,22 +590,27 @@ def set_proxy_state(
         target = ""
 
     to_save = status.url if target == "" else target
+    destroys_the_address = target == "" and bool(status.url)
 
-    # Write settings.json FIRST, bank the address only once that write really
-    # landed. Ordering matters twice over:
+    # `off` erases the only live copy of the address, so it must not run at
+    # all unless that address is safely banked FIRST. Ordering it the other
+    # way — blank, then bank, then warn if the bank failed — loses the
+    # address outright: the settings backup that would have held it is
+    # rotated away by the very next settings write, and `off` has already
+    # reported success. Refusing up front instead leaves the proxy visibly
+    # ON, a state the user can see and act on.
     #
-    #   * a refused confirmation raises out of `apply_proxy`, so state.json is
-    #     never left pointing at an address the user declined to apply;
-    #   * `apply_proxy` re-reads under its lock and refuses a patch computed
-    #     off a stale snapshot, so a concurrent writer that switches the live
-    #     proxy between `proxy_status` above and the write cannot get its new
-    #     endpoint disabled while THIS command banks the old one for a later
-    #     `proxy on` to restore.
-    #
-    # The earlier "save before blanking" ordering was aimed at a real problem —
-    # `off` erases the address, so it must be captured beforehand — but
-    # capturing it in `to_save` above is what solves that; persisting it early
-    # only widened the window in which the two files disagree.
+    # This is not the "save before blanking" ordering that shipped first and
+    # was wrong. That one banked before the user had confirmed anything, so a
+    # declined confirmation left a remembered address that was never applied.
+    # Here the bank happens only for the one operation that destroys the
+    # value, and `apply_proxy`'s own stale-snapshot guard still refuses a
+    # patch computed off a superseded read — so a concurrent writer cannot
+    # have its endpoint disabled while this command banks the old one.
+    if destroys_the_address and to_save and to_save != status.saved_url:
+        if not dry_run:
+            set_saved_proxy(paths, to_save)
+
     wrote = apply_proxy(
         paths,
         url=target,
@@ -651,7 +620,12 @@ def set_proxy_state(
         confirm=confirm,
     )
 
-    if wrote and to_save and to_save != status.saved_url and not dry_run:
-        set_saved_proxy(paths, to_save)
+    # Turning ON (or setting a new address) writes it into settings.json, so
+    # the value is never at risk here — a bank failure costs nothing, because
+    # the live file holds it. Best-effort is right for this direction.
+    if wrote and not destroys_the_address and to_save and to_save != status.saved_url:
+        if not dry_run:
+            with contextlib.suppress(CodeHelperError):
+                set_saved_proxy(paths, to_save)
 
     return wrote

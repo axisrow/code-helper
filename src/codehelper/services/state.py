@@ -26,6 +26,13 @@ through :func:`_locked_update`, the same ``flock``-for-the-read-modify-write
 window ``secrets._locked_update`` uses — see ``tests/test_state_concurrency.py``
 for the reproduction.
 
+What an UNAVAILABLE lock means differs per writer, so it is a per-call
+decision rather than one module-wide policy. The pre-selection writers keep
+the never-raises posture (an unlocked write beats crashing ``add``/
+``edit-token`` over a pointer the user can re-pick); :func:`set_saved_proxy`
+passes ``required=True`` and refuses, because an unserialized write of the
+only copy of an address reports success while silently risking its loss.
+
 **Schema: a single pointer, ``{"active": {"provider": ..., "profile": ...}}``.**
 An earlier version stored ``active_provider`` and ``active_profiles`` (a
 provider -> profile map) as two independent top-level keys — which could
@@ -67,6 +74,7 @@ import contextlib
 import json
 
 from codehelper.backends._atomic import atomic_write, file_lock
+from codehelper.errors import CodeHelperError
 from codehelper.services.paths import Paths
 
 __all__ = [
@@ -111,7 +119,7 @@ def _string_or_none(value: object) -> str | None:
 
 
 @contextlib.contextmanager
-def _locked_update(paths: Paths):
+def _locked_update(paths: Paths, *, required: bool = False):
     """Serialize one read-modify-write cycle against ``state.json``.
 
     Every writer here goes through this ONE context manager rather than each
@@ -125,22 +133,42 @@ def _locked_update(paths: Paths):
     ``tests/test_state_concurrency.py``). ``atomic_write`` prevents a TORN
     file, never a lost update — those are different problems.
 
-    Acquisition NEVER raises: an unwritable config dir or a platform without
-    ``flock`` degrades to the unlocked path rather than turning a
-    pre-selection write into a crash, mirroring this module's never-raises
-    posture on the read side (:func:`load_state`).
+    What an unavailable lock means depends on WHAT is being written, so
+    ``required`` is the caller's call rather than one module-wide policy:
+
+    * ``required=False`` (default) — degrade to an unlocked write. The value
+      is re-pickable UI state (the active profile, a default wrapper), and
+      this module's never-raises contract matters more than serializing it:
+      turning an unavailable lock into a crash would break ``add``/
+      ``edit-token`` over a pointer the user can simply set again. Strictly
+      no worse than the pre-lock behaviour this module shipped with.
+    * ``required=True`` — refuse. :func:`set_saved_proxy` writes the ONLY
+      copy of the proxy address, and an unserialized write of that is worse
+      than no write at all: a silently-lost update still reports success, and
+      the value is not one the user can reconstruct. Its caller
+      (``services/proxy.py``) is already in a position to surface the error.
+
+    Acquisition is the only best-effort part; exceptions raised by the
+    caller's body always propagate untouched.
+
+    Raises:
+        CodeHelperError: ``required=True`` and the lock could not be taken.
     """
     # Acquire OUTSIDE the yield. Wrapping the yield in `try/except OSError`
     # would also swallow an OSError raised by the CALLER's body and then
     # yield a second time — a "generator didn't stop after throw()" crash,
-    # and worse, it would run the caller's block twice. Only the acquisition
-    # is best-effort; the body's exceptions must propagate untouched.
+    # and worse, it would run the caller's block twice.
     try:
         lock = file_lock(paths.state_file())
         lock.__enter__()
-    except OSError:
-        # No locking available (unwritable config dir, no flock). Strictly no
-        # worse than the pre-lock behaviour this module shipped with.
+    except OSError as exc:
+        if required:
+            raise CodeHelperError(
+                f"{paths.state_file()} could not be locked ({exc}) — refusing "
+                f"to write the saved proxy address unserialized, because a "
+                f"concurrent write would silently discard it and this is the "
+                f"only copy; fix the permissions on that directory and retry"
+            ) from exc
         yield
         return
 
@@ -246,7 +274,7 @@ def set_saved_proxy(paths: Paths, url: str) -> None:
     otherwise keep a proxy password group/world-readable. Passing the mode
     tightens the file on the write that introduces the secret.
     """
-    with _locked_update(paths):
+    with _locked_update(paths, required=True):
         state = load_state(paths)
         state["proxy"] = {"url": url}
         _write_state(paths, state, mode=0o600)

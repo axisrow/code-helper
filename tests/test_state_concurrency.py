@@ -26,6 +26,7 @@ import threading
 import pytest
 
 from codehelper.backends._atomic import atomic_write
+from codehelper.errors import CodeHelperError
 from codehelper.services import state as state_module
 from codehelper.services.paths import Paths
 from codehelper.services.state import (
@@ -161,6 +162,49 @@ def test_an_exception_inside_the_locked_block_propagates_once(tmp_path):
     assert entered == [1], "the locked block must run exactly once"
 
 
+def _break_locking(paths: Paths) -> None:
+    """Make lock acquisition fail while the state write itself still works.
+
+    A directory where the ``.lock`` file belongs: ``file_lock`` cannot open
+    it, but ``state.json`` in the same (writable) directory is unaffected.
+    This is the shape that makes fail-open observable — an unwritable config
+    dir would fail the WRITE too, so it proves nothing about the lock.
+    """
+    lock_path = paths.state_file().with_suffix(paths.state_file().suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.mkdir(exist_ok=True)
+
+
+@pytest.mark.unit
+def test_the_saved_proxy_refuses_to_write_unserialized(tmp_path):
+    """The proxy address is the only copy of a value the user cannot re-pick,
+    so writing it without serialization is worse than not writing it: a
+    silently-lost update looks like success. This writer fails closed."""
+    paths = _paths(tmp_path)
+    _break_locking(paths)
+
+    with pytest.raises(CodeHelperError, match="could not be locked"):
+        set_saved_proxy(paths, _URL)
+
+    assert saved_proxy(paths) is None
+
+
+@pytest.mark.unit
+def test_pre_selection_writers_still_degrade_to_unlocked(tmp_path):
+    """The other writers hold re-pickable UI state and a never-raises
+    contract — turning an unavailable lock into a crash would break
+    `add`/`edit-token` over a profile pointer the user can simply set again.
+    They keep the best-effort posture the module shipped with."""
+    paths = _paths(tmp_path)
+    _break_locking(paths)
+
+    set_active_selection(paths, "zai", "default")
+    set_default_wrapper(paths, "claude", "glm")
+
+    assert active_selection(paths) == ("zai", "default")
+    assert default_wrapper(paths, "claude") == "glm"
+
+
 @pytest.mark.unit
 def test_the_lock_never_raises_when_it_cannot_be_taken(tmp_path, monkeypatch):
     """Same never-raises contract as ``secrets._locked_update``: a lock that
@@ -172,6 +216,6 @@ def test_the_lock_never_raises_when_it_cannot_be_taken(tmp_path, monkeypatch):
 
     monkeypatch.setattr(state_module, "file_lock", _boom)
 
-    set_saved_proxy(paths := _paths(tmp_path), _URL)
+    set_active_selection(paths := _paths(tmp_path), "zai", "default")
 
-    assert saved_proxy(paths) == _URL
+    assert active_selection(paths) == ("zai", "default")
