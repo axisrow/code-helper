@@ -70,6 +70,12 @@ __all__ = [
     "read_settings",
     "patch_settings",
     "diff_preview",
+    "dump_settings",
+    "credential_values",
+    "redact_credential",
+    "settings_backup_slots",
+    "without_env_keys",
+    "read_env",
     "current_switch",
     "active_switch_env",
     "live_axes_for_spec",
@@ -247,27 +253,33 @@ def read_settings(paths: Paths) -> tuple[str, dict]:
     return raw, parsed
 
 
-def _without_managed_env(data: dict) -> dict:
-    """``data`` minus :data:`MANAGED_ENV_KEYS` inside ``env``; everything else intact.
+def without_env_keys(data: dict, keys: tuple[str, ...]) -> dict:
+    """``data`` minus ``keys`` inside ``env``; everything else intact.
 
-    Used only by :func:`_verify_patch_applied` to prove the patch touched
-    nothing it should not have — never used to build the actual output (that
-    is :func:`patch_settings`'s job).
+    The comparison basis for "this patch touched nothing outside the key set
+    its module owns" — used by :func:`_verify_patch_applied` here and by
+    ``services/proxy.py``'s own verification, each passing its OWN key tuple.
+    Never used to build real output (that is :func:`patch_settings`'s job).
+
+    Normalises the same way ``patch_settings`` does: an ``env`` block holding
+    nothing but ``keys`` collapses to "no env key at all", so an ``original``
+    with no ``env`` and a ``patched`` whose ``env`` was entirely owned keys
+    compare equal — both mean "the user had no foreign env entries".
     """
     result = dict(data)
     env = result.get("env")
     if isinstance(env, dict):
-        foreign = {k: v for k, v in env.items() if k not in MANAGED_ENV_KEYS}
-        # Normalise the same way patch_settings does: an env block that
-        # holds nothing but managed keys collapses to "no env key at all",
-        # so an `original` with no `env` key and a `patched` whose `env` was
-        # entirely managed-keys compare equal here — both mean "the user had
-        # no foreign env entries".
+        foreign = {k: v for k, v in env.items() if k not in keys}
         if foreign:
             result["env"] = foreign
         else:
             result.pop("env", None)
     return result
+
+
+def _without_managed_env(data: dict) -> dict:
+    """``data`` minus :data:`MANAGED_ENV_KEYS` — this module's own key set."""
+    return without_env_keys(data, MANAGED_ENV_KEYS)
 
 
 def patch_settings(original: dict, patch: SettingsPatch) -> dict:
@@ -355,7 +367,7 @@ def _verify_patch_applied(original: dict, patched: dict, patch: SettingsPatch) -
         ) from exc
 
 
-def _dump(data: dict) -> str:
+def dump_settings(data: dict) -> str:
     """Render a patched settings object back to text.
 
     ``indent=2`` + ``ensure_ascii=False`` — a reasonable, stable default.
@@ -383,7 +395,7 @@ def diff_preview(original: str, patched: str, *, label: str = "settings.json") -
     )
 
 
-def _redact(value: str) -> str:
+def redact_credential(value: str) -> str:
     """``sk-nJyifvWJ1lscrXOR0oLrEg`` -> ``sk-n...rEg`` for a confirm preview.
 
     Short enough to still prove "yes, a token is here", too short to be
@@ -403,7 +415,7 @@ def _redact(value: str) -> str:
 _CREDENTIAL_ENV_KEYS: tuple[str, ...] = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
 
 
-def _credential_values(parsed: dict) -> set[str]:
+def credential_values(parsed: dict) -> set[str]:
     """Every non-empty value of :data:`_CREDENTIAL_ENV_KEYS` in ``parsed["env"]``."""
     env = parsed.get("env")
     if not isinstance(env, dict):
@@ -432,11 +444,11 @@ def _redacted_preview(
     still sitting in ``env`` must not print that old value verbatim.
     """
     preview = diff_preview(original, patched)
-    values = _credential_values(original_parsed) | _credential_values(patched_parsed)
+    values = credential_values(original_parsed) | credential_values(patched_parsed)
     if token:
         values.add(token)
     for value in values:
-        preview = preview.replace(value, _redact(value))
+        preview = preview.replace(value, redact_credential(value))
     return preview
 
 
@@ -460,7 +472,7 @@ def current_switch(paths: Paths) -> str | None:
     """
     from codehelper.services.model import switchable_providers
 
-    env = _read_managed_env(paths)
+    env = read_env(paths)
     if env is None:
         return None
     live_base_url = env.get("ANTHROPIC_BASE_URL")
@@ -474,12 +486,13 @@ def current_switch(paths: Paths) -> str | None:
     return "custom"
 
 
-def _read_managed_env(paths: Paths) -> dict | None:
+def read_env(paths: Paths) -> dict | None:
     """The ``env`` block of settings.json, or None when unreadable/absent.
 
-    Shared by the read-only ``current_switch``/``active_switch_env`` so a
-    change to how a missing or corrupt settings.json reads (the ``None``
-    posture) is made in one place.
+    The single place the read-only "never raises" posture toward a missing or
+    corrupt settings.json is defined — shared by ``current_switch``/
+    ``active_switch_env`` here and by ``services/proxy.py``'s ``proxy_status``,
+    so a change to that posture is made once.
     """
     try:
         _, parsed = read_settings(paths)
@@ -493,7 +506,7 @@ def _read_managed_env(paths: Paths) -> dict | None:
 
 def active_switch_env(paths: Paths) -> dict[str, str] | None:
     """Snapshot managed live settings, or None when no override is present."""
-    env = _read_managed_env(paths)
+    env = read_env(paths)
     if env is None:
         return None
     managed = {key: value for key, value in env.items() if key in MANAGED_ENV_KEYS}
@@ -585,10 +598,10 @@ def apply_switch(
     patched = patch_settings(original, patch)
     _verify_patch_applied(original, patched, patch)
 
-    patched_text = _dump(patched)
+    patched_text = dump_settings(patched)
     # Compare the PARSED objects, not the raw text: a byte-for-byte text
     # comparison would treat re-formatting alone (e.g. a hand-indented
-    # existing file normalised to _dump's 2-space style) as a real change,
+    # existing file normalised to dump_settings' 2-space style) as a real change,
     # rotating a backup and writing for something that resolves to the exact
     # same env either way.
     if patched == original:
@@ -632,14 +645,14 @@ def apply_switch(
             )
 
         if original_text:
-            rotate_backups(_backup_slots(paths), current=original_text)
+            rotate_backups(settings_backup_slots(paths), current=original_text)
         atomic_write(settings_path, patched_text, mode=0o600)
     action = "reset to native" if patch.is_reset else "wrote"
     print(f"{action} {settings_path} (backup: {paths.claude_settings_backup(1)})")
     return True
 
 
-def _backup_slots(paths: Paths) -> tuple[Path, Path, Path]:
+def settings_backup_slots(paths: Paths) -> tuple[Path, Path, Path]:
     return (
         paths.claude_settings_backup(3),
         paths.claude_settings_backup(2),
@@ -708,12 +721,12 @@ def restore_settings(
     # WRITE a corrupt one), so its parse is still guarded.
     preview = diff_preview(current, backup_body)
     try:
-        credential_values = _credential_values(json.loads(current) if current else {})
+        secrets = credential_values(json.loads(current) if current else {})
     except json.JSONDecodeError:
-        credential_values = set()  # unparseable current text can't be key-scanned
-    credential_values |= _credential_values(backup_parsed)
-    for value in credential_values:
-        preview = preview.replace(value, _redact(value))
+        secrets = set()  # unparseable current text can't be key-scanned
+    secrets |= credential_values(backup_parsed)
+    for value in secrets:
+        preview = preview.replace(value, redact_credential(value))
 
     if dry_run:
         print(preview or "(no textual change)")

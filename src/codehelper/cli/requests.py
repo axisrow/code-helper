@@ -34,6 +34,7 @@ from codehelper.errors import CodeHelperError
 __all__ = [
     "AddRequest",
     "EditTokenRequest",
+    "ProxyRequest",
     "RemoveRequest",
     "SetDefaultRequest",
     "SwitchRequest",
@@ -161,6 +162,42 @@ class RemoveRequest:
     def from_namespace(cls, args: argparse.Namespace) -> RemoveRequest:
         return cls(
             name=_g(args, "name"),
+            dry_run=bool(_g(args, "dry_run", False)),
+            force=bool(_g(args, "force", False)),
+            debug=bool(_g(args, "debug", False)),
+        )
+
+
+@dataclass(frozen=True)
+class ProxyRequest:
+    """Inputs to ``_handle_proxy`` (the ``proxy`` subcommand and the TUI's
+    Settings screen).
+
+    ``action`` is the positional verb — ``on`` / ``off`` / ``toggle`` — or
+    ``None`` for a bare ``codehelper proxy``, which reports status. ``url``
+    sets a new address (and implies turning the proxy on); ``no_proxy``
+    edits the bypass list on its own, without touching the proxy chain.
+
+    All three axes are independent rather than one enum: setting an address
+    while the proxy is off is a real case (configure now, enable later), and
+    so is editing the bypass list without changing anything else.
+    """
+
+    action: str | None
+    url: str | None
+    no_proxy: str | None
+    status: bool
+    dry_run: bool
+    force: bool
+    debug: bool
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> ProxyRequest:
+        return cls(
+            action=_g(args, "action"),
+            url=_g(args, "url"),
+            no_proxy=_g(args, "no_proxy"),
+            status=bool(_g(args, "status", False)),
             dry_run=bool(_g(args, "dry_run", False)),
             force=bool(_g(args, "force", False)),
             debug=bool(_g(args, "debug", False)),

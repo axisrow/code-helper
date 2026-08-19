@@ -62,6 +62,20 @@ _NATIVE_CHIP = "native"
 #: chips plus exactly one of these, visually distinct, never applied.
 _ADD_CHIP = "+ add"
 
+#: The proxy row's value, and its two mutually-exclusive chips.
+#:
+#: Rendered like an agent row and driven by the SAME chip cursor, but it is
+#: NOT in ``_AGENT_BACKENDS``: the proxy is not an agent backend, has no
+#: wrapper, and applies to whatever backend is selected. What it borrows is
+#: the chipset's disambiguation — showing every option with `✓` on the live
+#: one. A single "Proxy: on" row would leave Enter ambiguous (is `on` the
+#: state, or the button?); `✓ on   off` cannot be misread, because Enter
+#: applies the chip under the cursor, exactly as it does one row above.
+_PROXY_ROW = "proxy:"
+_PROXY_ON = "on"
+_PROXY_OFF = "off"
+_PROXY_CHIPS = (_PROXY_ON, _PROXY_OFF)
+
 #: SGR codes for the chip strip: reverse video marks the chip under the
 #: cursor (fzf/less-style), bold marks the chip currently applied when the
 #: cursor is elsewhere, dim marks the action chip so it reads as "not a
@@ -246,6 +260,7 @@ class TuiSession:
         "_slot_label",
         "_applied",
         "_claude_active_env",
+        "_proxy",
         "_chips",
         "_chip_index",
     )
@@ -265,6 +280,8 @@ class TuiSession:
         self._applied: dict[str, str | None] = {}
         #: Managed Claude env snapshot used for exact chip readback.
         self._claude_active_env: dict[str, str] | None = None
+        #: The proxy snapshot the chipset row renders (state + address).
+        self._proxy = None
         #: agent name -> its chip strip (`native` plus installed wrappers).
         self._chips: dict[str, list] = {}
         #: agent name -> chip cursor. Ephemeral on purpose: persisting it
@@ -1108,10 +1125,29 @@ class TuiSession:
         )
 
     def _run_settings(self) -> None:
+        """The ``s`` screen: the proxy EDITORS plus the two session flags.
+
+        On/off deliberately does NOT live here — the main screen's proxy
+        chipset row owns it, and a second toggle would be two controls for
+        one setting. What remains is what the chipset row cannot express:
+        the address itself and the NO_PROXY bypass list. Both dispatch into
+        ``parser._handle_proxy`` with a ``ProxyRequest``, the same handler
+        the CLI uses.
+        """
+        from codehelper.cli.parser import _handle_proxy
+        from codehelper.services.paths import Paths
+        from codehelper.services.proxy import proxy_status
+
         while True:
             debug = getattr(self.args, "debug", False)
+            status = proxy_status(Paths.default())
             choice = self._pick(
                 [
+                    (
+                        "proxy-url",
+                        f"Proxy address: {status.display_restorable_url or '(none)'}",
+                    ),
+                    ("proxy-no-proxy", f"NO_PROXY: {status.no_proxy or '(none)'}"),
                     ("debug", f"Debug: {'on' if debug else 'off'}"),
                     (
                         "dry-run",
@@ -1125,8 +1161,43 @@ class TuiSession:
                 return
             if choice == "debug":
                 self.args.debug = not debug
-            else:
+            elif choice == "dry-run":
                 self.args.dry_run = not getattr(self.args, "dry_run", False)
+            elif choice == "proxy-url":
+                entered = self._read_text("Proxy URL (e.g. http://127.0.0.1:8118): ")
+                if entered is None or not entered.strip():
+                    continue
+                self._run(_handle_proxy, self._proxy_request(url=entered.strip()))
+            elif choice == "proxy-no-proxy":
+                entered = self._read_text(
+                    "NO_PROXY (comma- or space-separated, '*' bypasses all): "
+                )
+                if entered is None:
+                    continue
+                self._run(_handle_proxy, self._proxy_request(no_proxy=entered.strip()))
+
+    def _proxy_request(self, **overrides) -> object:
+        """A ``ProxyRequest`` carrying this session's flags plus ``overrides``.
+
+        ``force=True`` for the same reason a chip press hot-applies: the user
+        already chose the action on a screen that showed the current state,
+        so a second yes/no prompt would be asking them to confirm the
+        keystroke they just made. ``--dry-run`` still short-circuits the write
+        inside the service.
+        """
+        from codehelper.cli.requests import ProxyRequest
+
+        fields = {
+            "action": None,
+            "url": None,
+            "no_proxy": None,
+            "status": False,
+            "dry_run": getattr(self.args, "dry_run", False),
+            "force": True,
+            "debug": getattr(self.args, "debug", False),
+        }
+        fields.update(overrides)
+        return ProxyRequest(**fields)
 
     def _run_profile_screen(self) -> None:
         """Pick the active token profile — the ``p`` screen.
@@ -1318,8 +1389,12 @@ class TuiSession:
             for name, backend in _AGENT_BACKENDS.items()
         }
         from codehelper.services.claude_settings import active_switch_env
+        from codehelper.services.proxy import proxy_status
 
         self._claude_active_env = active_switch_env(paths)
+        # Read here, never from the proxy row's label callable: the menu
+        # re-evaluates that on every redraw frame, cursor movement included.
+        self._proxy = proxy_status(paths)
         self._chips = {name: self._chips_for(name, paths) for name in _AGENT_BACKENDS}
         # A wrapper can be removed (`d`) or added (`a`) between iterations, so
         # a chip cursor parked past the end of a now-shorter strip is normal,
@@ -1445,13 +1520,85 @@ class TuiSession:
 
         return label
 
+    def _proxy_row(self) -> Callable[..., str]:
+        """A label callable rendering the proxy row's ``on``/``off`` chips.
+
+        Deliberately the same shape as :meth:`_chip_row`: `✓` on the live
+        option, reverse video under the cursor, bold when applied but not
+        focused. Reads only the caches ``_refresh_active_label`` fills — this
+        is re-evaluated on every redraw frame, cursor movement included.
+
+        The address rides along as a dim tail when one is known, because
+        "off" alone leaves the obvious next question (off from what?)
+        unanswered, and it is what makes `on` mean something specific.
+        """
+
+        def label(*, selected: bool = True, ansi: bool = True) -> str:
+            cursor = self._chip_index.get(_PROXY_ROW, 0)
+            rendered = []
+            for index, chip in enumerate(_PROXY_CHIPS):
+                applied = (chip == _PROXY_ON) == bool(
+                    self._proxy and self._proxy.enabled
+                )
+                text = f"✓ {chip}" if applied else chip
+                if selected and index == cursor:
+                    rendered.append(
+                        f"{_REVERSE}{text}{_RESET}" if ansi else f"[{text}]"
+                    )
+                elif applied:
+                    rendered.append(f"{_BOLD}{text}{_RESET}" if ansi else text)
+                else:
+                    rendered.append(text)
+            row = f"{'proxy':<8}{'  '.join(rendered)}"
+            address = self._proxy.display_restorable_url if self._proxy else ""
+            if address:
+                tail = f"  {address}"
+                row += f"{_DIM}{tail}{_RESET}" if ansi else tail
+            return row
+
+        return label
+
+    def _apply_proxy_chip(self) -> None:
+        """Apply the proxy chip under the cursor (Enter on the proxy row).
+
+        Applying the state that is already live is a silent no-op, matching
+        how a selected claude chip behaves — Enter on `✓ on` should not
+        rewrite the file or flash a message.
+
+        Turning on with no address anywhere is the one case that cannot just
+        act: the handler would raise, so ask for the address instead of
+        showing an error the user can do nothing about from here.
+        """
+        from codehelper.cli.parser import _handle_proxy
+
+        chip = _PROXY_CHIPS[self._chip_index.get(_PROXY_ROW, 0) % len(_PROXY_CHIPS)]
+        want_on = chip == _PROXY_ON
+        live_on = bool(self._proxy and self._proxy.enabled)
+        if want_on == live_on:
+            return
+        if want_on and not (self._proxy and self._proxy.restorable_url):
+            entered = self._read_text("Proxy URL (e.g. http://127.0.0.1:8118): ")
+            if entered is None or not entered.strip():
+                return
+            self._run(_handle_proxy, self._proxy_request(url=entered.strip()))
+            return
+        self._run(
+            _handle_proxy,
+            self._proxy_request(action=_PROXY_ON if want_on else _PROXY_OFF),
+            silent=True,
+        )
+
     def _chip_move(self, value: str, delta: int) -> None:
-        """Move the focused agent row's chip cursor. Pure in-memory.
+        """Move the focused row's chip cursor. Pure in-memory.
 
         Returns ``None`` so the menu redraws instead of exiting, which is what
         makes left/right free of I/O: nothing is read or written until Enter
         applies a chip. A no-op when the row cursor is on a wrapper row.
         """
+        if value == _PROXY_ROW:
+            current = self._chip_index.get(_PROXY_ROW, 0)
+            self._chip_index[_PROXY_ROW] = (current + delta) % len(_PROXY_CHIPS)
+            return None
         if not value.startswith(_AGENT_ROW):
             return None
         agent_name = value.removeprefix(_AGENT_ROW)
@@ -1467,8 +1614,11 @@ class TuiSession:
         For non-agent rows, returns the value itself (alias string).
         For agent rows with a chip cursor, resolves the cursor position to
         the actual chip object. Returns None for agent rows with no chips,
-        or when focused on _NATIVE_CHIP/_ADD_CHIP.
+        when focused on _NATIVE_CHIP/_ADD_CHIP, or on the proxy row — whose
+        chips are settings, not wrappers, and carry nothing token-shaped.
         """
+        if value == _PROXY_ROW:
+            return None
         if not value.startswith(_AGENT_ROW):
             return value
         agent_name = value.removeprefix(_AGENT_ROW)
@@ -1532,6 +1682,10 @@ class TuiSession:
         Deliberately does NOT repeat which backend is applied: the chipset
         rows say that in place, and a header that restates it is the kind of
         duplication this screen was redesigned to remove.
+
+        The proxy is NOT named here either: it has its own permanent chipset
+        row that states both the live setting and what Enter would do, so a
+        header tag would be the same duplication.
         """
         if self._tab_label:
             # Labelled: a bare "zai/axisrow" up here reads as a model or an
@@ -1544,7 +1698,8 @@ class TuiSession:
 
         print("a add (agent row: scoped to it) · t/e token · d delete")
         print("+ add agent: new CLI integration · + add wrapper: any agent")
-        print("p profiles · s settings · ←→ + Enter on the + add chip: same as a")
+        print("p profiles · s settings (proxy on/off, address, NO_PROXY)")
+        print("←→ + Enter on the + add chip: same as a")
         print("Up/Down row · Left/Right chip · Enter apply · Esc quit · Ctrl-C quit")
         press_any_key("Press any key to continue...")
 
@@ -1580,7 +1735,12 @@ class TuiSession:
                     "TOKEN": self._token_action,
                     "e": self._token_action,
                     "t": self._token_action,
-                    "d": lambda alias: f"remove:{alias}",
+                    # The proxy row owns no file, so `d` there must be inert
+                    # rather than looking for a wrapper literally named
+                    # `proxy:` — same guard `_focused_chip` applies to `t`.
+                    "d": lambda alias: (
+                        None if alias == _PROXY_ROW else f"remove:{alias}"
+                    ),
                     # Left/Right (and Shift+Tab, the same move backwards) only
                     # ever reposition the chip cursor and return None, so the
                     # menu redraws without exiting — the whole point of
@@ -1595,6 +1755,11 @@ class TuiSession:
                             (f"{_AGENT_ROW}{name}", self._chip_row(name))
                             for name in self._chips
                         ),
+                        # The proxy, rendered as a chipset row of its own —
+                        # not an agent, but the same on-screen grammar, so
+                        # "which one is live" and "what will Enter do" read
+                        # identically to the rows above it.
+                        (_PROXY_ROW, self._proxy_row()),
                         # Add a new CLI integration, right below the chipset
                         # rows — the one add action that has no agent row of
                         # its own to hang a `+ add` chip on.
@@ -1624,6 +1789,8 @@ class TuiSession:
                     self._run_add(choice.removeprefix("add:"))
                 elif choice == _PROFILE:
                     self._run_profile_screen()
+                elif choice == _PROXY_ROW:
+                    self._apply_proxy_chip()
                 elif choice.startswith(_AGENT_ROW):
                     self._apply_chip(choice.removeprefix(_AGENT_ROW))
                 elif choice == _SETTINGS:
