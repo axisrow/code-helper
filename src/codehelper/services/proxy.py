@@ -410,6 +410,15 @@ def proxy_status(paths: Paths) -> ProxyStatus:
         ),
         None,
     )
+    # `saved_url` has a second source deliberately. `off` blanks the live
+    # values and banks the address in state.json, so that bank is normally
+    # the only copy — but it is a SEPARATE file, and a write to it can fail
+    # (disk full, permissions) or be lost after the settings write already
+    # landed. The address is still in the backup `off` just rotated, so fall
+    # back to it rather than reporting "no address configured" while the
+    # value sits one file over. This is why the two writes need no
+    # cross-file transaction: the settings backup already IS the redundancy.
+    saved = saved_proxy(paths) or _url_from_backup(paths)
     no_proxy = next(
         (
             value
@@ -420,8 +429,41 @@ def proxy_status(paths: Paths) -> ProxyStatus:
     )
     return ProxyStatus(
         url=url,
-        saved_url=saved_proxy(paths),
+        saved_url=saved,
         no_proxy=no_proxy,
+    )
+
+
+def _url_from_backup(paths: Paths) -> str | None:
+    """The proxy address in the most recent settings.json backup, if any.
+
+    Read-only and never raises — an absent or unparseable backup is simply
+    "no fallback", the same posture :func:`proxy_status` takes toward the
+    live file. Only slot 1 is consulted: it is the state `off` rotated away
+    moments earlier, so it is the copy that matters; an older slot could hold
+    an address the user has since deliberately changed.
+    """
+    import json
+
+    body = read_text_or_none(paths.claude_settings_backup(1))
+    if not body:
+        return None
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    env = parsed.get("env")
+    if not isinstance(env, dict):
+        return None
+    return next(
+        (
+            value
+            for key in PROXY_ENV_KEYS
+            if isinstance(value := env.get(key), str) and value
+        ),
+        None,
     )
 
 

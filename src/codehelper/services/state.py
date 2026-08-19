@@ -9,11 +9,22 @@ This is deliberately a SEPARATE module and file from ``services/secrets.py``:
   versioned migration, because ``load_credentials`` treats every top-level key
   as a provider name (issue #19). ``state.json`` uses named top-level keys
   from the start, so future fields never need a migration.
-- This module holds NO secrets, so no ``0o600`` and no ``flock``. A race here
-  loses a pre-selection at worst, never a token — unlike
-  :func:`secrets._locked_update`, whose serialization protects the only
-  persistent copy of a credential. Write is a plain read-modify-write through
-  :func:`codehelper.backends._atomic.atomic_write`.
+- ``secrets.py`` is the token store; this file is not. It DOES now hold one
+  credential-bearing value (:func:`set_saved_proxy` — a proxy URL may carry
+  basic-auth), so that one writer passes ``0o600``; the rest keep the file's
+  existing mode.
+
+This module originally shipped with no locking, on the reasoning that "a race
+here loses a pre-selection at worst, never a token". That was true while the
+file held only the active-profile pointer and the default-wrapper map — both
+trivially re-set from the UI that wrote them. :func:`set_saved_proxy` broke
+the premise: ``proxy off`` blanks the live values in ``settings.json`` and
+banks the address HERE, so this entry is the only copy. Losing it to a
+concurrent writer is not "re-pick a profile", it is the address gone for good
+with ``proxy on`` left with nothing to restore. Every writer therefore goes
+through :func:`_locked_update`, the same ``flock``-for-the-read-modify-write
+window ``secrets._locked_update`` uses — see ``tests/test_state_concurrency.py``
+for the reproduction.
 
 **Schema: a single pointer, ``{"active": {"provider": ..., "profile": ...}}``.**
 An earlier version stored ``active_provider`` and ``active_profiles`` (a
@@ -52,9 +63,10 @@ equivalent to "no pre-selection", mirroring ``secrets.load_credentials``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 
-from codehelper.backends._atomic import atomic_write
+from codehelper.backends._atomic import atomic_write, file_lock
 from codehelper.services.paths import Paths
 
 __all__ = [
@@ -96,6 +108,47 @@ def load_state(paths: Paths) -> dict[str, object]:
 
 def _string_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+@contextlib.contextmanager
+def _locked_update(paths: Paths):
+    """Serialize one read-modify-write cycle against ``state.json``.
+
+    Every writer here goes through this ONE context manager rather than each
+    pairing :func:`load_state` with :func:`_write_state` independently — the
+    same "one decision point" shape ``secrets._locked_update`` uses, so the
+    writers cannot drift on how they serialize.
+
+    Without it the module's read-modify-write window is open: a writer that
+    loaded before another committed writes its stale snapshot back on top,
+    silently dropping the other's update (reproduced in
+    ``tests/test_state_concurrency.py``). ``atomic_write`` prevents a TORN
+    file, never a lost update — those are different problems.
+
+    Acquisition NEVER raises: an unwritable config dir or a platform without
+    ``flock`` degrades to the unlocked path rather than turning a
+    pre-selection write into a crash, mirroring this module's never-raises
+    posture on the read side (:func:`load_state`).
+    """
+    # Acquire OUTSIDE the yield. Wrapping the yield in `try/except OSError`
+    # would also swallow an OSError raised by the CALLER's body and then
+    # yield a second time — a "generator didn't stop after throw()" crash,
+    # and worse, it would run the caller's block twice. Only the acquisition
+    # is best-effort; the body's exceptions must propagate untouched.
+    try:
+        lock = file_lock(paths.state_file())
+        lock.__enter__()
+    except OSError:
+        # No locking available (unwritable config dir, no flock). Strictly no
+        # worse than the pre-lock behaviour this module shipped with.
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            lock.__exit__(None, None, None)
 
 
 def _write_state(paths: Paths, state: dict, *, mode: int | None = None) -> None:
@@ -149,11 +202,12 @@ def set_active_selection(paths: Paths, provider_name: str, profile_name: str) ->
     sync, since keeping two shapes consistent is exactly the duplication this
     schema removes.
     """
-    state = load_state(paths)
-    state.pop("active_provider", None)
-    state.pop("active_profiles", None)
-    state["active"] = {"provider": provider_name, "profile": profile_name}
-    _write_state(paths, state)
+    with _locked_update(paths):
+        state = load_state(paths)
+        state.pop("active_provider", None)
+        state.pop("active_profiles", None)
+        state["active"] = {"provider": provider_name, "profile": profile_name}
+        _write_state(paths, state)
 
 
 def saved_proxy(paths: Paths) -> str | None:
@@ -192,9 +246,10 @@ def set_saved_proxy(paths: Paths, url: str) -> None:
     otherwise keep a proxy password group/world-readable. Passing the mode
     tightens the file on the write that introduces the secret.
     """
-    state = load_state(paths)
-    state["proxy"] = {"url": url}
-    _write_state(paths, state, mode=0o600)
+    with _locked_update(paths):
+        state = load_state(paths)
+        state["proxy"] = {"url": url}
+        _write_state(paths, state, mode=0o600)
 
 
 def default_wrapper(paths: Paths, agent_name: str) -> str | None:
@@ -212,18 +267,21 @@ def default_wrapper(paths: Paths, agent_name: str) -> str | None:
 
 def clear_default_wrapper(paths: Paths, alias: str) -> None:
     """Remove any default pointers to a deleted wrapper alias."""
-    state = load_state(paths)
-    wrappers = state.get("default_wrapper")
-    if not isinstance(wrappers, dict):
-        return
-    remaining = {agent: value for agent, value in wrappers.items() if value != alias}
-    if remaining == wrappers:
-        return
-    if remaining:
-        state["default_wrapper"] = remaining
-    else:
-        state.pop("default_wrapper", None)
-    _write_state(paths, state)
+    with _locked_update(paths):
+        state = load_state(paths)
+        wrappers = state.get("default_wrapper")
+        if not isinstance(wrappers, dict):
+            return
+        remaining = {
+            agent: value for agent, value in wrappers.items() if value != alias
+        }
+        if remaining == wrappers:
+            return
+        if remaining:
+            state["default_wrapper"] = remaining
+        else:
+            state.pop("default_wrapper", None)
+        _write_state(paths, state)
 
 
 def set_default_wrapper(paths: Paths, agent_name: str, alias: str) -> None:
@@ -234,10 +292,11 @@ def set_default_wrapper(paths: Paths, agent_name: str, alias: str) -> None:
     other agents' slots and every other top-level key untouched. Raw store — no
     validation; staleness is ``wrappers.valid_default_wrapper``'s job.
     """
-    state = load_state(paths)
-    wrappers = state.get("default_wrapper")
-    if not isinstance(wrappers, dict):
-        wrappers = {}
-    wrappers[agent_name] = alias
-    state["default_wrapper"] = wrappers
-    _write_state(paths, state)
+    with _locked_update(paths):
+        state = load_state(paths)
+        wrappers = state.get("default_wrapper")
+        if not isinstance(wrappers, dict):
+            wrappers = {}
+        wrappers[agent_name] = alias
+        state["default_wrapper"] = wrappers
+        _write_state(paths, state)
