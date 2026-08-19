@@ -61,6 +61,7 @@ against a refused confirmation and against a concurrent writer.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
 
@@ -652,6 +653,13 @@ def set_proxy_state(
     )
 
     if wrote and to_save and to_save != status.saved_url and not dry_run:
-        set_saved_proxy(paths, to_save)
+        try:
+            set_saved_proxy(paths, to_save)
+        except CodeHelperError as exc:
+            # The settings write already landed, so raising here would report
+            # failure for an operation that DID happen. Warn instead: the
+            # address is still in the backup this write just rotated, which
+            # `proxy_status` falls back to — so `proxy on` keeps working.
+            print(f"warning: {exc}", file=sys.stderr)
 
     return wrote

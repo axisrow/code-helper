@@ -416,6 +416,29 @@ def test_status_offers_the_backup_address_when_state_was_lost(tmp_path):
 
 
 @pytest.mark.unit
+def test_a_failed_bank_warns_instead_of_failing_the_whole_command(tmp_path, capsys):
+    """`set_saved_proxy` now refuses an unserialized write. That refusal must
+    not surface as `proxy off` failing: settings.json is already written by
+    then, so raising would report failure for an operation that DID happen —
+    and the address is still recoverable from the backup either way."""
+    from codehelper.services.proxy import set_proxy_state
+
+    paths = Paths.from_home(tmp_path)
+    _write(paths, {"env": {"HTTPS_PROXY": _URL, "HTTP_PROXY": _URL}})
+    # Make lock acquisition fail while the state write itself would work.
+    lock_path = paths.state_file().with_suffix(paths.state_file().suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.mkdir(exist_ok=True)
+
+    assert set_proxy_state(paths, action="off", force=True) is True
+
+    assert _read(paths)["env"]["HTTPS_PROXY"] == ""
+    assert "could not be locked" in capsys.readouterr().err
+    # Still restorable: the backup holds the address the bank could not.
+    assert proxy_status(paths).restorable_url == _URL
+
+
+@pytest.mark.unit
 def test_saved_proxy_round_trips_through_state(tmp_path):
     paths = Paths.from_home(tmp_path)
     assert saved_proxy(paths) is None
