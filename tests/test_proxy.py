@@ -311,9 +311,9 @@ def test_a_refused_write_does_not_bank_the_address(tmp_path):
 
 @pytest.mark.unit
 def test_a_concurrent_change_does_not_bank_a_stale_address(tmp_path, monkeypatch):
-    """`off` reads the live address, then writes. If another writer switches
-    the proxy in between, banking the pre-read address would make a later
-    `on` restore an endpoint that is no longer the live one."""
+    """`off` reads the live address, banks it, then writes. If another writer
+    switches the proxy in between, the settings write is refused — so the
+    proxy is never left off while pointing at a superseded endpoint."""
     from codehelper.services.proxy import set_proxy_state
 
     paths = Paths.from_home(tmp_path)
@@ -340,10 +340,18 @@ def test_a_concurrent_change_does_not_bank_a_stale_address(tmp_path, monkeypatch
     with pytest.raises(CodeHelperError, match="changed since it was read"):
         set_proxy_state(paths, action="off", confirm=_confirm_then_meddle)
 
-    # Nothing banked: the stale-snapshot guard rejected the write, so there is
-    # no half-applied state where a later `on` restores the superseded address.
-    assert saved_proxy(paths) != "http://old:8118"
+    # The settings write is rejected, so the proxy stays ON at whatever the
+    # concurrent writer set — no half-applied state where the live proxy is
+    # off but pointing somewhere unexpected.
     assert _read(paths)["env"]["HTTPS_PROXY"] == "http://new:9999"
+    assert proxy_status(paths).enabled is True
+
+    # The bank may hold the superseded address (it is written before the
+    # settings patch, so `off` never destroys an unbanked value). That is the
+    # deliberate trade: a stale SPARE beats a lost address. It is also
+    # unreachable while a live address exists — `restorable_url` prefers the
+    # live file — and the next successful `off` overwrites it.
+    assert proxy_status(paths).restorable_url == "http://new:9999"
 
 
 @pytest.mark.unit
@@ -416,11 +424,13 @@ def test_status_offers_the_backup_address_when_state_was_lost(tmp_path):
 
 
 @pytest.mark.unit
-def test_a_failed_bank_warns_instead_of_failing_the_whole_command(tmp_path, capsys):
-    """`set_saved_proxy` now refuses an unserialized write. That refusal must
-    not surface as `proxy off` failing: settings.json is already written by
-    then, so raising would report failure for an operation that DID happen —
-    and the address is still recoverable from the backup either way."""
+def test_off_refuses_when_the_address_cannot_be_banked(tmp_path):
+    """`off` erases the live address, so it must not run at all unless the
+    address can first be stored somewhere durable. Blanking anyway and
+    leaning on the settings backup does not work: the backup ring rotates on
+    the very next settings write, and the address is gone with `off` having
+    reported success. Refusing keeps the proxy on — a visibly unchanged
+    state the user can act on — instead of a silent loss."""
     from codehelper.services.proxy import set_proxy_state
 
     paths = Paths.from_home(tmp_path)
@@ -430,12 +440,30 @@ def test_a_failed_bank_warns_instead_of_failing_the_whole_command(tmp_path, caps
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.mkdir(exist_ok=True)
 
-    assert set_proxy_state(paths, action="off", force=True) is True
+    with pytest.raises(CodeHelperError, match="could not be locked"):
+        set_proxy_state(paths, action="off", force=True)
 
-    assert _read(paths)["env"]["HTTPS_PROXY"] == ""
-    assert "could not be locked" in capsys.readouterr().err
-    # Still restorable: the backup holds the address the bank could not.
-    assert proxy_status(paths).restorable_url == _URL
+    # Nothing happened: the proxy is still on, exactly as before the command.
+    assert _read(paths)["env"]["HTTPS_PROXY"] == _URL
+    assert proxy_status(paths).enabled is True
+
+
+@pytest.mark.unit
+def test_on_still_works_when_the_bank_is_unavailable(tmp_path):
+    """Only `off` destroys the address. Turning the proxy ON writes it into
+    settings.json, so a bank failure there costs nothing — the value is right
+    there in the live file."""
+    from codehelper.services.proxy import set_proxy_state
+
+    paths = Paths.from_home(tmp_path)
+    _write(paths, {"env": {"IS_DEMO": "1"}})
+    lock_path = paths.state_file().with_suffix(paths.state_file().suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.mkdir(exist_ok=True)
+
+    assert set_proxy_state(paths, url=_URL, force=True) is True
+
+    assert _read(paths)["env"]["HTTPS_PROXY"] == _URL
 
 
 @pytest.mark.unit
