@@ -387,50 +387,10 @@ def test_turning_off_a_file_with_no_proxy_keys_is_a_no_op(tmp_path):
 
 
 @pytest.mark.unit
-def test_on_recovers_the_address_from_the_settings_backup(tmp_path):
-    """`off` blanks the live values and banks the address in state.json. If
-    that bank write never landed — disk full, a lost update, a hand-cleared
-    state.json — the address would be unrecoverable, because settings.json no
-    longer holds it. It IS still in the backup `off` just rotated, so `on`
-    reads there rather than giving up."""
-    from codehelper.services.proxy import set_proxy_state
-
-    paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": {"HTTPS_PROXY": _URL, "HTTP_PROXY": _URL}})
-
-    set_proxy_state(paths, action="off", force=True)
-    # Simulate the bank write never having landed.
-    paths.state_file().unlink(missing_ok=True)
-    assert saved_proxy(paths) is None
-    assert proxy_status(paths).url is None
-
-    set_proxy_state(paths, action="on", force=True)
-
-    assert _read(paths)["env"]["HTTPS_PROXY"] == _URL
-
-
-@pytest.mark.unit
-def test_status_offers_the_backup_address_when_state_was_lost(tmp_path):
-    """`proxy` (status) must not report "no address configured" while the
-    address is sitting one file over — that is what sends a user hand-editing
-    settings.json, which this command exists to avoid."""
-    paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": {"HTTPS_PROXY": _URL, "HTTP_PROXY": _URL}})
-
-    apply_proxy(paths, url="", force=True)
-    paths.state_file().unlink(missing_ok=True)
-
-    assert proxy_status(paths).restorable_url == _URL
-
-
-@pytest.mark.unit
 def test_off_refuses_when_the_address_cannot_be_banked(tmp_path):
     """`off` erases the live address, so it must not run at all unless the
-    address can first be stored somewhere durable. Blanking anyway and
-    leaning on the settings backup does not work: the backup ring rotates on
-    the very next settings write, and the address is gone with `off` having
-    reported success. Refusing keeps the proxy on — a visibly unchanged
-    state the user can act on — instead of a silent loss."""
+    address can first be stored durably. Blanking anyway and reporting
+    success loses it outright — nothing else holds that value."""
     from codehelper.services.proxy import set_proxy_state
 
     paths = Paths.from_home(tmp_path)
