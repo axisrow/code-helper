@@ -294,6 +294,91 @@ def test_status_falls_back_to_the_saved_address_when_off(tmp_path):
 
 
 @pytest.mark.unit
+def test_a_refused_write_does_not_bank_the_address(tmp_path):
+    """Banking the address before the write is confirmed leaves state.json
+    pointing at an address that was never applied — the next `proxy on`
+    would then enable an endpoint the user explicitly declined."""
+    from codehelper.services.proxy import set_proxy_state
+
+    paths = Paths.from_home(tmp_path)
+    _write(paths, {"env": {"IS_DEMO": "1"}})
+
+    with pytest.raises(CodeHelperError):
+        set_proxy_state(paths, url=_URL, confirm=_confirm_no)
+
+    assert saved_proxy(paths) is None
+
+
+@pytest.mark.unit
+def test_a_concurrent_change_does_not_bank_a_stale_address(tmp_path, monkeypatch):
+    """`off` reads the live address, then writes. If another writer switches
+    the proxy in between, banking the pre-read address would make a later
+    `on` restore an endpoint that is no longer the live one."""
+    from codehelper.services.proxy import set_proxy_state
+
+    paths = Paths.from_home(tmp_path)
+    _write(
+        paths,
+        {"env": {"HTTPS_PROXY": "http://old:8118", "HTTP_PROXY": "http://old:8118"}},
+    )
+
+    # The race window is between apply_proxy's own read and its locked write —
+    # `confirm` is called inside exactly that window, so switching the file
+    # here reproduces a concurrent writer landing mid-operation.
+    def _confirm_then_meddle(_path, _preview):
+        _write(
+            paths,
+            {
+                "env": {
+                    "HTTPS_PROXY": "http://new:9999",
+                    "HTTP_PROXY": "http://new:9999",
+                }
+            },
+        )
+        return True
+
+    with pytest.raises(CodeHelperError, match="changed since it was read"):
+        set_proxy_state(paths, action="off", confirm=_confirm_then_meddle)
+
+    # Nothing banked: the stale-snapshot guard rejected the write, so there is
+    # no half-applied state where a later `on` restores the superseded address.
+    assert saved_proxy(paths) != "http://old:8118"
+    assert _read(paths)["env"]["HTTPS_PROXY"] == "http://new:9999"
+
+
+@pytest.mark.unit
+def test_the_state_file_is_tightened_when_it_holds_a_proxy_password(tmp_path):
+    """`atomic_write` preserves an existing file's mode, so a state.json that
+    already sat at 0644 would keep a basic-auth proxy password world-readable
+    — the exact exposure settings.json is written 0600 to avoid."""
+    import os
+    import stat as stat_mod
+
+    paths = Paths.from_home(tmp_path)
+    state = paths.state_file()
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text('{"active": {"provider": "zai", "profile": "default"}}')
+    os.chmod(state, 0o644)
+
+    set_saved_proxy(paths, "http://bob:hunter2@proxy.corp:8118")
+
+    assert stat_mod.S_IMODE(state.stat().st_mode) == 0o600
+
+
+@pytest.mark.unit
+def test_turning_off_a_file_with_no_proxy_keys_is_a_no_op(tmp_path):
+    """Blanking keys nobody ever set adds entries and burns a backup slot for
+    nothing — the same reasoning as `switch native`'s current_env handling."""
+    paths = Paths.from_home(tmp_path)
+    _write(paths, {"env": {"IS_DEMO": "1"}})
+
+    assert apply_proxy(paths, url="", force=True) is False
+
+    assert _read(paths)["env"] == {"IS_DEMO": "1"}
+    assert not paths.claude_settings_backup(1).exists()
+
+
+@pytest.mark.unit
 def test_saved_proxy_round_trips_through_state(tmp_path):
     paths = Paths.from_home(tmp_path)
     assert saved_proxy(paths) is None

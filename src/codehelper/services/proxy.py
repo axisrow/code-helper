@@ -42,14 +42,21 @@ one spelling would tidy the file and break the bypass for some consumer, so
 both are written, always with the same value: two spellings holding
 DIFFERENT lists is the genuinely harmful case this avoids.
 
-Off means empty, not absent
-------------------------------
+Off means empty, not absent — for keys that exist
+----------------------------------------------------
 Same reasoning as ``claude_settings``' ``env_reset``: Claude Code applies
 settings updates to the running process, but removing a key from the file
 does not unset an already-applied process value. An empty string both
-resets the live session and stays false-y on a fresh launch. The address is
-not lost — it is saved to ``state.json`` (``state.set_saved_proxy``) before
-being blanked, which is what lets ``proxy on`` put it back.
+resets the live session and stays false-y on a fresh launch. That argument
+only holds for a key that HAS a live value, so ``off`` blanks only keys
+already present — writing ``""`` into a file with no proxy at all would add
+entries nobody set and turn a no-op into a real write.
+
+The address is not lost: it is banked in ``state.json``
+(``state.set_saved_proxy``), which is what lets ``proxy on`` put it back.
+That write happens AFTER ``settings.json`` was successfully patched, never
+before — see :func:`set_proxy_state` for why the ordering is load-bearing
+against a refused confirmation and against a concurrent writer.
 """
 
 from __future__ import annotations
@@ -300,17 +307,24 @@ def resolve_proxy_patch(
         if url:
             patch.update({key: url for key in PROXY_ENV_KEYS})
         else:
-            canonical = {"HTTPS_PROXY", "HTTP_PROXY"}
-            patch.update(
-                {
-                    key: ""
-                    for key in PROXY_ENV_KEYS
-                    if key in present or key in canonical
-                }
-            )
+            # Blank only what is actually there. A key that was never set has
+            # no already-applied process value to reset, so writing "" to it
+            # adds an entry nobody asked for and — on a file with no proxy at
+            # all — turns `off` into a real write that burns a backup slot
+            # instead of the no-op it should be. Same reasoning as
+            # ``claude_settings.resolve_switch_patch``'s ``current_env``
+            # handling for ``switch native``.
+            patch.update({key: "" for key in PROXY_ENV_KEYS if key in present})
 
     if no_proxy is not None:
-        patch.update({key: no_proxy for key in NO_PROXY_ENV_KEYS})
+        # An empty bypass list is written only where a key already exists, for
+        # the same reason `off` blanks only present keys: "no bypass list" is
+        # the ABSENCE of the key, so writing "" into a file that never had one
+        # adds entries that `proxy_status` then reports as absent anyway —
+        # display and file disagreeing over a value neither needs.
+        patch.update(
+            {key: no_proxy for key in NO_PROXY_ENV_KEYS if no_proxy or key in present}
+        )
 
     return patch
 
@@ -569,13 +583,24 @@ def set_proxy_state(
     elif action == "off":
         target = ""
 
-    # One save, one dry-run guard: `off` banks the address that is about to
-    # be erased, anything else banks the address it is about to write.
     to_save = status.url if target == "" else target
-    if to_save and to_save != status.saved_url and not dry_run:
-        set_saved_proxy(paths, to_save)
 
-    return apply_proxy(
+    # Write settings.json FIRST, bank the address only once that write really
+    # landed. Ordering matters twice over:
+    #
+    #   * a refused confirmation raises out of `apply_proxy`, so state.json is
+    #     never left pointing at an address the user declined to apply;
+    #   * `apply_proxy` re-reads under its lock and refuses a patch computed
+    #     off a stale snapshot, so a concurrent writer that switches the live
+    #     proxy between `proxy_status` above and the write cannot get its new
+    #     endpoint disabled while THIS command banks the old one for a later
+    #     `proxy on` to restore.
+    #
+    # The earlier "save before blanking" ordering was aimed at a real problem —
+    # `off` erases the address, so it must be captured beforehand — but
+    # capturing it in `to_save` above is what solves that; persisting it early
+    # only widened the window in which the two files disagree.
+    wrote = apply_proxy(
         paths,
         url=target,
         no_proxy=no_proxy,
@@ -583,3 +608,8 @@ def set_proxy_state(
         force=force,
         confirm=confirm,
     )
+
+    if wrote and to_save and to_save != status.saved_url and not dry_run:
+        set_saved_proxy(paths, to_save)
+
+    return wrote

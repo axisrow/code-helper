@@ -98,9 +98,15 @@ def _string_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _write_state(paths: Paths, state: dict) -> None:
-    """Persist ``state`` to the state file atomically."""
-    atomic_write(paths.state_file(), json.dumps(state))
+def _write_state(paths: Paths, state: dict, *, mode: int | None = None) -> None:
+    """Persist ``state`` to the state file atomically.
+
+    ``mode=None`` keeps this module's default posture — no secrets, so no
+    explicit permissions (``atomic_write`` preserves an existing file's mode).
+    A caller persisting something credential-bearing passes ``0o600``; see
+    :func:`set_saved_proxy`, the only such caller.
+    """
+    atomic_write(paths.state_file(), json.dumps(state), mode=mode)
 
 
 def active_selection(paths: Paths) -> tuple[str, str] | None:
@@ -174,15 +180,21 @@ def saved_proxy(paths: Paths) -> str | None:
 def set_saved_proxy(paths: Paths, url: str) -> None:
     """Remember ``url`` as the address to restore on the next ``proxy on``.
 
-    Plain read-modify-write through ``atomic_write`` — no ``flock``. A proxy
-    URL may carry basic-auth credentials, which is why ``settings.json``
-    itself is written ``0o600``; this file is not treated as a secret store,
-    so a caller that must not leak credentials here should say so rather than
-    relying on this function to redact (it does not).
+    The one writer here that may persist a CREDENTIAL: Claude Code documents
+    basic-auth inside the proxy URL (``http://user:pass@host:8118``), so this
+    value can carry a password even though nothing else in ``state.json``
+    does. It is therefore written ``0o600`` — the same mode
+    ``claude_settings`` uses for exactly this reason.
+
+    The explicit mode is load-bearing, not belt-and-braces: ``atomic_write``
+    PRESERVES an existing file's mode, so a ``state.json`` that already sat at
+    ``0o644`` (created before this field existed, or by a looser umask) would
+    otherwise keep a proxy password group/world-readable. Passing the mode
+    tightens the file on the write that introduces the secret.
     """
     state = load_state(paths)
     state["proxy"] = {"url": url}
-    _write_state(paths, state)
+    _write_state(paths, state, mode=0o600)
 
 
 def default_wrapper(paths: Paths, agent_name: str) -> str | None:
