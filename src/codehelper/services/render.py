@@ -25,7 +25,7 @@ it is not.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from codehelper.errors import CodeHelperError
@@ -44,6 +44,8 @@ __all__ = [
     "MARKER_PREFIX",
     "CATALOG_MANAGED_BY_KEY",
     "CATALOG_MANAGED_BY_VALUE",
+    "MODEL_CONTEXT_WINDOWS",
+    "uniform_context_window",
 ]
 
 #: Second line of every generated script. Presence of this prefix is how
@@ -95,6 +97,48 @@ def _settings_flag(env: dict[str, str]) -> str:
     return f"--settings {_shell_single_quote(payload)}"
 
 
+#: Real context windows of third-party models this tool knows, in tokens.
+#: Claude Code cannot resolve a non-``claude-`` model ID, so it assumes its
+#: 200k fallback and proactively auto-compacts there — for a model whose real
+#: window is 1M that abandons 80% of the context every session. Declaring the
+#: window via ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` makes compaction continue at
+#: the declared window instead (Claude Code docs, "Correct the window for a
+#: gateway or custom model ID": for an ID that is not ``claude-*``, carries no
+#: ``[1m]``, and resolves to no Claude model, the variable applies directly).
+#: Data, not code: a model missing here simply gets NO declaration — never
+#: guess a window, an oversized claim overflows the real one mid-session.
+#: Deliberately absent: ``glm-5-turbo`` / ``glm-4.7`` (200k real — the
+#: fallback assumption already matches them, a declaration would add nothing
+#: but a lie's risk).
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "glm-5.3": 1_000_000,
+    "glm-5.2": 1_000_000,
+    "glm-5.2:cloud": 1_000_000,
+    "deepseek-v4-flash:0731-cloud": 1_000_000,
+}
+
+
+def uniform_context_window(models: Iterable[str]) -> int | None:
+    """The one context window shared by EVERY model in ``models``, or None.
+
+    None unless every name resolves in :data:`MODEL_CONTEXT_WINDOWS` AND all
+    resolve to the same value: ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` declares
+    ONE window for the whole session, so tiers that genuinely differ (or any
+    unknown model) must yield no declaration rather than a guess. The
+    subagent model participates for the same reason — it shares the variable.
+
+    Public (not ``_``-prefixed) for the same reason ``anthropic_base_url``
+    is: ``claude_settings.resolve_switch_patch`` derives the same value for
+    the switch mechanism, so wrapper and switch cannot disagree on whether a
+    model's window is declared.
+    """
+    windows = {MODEL_CONTEXT_WINDOWS.get(model) for model in models}
+    if len(windows) == 1 and None not in windows:
+        (window,) = windows
+        return window
+    return None
+
+
 def _render_anthropic_env(spec: WrapperSpec, token: str) -> str:
     """Subshell exporting ``ANTHROPIC_*``, then ``claude --settings … "$@"``.
 
@@ -109,6 +153,11 @@ def _render_anthropic_env(spec: WrapperSpec, token: str) -> str:
 
     ``ANTHROPIC_BASE_URL`` goes through :func:`anthropic_base_url`, not raw —
     see that function for why.
+
+    ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` rides along when every tier (plus the
+    subagent, when set) resolves to one known window via
+    :func:`uniform_context_window` — see :data:`MODEL_CONTEXT_WINDOWS` for
+    why it is conditional and never a guess.
 
     One dict feeds BOTH the exports and the ``--settings`` payload (see
     :func:`_settings_flag`), so the two can never drift; a value the JSON
@@ -127,6 +176,11 @@ def _render_anthropic_env(spec: WrapperSpec, token: str) -> str:
     }
     if spec.subagent_model is not None:
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = spec.subagent_model
+    models = [tiers.haiku, tiers.sonnet, tiers.opus]
+    if spec.subagent_model is not None:
+        models.append(spec.subagent_model)
+    if (window := uniform_context_window(models)) is not None:
+        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
     lines = ["#!/bin/bash", _marker(spec), "("]
     lines += [f"export {key}={q(value)}" for key, value in env.items()]
     lines.append(f'{spec.agent.binary} {_settings_flag(env)} "$@"')
@@ -175,6 +229,8 @@ def _render_ollama_launch(spec: WrapperSpec, token: str) -> str:
             "ANTHROPIC_DEFAULT_OPUS_MODEL": spec.model,
             "CLAUDE_CODE_SUBAGENT_MODEL": spec.model,
         }
+        if (window := uniform_context_window([spec.model])) is not None:
+            env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
         launch += f" {_settings_flag(env)}"
     launch += ' "$@"'
     return f"#!/bin/bash\n{_marker(spec)}\n{launch}\n"

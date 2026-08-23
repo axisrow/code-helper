@@ -120,6 +120,19 @@ Two consequences worth knowing:
   *without* a wrapper (it patches the one global `settings.json`) — it no
   longer captures wrapper sessions.
 
+### Real context windows for third-party models
+
+Claude Code cannot resolve a non-Anthropic model ID, so it assumes a 200k
+window and auto-compacts there — even for models that really hold 1M.
+Generated wrappers and `switch` patches declare the real window via
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` whenever the model is in the built-in
+catalog (`glm-5.3`, `glm-5.2`, `glm-5.2:cloud`,
+`deepseek-v4-flash:0731-cloud` — all 1M). Models outside the catalog are
+left undeclared on purpose: a guessed window that exceeds the real one
+overflows the session mid-flight, so no data means no claim. If a model of
+yours is missing, add its real number to `MODEL_CONTEXT_WINDOWS` in
+`services/render.py`.
+
 ## Not every combination is possible
 
 `codehelper list matrix` shows which pairings exist and refuses the rest with

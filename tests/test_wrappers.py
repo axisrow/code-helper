@@ -330,6 +330,50 @@ def test_command_shape_settings_payload_mirrors_ollama_injection():
 
 
 # --------------------------------------------------------------------------- #
+# render_script — the context-window declaration. Claude Code cannot resolve a
+# non-claude- model ID, so it assumes its 200k fallback and auto-compacts
+# there; CLAUDE_CODE_MAX_CONTEXT_TOKENS (declared in both the exports and the
+# --settings payload) makes compaction continue at the real window. Emission
+# is catalog-driven and conditional: no declaration beats a guessed window.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_uniform_context_window_requires_every_model_known_and_equal():
+    from codehelper.services.render import uniform_context_window
+
+    assert uniform_context_window(["glm-5.3"]) == 1_000_000
+    assert uniform_context_window(["glm-5.2", "glm-5.2:cloud"]) == 1_000_000
+    # unknown model, mixed windows, empty input: no declaration
+    assert uniform_context_window(["mystery-3b"]) is None
+    assert uniform_context_window(["glm-5.3", "mystery-3b"]) is None
+    assert uniform_context_window([]) is None
+
+
+@pytest.mark.unit
+def test_env_shape_declares_context_window_for_known_model():
+    body = render_script(get_spec("deepseek"), _LITERAL_TOKEN)
+    assert "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'" in body
+    assert _settings_payload(body)["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == (
+        "1000000"
+    )
+
+
+@pytest.mark.unit
+def test_env_shape_omits_context_window_for_unknown_model():
+    body = _rendered("deepseek", _LITERAL_TOKEN, model="custom:tag")
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in body
+
+
+@pytest.mark.unit
+def test_command_shape_declares_context_window_for_known_model():
+    body = render_script(get_spec("glm-ollama"), "")
+    assert _settings_payload(body)["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == (
+        "1000000"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # render_script — shell-injection defense (single-quoting), on EVERY channel.
 # --------------------------------------------------------------------------- #
 
