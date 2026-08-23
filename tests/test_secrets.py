@@ -28,7 +28,9 @@ from codehelper.services.secrets import (
     SOURCE_CACHE,
     SOURCE_ENV,
     SOURCE_PROMPT,
+    ResolvedToken,
     credential_for,
+    env_cache_conflict,
     invalidate_cached_credential,
     load_credentials,
     profile_names,
@@ -528,6 +530,119 @@ def test_resolve_token_raises_after_empty_retries(tmp_path):
             getpass_fn=lambda _p: "",
             retries=2,
         )
+
+
+# --------------------------------------------------------------------------- #
+# env_cache_conflict — naming the silently-beaten cache (issue #71)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_env_cache_conflict_names_both_sides_redacted(tmp_path):
+    """The exact real-world trap: a stale export beat a good cached key.
+
+    The warning must name the env var, the profile, and BOTH values — each
+    redacted (4-char head + 3-char tail) so the full secret never appears
+    in terminal output, and it must tell the user how to take the profile
+    instead."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "litellm", "sk-cached-working-key")
+    conflict = env_cache_conflict(
+        ResolvedToken("sk-env-stale-token", SOURCE_ENV),
+        env_var="LITELLM_API_KEY",
+        paths=paths,
+        provider_name="litellm",
+    )
+    assert conflict is not None
+    assert "LITELLM_API_KEY" in conflict
+    assert "'default'" in conflict
+    assert "sk-e...ken" in conflict  # the env side, redacted
+    assert "sk-c...key" in conflict  # the cache side, redacted
+    assert "sk-env-stale-token" not in conflict
+    assert "sk-cached-working-key" not in conflict
+    assert "unset LITELLM_API_KEY" in conflict
+
+
+@pytest.mark.unit
+def test_env_cache_conflict_silent_when_tokens_agree(tmp_path):
+    paths = _paths(tmp_path)
+    save_credential(paths, "litellm", "sk-same-token")
+    assert (
+        env_cache_conflict(
+            ResolvedToken("sk-same-token", SOURCE_ENV),
+            env_var="LITELLM_API_KEY",
+            paths=paths,
+            provider_name="litellm",
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_env_cache_conflict_silent_when_no_cache_exists(tmp_path):
+    """Env-only: nothing was beaten, so nothing to warn about."""
+    assert (
+        env_cache_conflict(
+            ResolvedToken("sk-env-only-token", SOURCE_ENV),
+            env_var="LITELLM_API_KEY",
+            paths=_paths(tmp_path),
+            provider_name="litellm",
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_env_cache_conflict_silent_when_cache_won(tmp_path):
+    """A cache win is the documented precedence, not a trap — no warning
+    even though the two values differ."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "litellm", "sk-cached")
+    assert (
+        env_cache_conflict(
+            ResolvedToken("sk-cached", SOURCE_CACHE),
+            env_var="LITELLM_API_KEY",
+            paths=paths,
+            provider_name="litellm",
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_env_cache_conflict_silent_for_an_explicit_profile(tmp_path):
+    """A named profile caches ABOVE the environment, so an env win means the
+    profile was empty — nothing disagrees (mirrors resolve_token's rules)."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "litellm", "sk-cached-under-default")
+    assert (
+        env_cache_conflict(
+            ResolvedToken("sk-env", SOURCE_ENV),
+            env_var="LITELLM_API_KEY",
+            paths=paths,
+            provider_name="litellm",
+            profile_name="work",
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_env_cache_conflict_silent_for_a_runtime_address_provider(tmp_path):
+    """A non-fixed provider never consults the default cache (the
+    cross-address rule), so it was never a candidate to be beaten."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "litellm", "sk-cached")
+    assert (
+        env_cache_conflict(
+            ResolvedToken("sk-env", SOURCE_ENV),
+            env_var="LITELLM_API_KEY",
+            paths=paths,
+            provider_name="litellm",
+            base_url_policy="required",
+        )
+        is None
+    )
 
 
 # --------------------------------------------------------------------------- #
