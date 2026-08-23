@@ -9,6 +9,7 @@ across providers via :class:`WrapperSpec`.
 
 from __future__ import annotations
 
+import re
 import stat
 
 import pytest
@@ -142,14 +143,12 @@ def test_glm_is_secret_auth():
 
 
 @pytest.mark.unit
-def test_glm_keeps_distinct_models_per_tier():
-    """The reason TierModels exists — one --model could not express this."""
-    tiers = get_spec("glm").tier_models
-    assert (tiers.haiku, tiers.sonnet, tiers.opus) == (
-        "glm-4.7",
-        "glm-5-turbo",
-        "glm-5.1",
-    )
+def test_glm_preset_targets_glm_5_3_in_every_tier():
+    """The `glm` preset pins the current Z.ai flagship, uniform across tiers."""
+    spec = get_spec("glm")
+    tiers = spec.tier_models
+    assert spec.model == "glm-5.3"
+    assert (tiers.haiku, tiers.sonnet, tiers.opus) == ("glm-5.3", "glm-5.3", "glm-5.3")
 
 
 @pytest.mark.unit
@@ -178,7 +177,10 @@ def test_render_script_deepseek_has_endpoint_and_models():
     assert "ANTHROPIC_DEFAULT_SONNET_MODEL=" in body
     assert "ANTHROPIC_DEFAULT_OPUS_MODEL=" in body
     assert "CLAUDE_CODE_SUBAGENT_MODEL=" in body
-    assert 'claude "$@"' in body
+    # the env shape launches via --settings — see the dedicated tests below —
+    # so the exec line must carry the flag and still forward "$@" verbatim
+    exec_line = next(ln for ln in body.splitlines() if "claude --settings " in ln)
+    assert exec_line.endswith('\' "$@"')
 
 
 @pytest.mark.unit
@@ -219,12 +221,16 @@ def test_render_script_model_override_replaces_all_tiers():
 def test_render_script_command_shape_launches_ollama():
     body = render_script(get_spec("glm-ollama"), "")
     assert body.startswith("#!/bin/bash")
-    # `--` is required: without it, `ollama launch` parses "$@" itself and
-    # rejects any Claude-bound flag (e.g. `-p`) as an unknown Ollama flag.
-    assert "exec ollama launch claude --model 'glm-5.2:cloud' -- \"$@\"" in body
-    # the command shape does NOT export ANTHROPIC_* — ollama launch sets them
-    assert "ANTHROPIC_BASE_URL" not in body
-    assert "ANTHROPIC_AUTH_TOKEN" not in body
+    # `--` is required: without it, `ollama launch` parses the forwarded flags
+    # itself and rejects any Claude-bound flag (e.g. `-p`) as an unknown
+    # Ollama flag. For a claude-like agent the --settings payload rides in
+    # the FORWARDED region — after that separator.
+    assert "exec ollama launch claude --model 'glm-5.2:cloud' -- --settings " in body
+    assert body.rstrip().endswith('\' "$@"')
+    # the command shape does NOT export ANTHROPIC_* — ollama launch sets them;
+    # the keys inside the --settings JSON are payload, not exports
+    assert "export ANTHROPIC_BASE_URL" not in body
+    assert "export ANTHROPIC_AUTH_TOKEN" not in body
     assert "export ANTHROPIC_API_KEY=" not in body
     # bare `claude "$@"` (env-var shape's exec line) must not also be present
     assert 'claude "$@"\n' not in body
@@ -233,7 +239,7 @@ def test_render_script_command_shape_launches_ollama():
 @pytest.mark.unit
 def test_render_script_command_shape_model_override():
     body = _rendered("glm-ollama", model="custom:tag")
-    assert "--model 'custom:tag' -- \"$@\"" in body
+    assert "--model 'custom:tag' -- --settings " in body
     assert "glm-5.2:cloud" not in body
 
 
@@ -244,6 +250,83 @@ def test_render_script_command_shape_model_injection_is_neutralized():
     body = _rendered("glm-ollama", model=hostile)
     assert f"--model '{hostile}'" not in body  # naive form would break out
     assert "'\"'\"'" in body  # escaped-quote sequence proves quoting engaged
+
+
+# --------------------------------------------------------------------------- #
+# render_script — the --settings payload. Claude Code (>= 2.0.1) applies every
+# settings.json `env` entry INTO the process environment at startup, replacing
+# the value inherited from the shell — an empty string included. Wrapper
+# exports therefore lose to anything `switch` leaves in ~/.claude/settings.json
+# (e.g. the `""` blanks of `switch native`), unless the wrapper ALSO carries
+# its env at the command-line settings level, which sits ABOVE the user file.
+# --------------------------------------------------------------------------- #
+
+
+def _settings_payload(body: str) -> dict:
+    """Parse the ``--settings '<json>'`` payload out of a rendered body."""
+    import json
+
+    found = re.search(r"--settings '(.*?)' \"\$@\"", body)
+    assert found is not None, "no --settings payload in body"
+    return json.loads(found.group(1).replace("'\"'\"'", "'"))
+
+
+@pytest.mark.unit
+def test_settings_payload_mirrors_the_exports():
+    """Exports and --settings must carry the SAME env — one dict feeds both."""
+    body = render_script(get_spec("deepseek"), _LITERAL_TOKEN)
+    payload = _settings_payload(body)["env"]
+    exports = dict(re.findall(r"^export (\w+)='(.*)'$", body, re.MULTILINE))
+    # ANTHROPIC_API_KEY is rendered unquoted-empty; everything else is quoted
+    exports["ANTHROPIC_API_KEY"] = ""
+    assert payload == exports
+
+
+@pytest.mark.unit
+def test_settings_payload_overrides_what_switch_native_leaves_behind():
+    """The payload's keys must be exactly the managed set a switch writes."""
+    from codehelper.services.claude_settings import MANAGED_ENV_KEYS
+
+    body = render_script(get_spec("deepseek"), _LITERAL_TOKEN)
+    assert set(_settings_payload(body)["env"]) <= set(MANAGED_ENV_KEYS)
+    # every managed key a blank `switch native` leaves behind must be
+    # overridden, or the wrapper silently launches native
+    for key in MANAGED_ENV_KEYS:
+        if key == "CLAUDE_CODE_SUBAGENT_MODEL":
+            continue  # deepseek sets it; glm deliberately does not
+        assert key in body
+
+
+@pytest.mark.unit
+def test_settings_payload_survives_a_quote_in_the_token():
+    """A token with a single quote must not break out of the quoting."""
+    hostile = "tok'en"
+    body = render_script(get_spec("glm"), hostile)
+    payload = _settings_payload(body)
+    assert payload["env"]["ANTHROPIC_AUTH_TOKEN"] == hostile
+
+
+@pytest.mark.unit
+def test_command_shape_forwards_settings_only_to_claude_like_agents():
+    """--settings is a Claude Code flag: never forwarded to other agents."""
+    from codehelper.services.model import get_agent
+
+    # hermes is OLLAMA_LAUNCH-only, so the shape cannot resolve away from it
+    spec = build_spec(agent=get_agent("hermes"), provider="ollama", model="qwen3.5:9b")
+    body = render_script(spec, "")
+    assert "--settings" not in body
+    assert "exec ollama launch hermes --model 'qwen3.5:9b' -- \"$@\"" in body
+
+
+@pytest.mark.unit
+def test_command_shape_settings_payload_mirrors_ollama_injection():
+    """The payload must say what `ollama launch` itself would inject."""
+    body = render_script(get_spec("glm-ollama"), "")
+    env = _settings_payload(body)["env"]
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:11434"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "ollama"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-5.2:cloud"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "glm-5.2:cloud"
 
 
 # --------------------------------------------------------------------------- #

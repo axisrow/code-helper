@@ -760,12 +760,27 @@ def _respec_from_body(spec: WrapperSpec, body: str) -> WrapperSpec | None:
 
 
 def _strip_token(body: str) -> str:
-    """``body`` with the embedded auth token blanked, for structural comparison."""
-    return "\n".join(
-        "export ANTHROPIC_AUTH_TOKEN="
-        if line.startswith("export ANTHROPIC_AUTH_TOKEN=")
-        else line
-        for line in body.split("\n")
+    """:attr:`body` with the embedded auth token blanked, for structural comparison.
+
+    Both places the renderer puts it: the ``export ANTHROPIC_AUTH_TOKEN=``
+    line, and — since wrappers forward their env via ``--settings`` — the
+    JSON payload in the exec line, where it sits under
+    ``"ANTHROPIC_AUTH_TOKEN"`` as a JSON string. That half is escape-aware
+    (``(?:[^"\\\\]|\\\\.)*``) so a token containing a quote or backslash is
+    blanked just as completely; without it a token rotation under a legacy
+    (markerless) wrapper would compare old-token bytes against new-token
+    bytes and refuse a file this tool wrote.
+    """
+    body = re.sub(
+        r"^export ANTHROPIC_AUTH_TOKEN=.*$",
+        "export ANTHROPIC_AUTH_TOKEN=",
+        body,
+        flags=re.MULTILINE,
+    )
+    return re.sub(
+        r'("ANTHROPIC_AUTH_TOKEN":")((?:[^"\\]|\\.)*)(")',
+        r"\1\3",
+        body,
     )
 
 

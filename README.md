@@ -85,16 +85,40 @@ token-profile association.
 | Name | Agent | Backend | Auth |
 |---|---|---|---|
 | `deepseek` | Claude Code | local Ollama daemon, `deepseek-v4-flash:0731-cloud` | literal token (`ollama`) |
-| `glm` | Claude Code | Z.ai (`https://api.z.ai/api/anthropic`) | secret (`ZAI_API_KEY`) |
+| `glm` | Claude Code | Z.ai (`https://api.z.ai/api/anthropic`), `glm-5.3` | secret (`ZAI_API_KEY`) |
 | `glm-ollama` | Claude Code | `ollama launch claude --model glm-5.2:cloud` | none — `ollama launch` authenticates itself |
 
-Presets exist alongside the constructor because some combinations aren't just
-"an agent and a model": `glm` uses a *different model per tier*
-(`glm-4.7` / `glm-5-turbo` / `glm-5.2[1m]`), which a single `--model` can't
-express. There is no `litellm` preset — a preset bundles a fixed provider
-address, and `litellm`'s whole point is that its address is yours, not this
-project's to bundle; use the constructor with `--base-url` instead (see
-below).
+Presets exist alongside the constructor because they pin a curated model
+choice, not just "an agent and a provider". There is no `litellm` preset — a
+preset bundles a fixed provider address, and `litellm`'s whole point is that
+its address is yours, not this project's to bundle; use the constructor with
+`--base-url` instead (see below).
+
+## Parallel sessions: native `claude` + wrappers at the same time
+
+A bare `claude` (no wrapper) talks to Anthropic natively; every wrapper routes
+its own session to its backend. They can run **simultaneously** — that is the
+point of wrappers — but this needs one precaution the wrappers now carry
+automatically:
+
+Since Claude Code 2.0.1, every `env` entry in `~/.claude/settings.json` is
+applied into the process environment at startup, **replacing** the value
+inherited from the shell — an empty string included. So a leftover
+`"ANTHROPIC_BASE_URL": ""` (which `codehelper switch native` deliberately
+writes to reset a live session) would silently defeat every wrapper's exports
+and launch native instead. Generated wrappers therefore pass their env to
+Claude Code a second time via `--settings '<json>'`, a per-invocation settings
+level that sits *above* the user file and overrides only its own keys — the
+wrapper wins no matter what the global `settings.json` currently holds.
+
+Two consequences worth knowing:
+
+- Wrappers installed by older versions don't have the `--settings` payload —
+  re-run `codehelper add <name>` once to pick it up. Hand-written wrappers can
+  add the same flag to their `claude "$@"` line.
+- `codehelper switch <provider>` still hot-applies to sessions launched
+  *without* a wrapper (it patches the one global `settings.json`) — it no
+  longer captures wrapper sessions.
 
 ## Not every combination is possible
 

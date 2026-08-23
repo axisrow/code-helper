@@ -19,7 +19,7 @@ from codehelper.services.model import get_provider
 from codehelper.services.models_api import list_models
 from codehelper.services.paths import Paths
 from codehelper.services.render import render_legacy_script
-from codehelper.services.spec import build_spec
+from codehelper.services.spec import TierModels, build_spec
 from codehelper.services.wrappers import get_spec, install_wrapper
 
 pytestmark = pytest.mark.unit
@@ -157,19 +157,30 @@ def test_edit_token_preserves_a_customized_model(tmp_path, monkeypatch):
 
 
 def test_edit_token_preserves_non_uniform_tier_models(tmp_path, monkeypatch):
-    """Rotation must not flatten a preset whose tiers genuinely differ.
+    """Rotation must not flatten a wrapper whose tiers genuinely differ.
 
-    ``glm`` is the reason presets still exist: haiku/sonnet/opus are three
-    DIFFERENT models, which no single ``--model`` can express. Reconstructing
+    haiku/sonnet/opus can be three DIFFERENT models, which no single
+    ``--model`` can express — the reason ``TierModels`` exists. Reconstructing
     the spec from one recovered model and letting ``build_spec`` synthesize
     uniform tiers turned the cycle-1 fix into a wider version of the bug it
     was closing — and the test written for that fix only covered a uniform
-    override, so it could not see this.
+    override, so it could not see this. Built from the axes rather than a
+    preset (the ``glm`` preset went uniform at the glm-5.3 bump) so the case
+    keeps its meaning regardless of how any preset's tiers evolve.
     """
     paths = _bin(tmp_path)
-    install_wrapper(paths, "glm", token="tok1")
+    spec = build_spec(
+        agent="claude",
+        provider="zai",
+        model="tier-sonnet",
+        alias="glm",
+        tier_models=TierModels(
+            haiku="tier-haiku", sonnet="tier-sonnet", opus="tier-opus"
+        ),
+    )
+    install_wrapper(paths, spec, token="tok1")
     before = (paths.bin_dir / "glm").read_text()
-    assert "'glm-4.7'" in before and "'glm-5.1'" in before
+    assert "'tier-haiku'" in before and "'tier-opus'" in before
 
     monkeypatch.setattr("getpass.getpass", lambda *a, **k: "tok2")
     assert main(["edit-token", "glm"]) == 0

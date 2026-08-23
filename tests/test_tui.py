@@ -2007,7 +2007,7 @@ def test_deepseek_chip_can_switch_to_glm_with_zai_url(monkeypatch):
 
     settings = json.loads(Paths.default().claude_settings().read_text(encoding="utf-8"))
     assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
-    assert settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5-turbo"
+    assert settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3"
 
 
 @pytest.mark.integration

@@ -279,9 +279,8 @@ PRESETS: tuple[Preset, ...] = (
         agent="claude",
         provider="zai",
         shape=ConfigShape.ANTHROPIC_ENV,
-        model="glm-5-turbo",
-        # Genuinely different models per tier — the reason TierModels exists.
-        tier_models=TierModels(haiku="glm-4.7", sonnet="glm-5-turbo", opus="glm-5.1"),
+        model="glm-5.3",
+        tier_models=TierModels.uniform("glm-5.3"),
         subagent_model=None,
         description="Claude Code → Z.ai",
     ),
