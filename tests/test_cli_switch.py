@@ -153,7 +153,7 @@ def test_switch_deepseek_to_glm_cross_provider(tmp_path, monkeypatch):
     assert _handle_switch(_preset_request("glm")) == 0
     env = _settings(tmp_path)["env"]
     assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
-    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5-turbo"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3"
     assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
 
 
@@ -292,9 +292,9 @@ def test_switch_from_wrapper_lifts_tier_models_and_token(tmp_path, monkeypatch):
     env = _settings(tmp_path)["env"]
     assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
     assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-zai-secret"
-    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
-    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5-turbo"
-    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.1"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-5.3"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3"
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.3"
 
 
 @pytest.mark.integration

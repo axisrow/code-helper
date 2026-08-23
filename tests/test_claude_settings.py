@@ -112,6 +112,40 @@ def test_resolve_switch_patch_includes_subagent_model_when_given():
 
 
 @pytest.mark.unit
+def test_resolve_switch_patch_declares_known_context_window():
+    """A model Claude Code cannot resolve would auto-compact at its 200k
+    fallback — the switch declares the real window when the catalog knows it
+    and every tier shares it (Claude Code docs: for a non-``claude-``, no-
+    ``[1m]``, unresolvable ID the variable applies directly)."""
+    patch = resolve_switch_patch(
+        ZAI, tier_models=TierModels.uniform("glm-5.3"), token="sk-test"
+    )
+    assert patch.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1000000"
+
+
+@pytest.mark.unit
+def test_resolve_switch_patch_skips_context_window_for_unknown_model():
+    """No declaration beats a guessed window — an oversized claim overflows
+    the real one mid-session."""
+    patch = resolve_switch_patch(
+        ZAI, tier_models=TierModels.uniform("glm-5-turbo"), token="sk-test"
+    )
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in patch.env
+
+
+@pytest.mark.unit
+def test_resolve_switch_patch_skips_context_window_for_mixed_tiers():
+    """The variable declares ONE window for the session; tiers that disagree
+    (here: an unknown haiku next to a 1M sonnet) must yield no declaration."""
+    patch = resolve_switch_patch(
+        ZAI,
+        tier_models=TierModels(haiku="mystery-3b", sonnet="glm-5.3", opus="glm-5.3"),
+        token="sk-test",
+    )
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in patch.env
+
+
+@pytest.mark.unit
 def test_resolve_switch_patch_native_ignores_models_and_token():
     """Native explicitly blanks every live key without leaking caller input.
 

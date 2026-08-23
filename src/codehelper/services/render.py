@@ -24,7 +24,8 @@ it is not.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Iterable
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from codehelper.errors import CodeHelperError
@@ -43,6 +44,8 @@ __all__ = [
     "MARKER_PREFIX",
     "CATALOG_MANAGED_BY_KEY",
     "CATALOG_MANAGED_BY_VALUE",
+    "MODEL_CONTEXT_WINDOWS",
+    "uniform_context_window",
 ]
 
 #: Second line of every generated script. Presence of this prefix is how
@@ -74,8 +77,70 @@ def _marker(spec: WrapperSpec) -> str:
     )
 
 
+def _settings_flag(env: dict[str, str]) -> str:
+    """``--settings '<json>'`` carrying ``env`` at the command-line level.
+
+    Why the exports alone are not enough: since Claude Code 2.0.1 every
+    ``env`` entry in ``settings.json`` is written into the process
+    environment at startup, REPLACING the value inherited from the shell —
+    an empty string included (treated as unset for provider selection). So
+    ``~/.claude/settings.json`` holding ``ANTHROPIC_BASE_URL: ""`` (what
+    ``switch native`` leaves behind) silently defeats every wrapper export
+    and launches native. ``--settings`` is one level ABOVE the user file in
+    Claude Code's precedence, merges ``env`` per key, and lasts a single
+    session — exactly the override a per-invocation wrapper needs. The
+    exports stay in the script for subprocesses and for
+    ``wrappers.spec_from_installed`` recovery; ``--settings`` is what
+    guarantees they win.
+    """
+    payload = json.dumps({"env": env}, separators=(",", ":"))
+    return f"--settings {_shell_single_quote(payload)}"
+
+
+#: Real context windows of third-party models this tool knows, in tokens.
+#: Claude Code cannot resolve a non-``claude-`` model ID, so it assumes its
+#: 200k fallback and proactively auto-compacts there — for a model whose real
+#: window is 1M that abandons 80% of the context every session. Declaring the
+#: window via ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` makes compaction continue at
+#: the declared window instead (Claude Code docs, "Correct the window for a
+#: gateway or custom model ID": for an ID that is not ``claude-*``, carries no
+#: ``[1m]``, and resolves to no Claude model, the variable applies directly).
+#: Data, not code: a model missing here simply gets NO declaration — never
+#: guess a window, an oversized claim overflows the real one mid-session.
+#: Deliberately absent: ``glm-5-turbo`` / ``glm-4.7`` (200k real — the
+#: fallback assumption already matches them, a declaration would add nothing
+#: but a lie's risk).
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "glm-5.3": 1_000_000,
+    "glm-5.2": 1_000_000,
+    "glm-5.2:cloud": 1_000_000,
+    "deepseek-v4-flash:0731-cloud": 1_000_000,
+}
+
+
+def uniform_context_window(models: Iterable[str]) -> int | None:
+    """The one context window shared by EVERY model in ``models``, or None.
+
+    None unless every name resolves in :data:`MODEL_CONTEXT_WINDOWS` AND all
+    resolve to the same value: ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` declares
+    ONE window for the whole session, so tiers that genuinely differ (or any
+    unknown model) must yield no declaration rather than a guess. The
+    subagent model participates for the same reason — it shares the variable.
+
+    Public (not ``_``-prefixed) for the same reason ``anthropic_base_url``
+    is: ``claude_settings.resolve_switch_patch`` derives the same value for
+    the switch mechanism, so wrapper and switch cannot disagree on whether a
+    model's window is declared.
+    """
+    windows = {MODEL_CONTEXT_WINDOWS.get(model) for model in models}
+    if len(windows) == 1 and None not in windows:
+        (window,) = windows
+        return window
+    return None
+
+
 def _render_anthropic_env(spec: WrapperSpec, token: str) -> str:
-    """Subshell exporting ``ANTHROPIC_*``, then ``claude "$@"``.
+    """Subshell exporting ``ANTHROPIC_*``, then ``claude --settings … "$@"``.
 
     ``ANTHROPIC_API_KEY=`` is always emptied — mirroring Ollama's own
     ``cmd/launch/claude.go``. A real Anthropic key inherited from the caller's
@@ -88,44 +153,87 @@ def _render_anthropic_env(spec: WrapperSpec, token: str) -> str:
 
     ``ANTHROPIC_BASE_URL`` goes through :func:`anthropic_base_url`, not raw —
     see that function for why.
+
+    ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` rides along when every tier (plus the
+    subagent, when set) resolves to one known window via
+    :func:`uniform_context_window` — see :data:`MODEL_CONTEXT_WINDOWS` for
+    why it is conditional and never a guess.
+
+    One dict feeds BOTH the exports and the ``--settings`` payload (see
+    :func:`_settings_flag`), so the two can never drift; a value the JSON
+    carries but an export lost (or vice versa) would resurface as the very
+    settings.json-overrides-the-wrapper bug this flag exists to fix.
     """
     q = _shell_single_quote
     tiers = spec.tier_models
-    lines = [
-        "#!/bin/bash",
-        _marker(spec),
-        "(",
-        f"export ANTHROPIC_BASE_URL={q(anthropic_base_url(spec.provider.base_url))}",
-        f"export ANTHROPIC_AUTH_TOKEN={q(token)}",
-        "export ANTHROPIC_API_KEY=",
-        f"export ANTHROPIC_DEFAULT_HAIKU_MODEL={q(tiers.haiku)}",
-        f"export ANTHROPIC_DEFAULT_SONNET_MODEL={q(tiers.sonnet)}",
-        f"export ANTHROPIC_DEFAULT_OPUS_MODEL={q(tiers.opus)}",
-    ]
+    env = {
+        "ANTHROPIC_BASE_URL": anthropic_base_url(spec.provider.base_url),
+        "ANTHROPIC_AUTH_TOKEN": token,
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": tiers.haiku,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": tiers.sonnet,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": tiers.opus,
+    }
     if spec.subagent_model is not None:
-        lines.append(f"export CLAUDE_CODE_SUBAGENT_MODEL={q(spec.subagent_model)}")
-    lines.append(f'{spec.agent.binary} "$@"')
+        env["CLAUDE_CODE_SUBAGENT_MODEL"] = spec.subagent_model
+    models = [tiers.haiku, tiers.sonnet, tiers.opus]
+    if spec.subagent_model is not None:
+        models.append(spec.subagent_model)
+    if (window := uniform_context_window(models)) is not None:
+        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
+    lines = ["#!/bin/bash", _marker(spec), "("]
+    lines += [f"export {key}={q(value)}" for key, value in env.items()]
+    lines.append(f'{spec.agent.binary} {_settings_flag(env)} "$@"')
     lines.append(")")
     return "\n".join(lines) + "\n"
 
 
 def _render_ollama_launch(spec: WrapperSpec, token: str) -> str:
-    """``exec ollama launch <agent> --model <model> -- "$@"``.
+    """``exec ollama launch <agent> --model <model> -- [--settings …] "$@"``.
 
     ``ollama launch`` configures the agent itself (env vars for Claude Code, a
-    TOML profile plus ``-m`` for Codex), so the wrapper stays one line and
-    embeds no token — hence ``token`` is unused here.
+    TOML profile plus ``-m`` for Codex), so the wrapper embeds no token of its
+    own — ``token``, when non-empty, is only echoed into the ``--settings``
+    payload below.
 
-    The ``--`` before ``"$@"`` is load-bearing for BOTH agents: without it the
-    launcher's own flag parser consumes forwarded agent flags. Verified — a
+    The ``--`` before the forwarded flags is load-bearing for BOTH agents:
+    without it the launcher's own flag parser consumes them. Verified — a
     bare ``-p`` yields ``unknown shorthand flag: 'p'``.
+
+    For an agent that speaks ``ANTHROPIC_*`` env (claude — i.e. any agent
+    declaring the ANTHROPIC_ENV shape, never codex or the launch-only CLI
+    agents), the wrapper also forwards :func:`_settings_flag`: the env vars
+    ``ollama launch`` injects into the agent's process are, from Claude
+    Code's side, indistinguishable from shell exports — and get REPLACED by
+    ``~/.claude/settings.json``'s ``env`` block the same way (an
+    ``ANTHROPIC_BASE_URL: ""`` left by ``switch native`` redirects the
+    session to native). The payload mirrors what ``cmd/launch/claude.go``
+    injects for a local daemon: the provider's base URL, the literal token
+    (or the resolved secret, for an ``--auth secret`` install), and the
+    model in every tier slot. For every other agent the line is unchanged —
+    ``--settings`` is a Claude Code flag and would be rejected by their
+    argument parsers.
     """
     q = _shell_single_quote
-    return (
-        "#!/bin/bash\n"
-        f"{_marker(spec)}\n"
-        f'exec ollama launch {spec.agent.binary} --model {q(spec.model)} -- "$@"\n'
-    )
+    launch = f"exec ollama launch {spec.agent.binary} --model {q(spec.model)}"
+    # The separator comes FIRST and unconditionally: everything after it is
+    # forwarded to the agent, never parsed by `ollama launch` itself.
+    launch += " --"
+    if ConfigShape.ANTHROPIC_ENV in spec.agent.shapes:
+        env = {
+            "ANTHROPIC_BASE_URL": anthropic_base_url(spec.provider.base_url),
+            "ANTHROPIC_AUTH_TOKEN": token or spec.provider.auth_value,
+            "ANTHROPIC_API_KEY": "",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": spec.model,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": spec.model,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": spec.model,
+            "CLAUDE_CODE_SUBAGENT_MODEL": spec.model,
+        }
+        if (window := uniform_context_window([spec.model])) is not None:
+            env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
+        launch += f" {_settings_flag(env)}"
+    launch += ' "$@"'
+    return f"#!/bin/bash\n{_marker(spec)}\n{launch}\n"
 
 
 def _render_openai_toml(spec: WrapperSpec, token: str) -> str:

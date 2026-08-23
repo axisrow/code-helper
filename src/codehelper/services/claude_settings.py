@@ -60,7 +60,7 @@ from codehelper.backends._atomic import (
 from codehelper.errors import CodeHelperError
 from codehelper.services.model import ConfigShape, Provider
 from codehelper.services.paths import Paths
-from codehelper.services.render import anthropic_base_url
+from codehelper.services.render import anthropic_base_url, uniform_context_window
 from codehelper.services.spec import TierModels
 
 __all__ = [
@@ -101,6 +101,7 @@ MANAGED_ENV_KEYS: tuple[str, ...] = (
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
 )
 
 
@@ -153,7 +154,11 @@ def resolve_switch_patch(
     ``ANTHROPIC_BASE_URL`` is derived via :func:`render.anthropic_base_url` —
     the SAME function the wrapper renderer uses — so a ``switch`` to a
     provider and a generated wrapper for that same provider always agree on
-    the resulting URL.
+    the resulting URL. ``CLAUDE_CODE_MAX_CONTEXT_TOKENS`` follows the same
+    shared-derivation rule via :func:`render.uniform_context_window`: both
+    mechanisms declare a third-party model's real context window (Claude
+    Code would otherwise assume its 200k fallback and auto-compact there) or
+    neither does.
 
     Raises:
         CodeHelperError: ``provider`` does not declare
@@ -201,6 +206,15 @@ def resolve_switch_patch(
     }
     if subagent_model is not None:
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = subagent_model
+    # Same derivation the wrapper renderer uses — a switch and a wrapper for
+    # the same model must agree on whether the window is declared at all.
+    # Conditional for the same reason it is there: no declaration beats a
+    # guessed window (an oversized claim overflows the real one mid-session).
+    models = [tier_models.haiku, tier_models.sonnet, tier_models.opus]
+    if subagent_model is not None:
+        models.append(subagent_model)
+    if (window := uniform_context_window(models)) is not None:
+        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
     return SettingsPatch(provider_name=provider.name, env=env)
 
 
