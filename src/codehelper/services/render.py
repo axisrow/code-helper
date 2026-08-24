@@ -279,11 +279,12 @@ def _render_openai_toml(spec: WrapperSpec, token: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-#: ``model_catalog_json`` floors for models the catalog describes. No axis
-#: carries a context window, so these are pragmatic defaults a future data
-#: source can override in one place.
+#: ``model_catalog_json`` floor for models the catalog describes. No axis
+#: carries a context window, so this is a pragmatic default a future data
+#: source can override in one place. Only the context window is declared:
+#: Codex's ``ModelInfo`` has no output-token field, so there is no
+#: ``max_output_tokens`` twin to ship.
 _DEFAULT_CONTEXT_WINDOW = 128000
-_DEFAULT_MAX_OUTPUT = 32768
 
 
 def openai_base_url(provider_base_url: str, is_openai_root: bool = False) -> str:
@@ -453,9 +454,23 @@ def openai_catalog_body(spec: WrapperSpec) -> str:
     """The ``~/.codex/<alias>.model.json`` catalog body (pure, no IO).
 
     Without a catalog, Codex does not learn the context window of a model it
-    does not ship knowledge of (``glm-5.2:cloud`` etc.). This is a minimal
-    entry so the model is usable; the real window is unknown to this tool, so
-    :data:`_DEFAULT_CONTEXT_WINDOW` is a floor, not a measurement.
+    does not ship knowledge of (``glm-5.2:cloud`` etc.). This is the minimal
+    entry Codex's ``ModelInfo`` parser actually REQUIRES, verified against
+    ``codex-rs/protocol/src/openai_models.rs`` (current main): every field
+    without a serde default (``slug``, ``display_name``,
+    ``supported_reasoning_levels``, ``shell_type``, ``visibility``,
+    ``supported_in_api``, ``priority``, ``support_verbosity``,
+    ``truncation_policy``, ``experimental_supported_tools``) fails the whole
+    catalog load with "missing field" if absent. The real window is unknown
+    to this tool, so :data:`_DEFAULT_CONTEXT_WINDOW` is a floor, not a
+    measurement; ``truncation_policy.limit`` mirrors it. ``base_instructions``
+    is the legacy instructions field codex ≥ 0.149 requires on every entry
+    (``deserialize_model_infos_with_legacy_base`` fails the whole catalog with
+    "missing both `base_instructions` and `model_messages.instructions_template`"
+    when neither is present); empty means "no system-prompt override", exactly
+    what a model this tool knows nothing about should declare. Extra keys are
+    ignored by codex (``ModelInfo`` has no ``deny_unknown_fields``), which is
+    what lets the ``version``/``managed_by`` wrapper below ride along.
 
     Carries :data:`CATALOG_MANAGED_BY_KEY` at the top level — proof of
     authorship the catalog can offer on its OWN, without needing its sibling
@@ -465,11 +480,20 @@ def openai_catalog_body(spec: WrapperSpec) -> str:
     """
     import json
 
+    window = _DEFAULT_CONTEXT_WINDOW
     entry = {
-        "id": spec.model,
-        "name": spec.model,
-        "context_window": _DEFAULT_CONTEXT_WINDOW,
-        "max_output_tokens": _DEFAULT_MAX_OUTPUT,
+        "slug": spec.model,
+        "display_name": spec.model,
+        "base_instructions": "",
+        "supported_reasoning_levels": [],
+        "shell_type": "default",
+        "visibility": "list",
+        "supported_in_api": True,
+        "priority": 0,
+        "support_verbosity": False,
+        "truncation_policy": {"mode": "tokens", "limit": window},
+        "experimental_supported_tools": [],
+        "context_window": window,
     }
     body = {
         "version": 1,

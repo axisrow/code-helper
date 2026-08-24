@@ -1036,8 +1036,42 @@ def test_openai_catalog_body_has_context_window_for_unknown_model():
     payload = json.loads(openai_catalog_body(spec))
     assert payload["version"] == 1
     entry = payload["models"][0]
-    assert entry["id"] == "glm-5.2:cloud"
+    assert entry["slug"] == "glm-5.2:cloud"
     assert entry["context_window"] >= 1
+
+
+@pytest.mark.unit
+def test_openai_catalog_body_carries_every_required_modelinfo_field():
+    """The catalog entry carries every field Codex's ``ModelInfo`` load
+    actually requires (verified against codex-rs/protocol/src/openai_models.rs
+    and the live v0.149.1 binary): the serde-mandatory fields fail the load
+    with "missing field" when absent, and ``base_instructions`` is required by
+    the legacy-merge validator even though serde defaults it. The minimal
+    ``{id, name, context_window}`` body the old catalog shipped was missing
+    both classes — a second startup error that stayed hidden behind the
+    wire_api one."""
+    import json
+
+    spec = _toml_spec(model="glm-5.2:cloud")
+    entry = json.loads(openai_catalog_body(spec))["models"][0]
+    required = {
+        "slug",
+        "display_name",
+        "base_instructions",  # codex >= 0.149 rejects a model without it
+        "supported_reasoning_levels",
+        "shell_type",
+        "visibility",
+        "supported_in_api",
+        "priority",
+        "support_verbosity",
+        "truncation_policy",
+        "experimental_supported_tools",
+    }
+    assert required <= entry.keys()
+    assert entry["truncation_policy"] == {
+        "mode": "tokens",
+        "limit": entry["context_window"],
+    }
 
 
 @pytest.mark.integration
