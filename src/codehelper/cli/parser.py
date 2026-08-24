@@ -392,6 +392,19 @@ def _add_spec_from_preset(req, paths, profile_name):
     )
 
 
+def _warn_env_cache_conflict(resolved, **axes) -> None:
+    """Print the env-vs-cache token disagreement (issue #71) to stderr.
+
+    Emitted at RESOLUTION time — before any write/dry-run branch — so a
+    ``--dry-run`` shows it too (it is exactly the diagnostic a dry run
+    needs), and the TUI's silent chip hot-apply, which captures stdout
+    only, still surfaces it on the terminal.
+    """
+    conflict = secrets.env_cache_conflict(resolved, **axes)
+    if conflict:
+        print(conflict, file=sys.stderr)
+
+
 def _add_resolve_token(spec, req, paths, profile_name):
     """Resolve the token for ``spec``: pre-typed → env/cache/prompt → literal.
 
@@ -415,6 +428,14 @@ def _add_resolve_token(spec, req, paths, profile_name):
             profile_name=profile_name,
             base_url_policy=spec.provider.base_url_policy,
         )
+    _warn_env_cache_conflict(
+        resolved,
+        env_var=spec.token_env_var,
+        paths=paths,
+        provider_name=spec.provider.name,
+        profile_name=profile_name,
+        base_url_policy=spec.provider.base_url_policy,
+    )
     return resolved.value, resolved
 
 
@@ -941,6 +962,14 @@ def _switch_resolve_token(
         profile_name=req.profile,
         base_url_policy=provider.base_url_policy,
         **kwargs,
+    )
+    _warn_env_cache_conflict(
+        resolved,
+        env_var=provider.token_env_var,
+        paths=paths,
+        provider_name=provider.name,
+        profile_name=req.profile,
+        base_url_policy=provider.base_url_policy,
     )
     return resolved.value
 

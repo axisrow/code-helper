@@ -19,6 +19,7 @@ from codehelper.cli.parser import _handle_switch
 from codehelper.cli.requests import SwitchRequest
 from codehelper.services.claude_settings import MANAGED_ENV_KEYS
 from codehelper.services.paths import Paths
+from codehelper.services.secrets import save_credential
 
 
 def _settings(tmp_path) -> dict:
@@ -136,6 +137,48 @@ def test_switch_native_zai_native_round_trip(tmp_path, monkeypatch):
     final_env = _settings(tmp_path)["env"]
     assert all(final_env[key] == "" for key in MANAGED_ENV_KEYS if key in env)
     assert "CLAUDE_CODE_SUBAGENT_MODEL" not in final_env
+
+
+@pytest.mark.integration
+def test_switch_warns_when_env_token_differs_from_cached(tmp_path, monkeypatch, capsys):
+    """Issue #71: env wins the resolution silently — the warning names the
+    env var and never leaks either full token. The env value is still what
+    gets written (documented precedence; the warning is a diagnostic, not a
+    prompt)."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env-stale-token")
+    save_credential(Paths.from_home(tmp_path), "zai", "sk-cached-working")
+
+    assert main(["switch", "zai", "--model", "glm-5.2", "--force"]) == 0
+
+    err = capsys.readouterr().err
+    assert "ZAI_API_KEY" in err
+    assert "sk-env-stale-token" not in err
+    assert "sk-cached-working" not in err
+    assert _settings(tmp_path)["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-env-stale-token"
+
+
+@pytest.mark.integration
+def test_switch_dry_run_still_warns_on_env_cache_conflict(
+    tmp_path, monkeypatch, capsys
+):
+    """The warning is emitted at resolution time, so a dry run — exactly the
+    diagnostic context — shows it even though nothing is written."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env-stale-token")
+    save_credential(Paths.from_home(tmp_path), "zai", "sk-cached-working")
+
+    assert main(["switch", "zai", "--model", "glm-5.2", "--dry-run"]) == 0
+
+    assert "ZAI_API_KEY" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_switch_silent_when_env_token_matches_cached(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ZAI_API_KEY", "sk-same-token")
+    save_credential(Paths.from_home(tmp_path), "zai", "sk-same-token")
+
+    assert main(["switch", "zai", "--model", "glm-5.2", "--force"]) == 0
+
+    assert capsys.readouterr().err == ""
 
 
 @pytest.mark.integration

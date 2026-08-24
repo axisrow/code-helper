@@ -309,6 +309,13 @@ With `--profile` or an explicit TUI selection, that profile is used first and
 the environment variable is not substituted for it. A custom LiteLLM URL does
 not receive a profile implicitly; selecting a profile is an explicit choice.
 
+Because the environment wins silently, `add` and `switch` print a warning when
+the env var and the default profile hold **different** tokens (both sides
+redacted, e.g. `sk-e...ken vs sk-c...key`) — a stale export in an
+already-open terminal otherwise writes a dead key that only surfaces as 401
+retries later. The env value is still what gets used; unset the variable to
+fall back to the cached profile.
+
 A named profile is **portable across a provider's addresses.** For a provider
 whose URL you supply yourself (`litellm`), the same `--profile work` reuses
 its cached key against whatever `--base-url` you give — the key is stored per

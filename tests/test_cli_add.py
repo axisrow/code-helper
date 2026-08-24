@@ -12,6 +12,7 @@ import pytest
 
 from codehelper.__main__ import main
 from codehelper.services.paths import Paths
+from codehelper.services.secrets import save_credential
 
 
 def _body(tmp_path, name: str) -> str:
@@ -186,6 +187,24 @@ def test_add_litellm_claude_with_base_url(tmp_path, monkeypatch):
     assert "export ANTHROPIC_BASE_URL='http://localhost:4000'" in body
     assert "/v1" not in body
     assert "export ANTHROPIC_AUTH_TOKEN='sk-test'" in body
+
+
+@pytest.mark.integration
+def test_add_warns_when_env_token_differs_from_cached(tmp_path, monkeypatch, capsys):
+    """Issue #71 on the add path: the env token still wins and lands in the
+    wrapper (documented precedence), but the disagreement is named on stderr
+    with both sides redacted."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env-stale-token")
+    save_credential(Paths.from_home(tmp_path), "zai", "sk-cached-working")
+
+    assert main(["add", "glm", "--force"]) == 0
+
+    err = capsys.readouterr().err
+    assert "ZAI_API_KEY" in err
+    assert "sk-env-stale-token" not in err
+    assert "sk-cached-working" not in err
+    body = _body(tmp_path, "glm")
+    assert "sk-env-stale-token" in body  # env value is what got installed
 
 
 @pytest.mark.integration

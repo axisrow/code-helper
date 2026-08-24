@@ -52,6 +52,7 @@ __all__ = [
     "ResolvedToken",
     "DEFAULT_PROFILE",
     "resolve_token",
+    "env_cache_conflict",
     "load_credentials",
     "profile_names",
     "seed_default_profile",
@@ -551,6 +552,64 @@ def resolve_token(
 
     raise CodeHelperError(
         f"no token provided — set {env_var} or enter a non-empty value when prompted"
+    )
+
+
+def env_cache_conflict(
+    resolved: ResolvedToken,
+    *,
+    env_var: str,
+    paths: Paths,
+    provider_name: str,
+    profile_name: str | None = None,
+    base_url_policy: str = "fixed",
+) -> str | None:
+    """A redacted warning line when an env-resolved token silently beat a
+    DIFFERENT cached one — ``None`` when there is nothing to warn about.
+
+    :func:`resolve_token` resolves env → cache → prompt, so a token exported
+    in the shell (``ZAI_API_KEY`` in ``~/.zshrc``) wins over the cached
+    profile even when the export is stale or revoked and the cache holds the
+    working key. The value written then 401s in the session with no hint
+    which credential was used or where it came from — and the same command
+    from a clean environment succeeds, which looks nondeterministic (issue
+    #71: an already-open terminal kept a superseded export after the rc file
+    was fixed; happened twice in one day). This helper names the
+    disagreement, redacting both sides the way a settings diff preview does.
+
+    Fires only where a cache was actually BEATEN — mirroring
+    :func:`resolve_token`'s own candidate rules:
+
+    - only a :data:`SOURCE_ENV` resolution can have beaten anything — a
+      cache win is the documented precedence, not a trap, and a prompt means
+      neither source had a value;
+    - an explicit ``profile_name`` caches ABOVE the environment, so an env
+      win means that profile was empty — nothing disagrees;
+    - a non-``fixed`` ``base_url_policy`` never consults the default cache
+      (the cross-address rule in :func:`token_for_discovery`'s docstring),
+      so it was never a candidate.
+
+    Pure: returns the line, never prints. The CLI layer owns presentation
+    (stderr), which also lets the TUI's chip hot-apply — its silent mode
+    captures stdout only — surface the warning. The redaction helper is
+    imported lazily from ``claude_settings`` so this module's import-time
+    dependency graph (deliberately free of the model/render chain) is
+    unchanged.
+    """
+    if resolved.source != SOURCE_ENV or profile_name:
+        return None
+    if base_url_policy != "fixed":
+        return None
+    cached = credential_for(paths, provider_name)
+    if not cached or cached == resolved.value:
+        return None
+    from codehelper.services.claude_settings import redact_credential
+
+    return (
+        f"warning: {env_var} from the environment differs from the cached "
+        f"profile {DEFAULT_PROFILE!r} ({redact_credential(resolved.value)} vs "
+        f"{redact_credential(cached)}) — using the environment value; unset "
+        f"{env_var} to use the profile"
     )
 
 
