@@ -140,9 +140,7 @@ def test_switch_native_zai_native_round_trip(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_switch_warns_when_env_token_differs_from_cached(
-    tmp_path, monkeypatch, capsys
-):
+def test_switch_warns_when_env_token_differs_from_cached(tmp_path, monkeypatch, capsys):
     """Issue #71: env wins the resolution silently — the warning names the
     env var and never leaks either full token. The env value is still what
     gets written (documented precedence; the warning is a diagnostic, not a
