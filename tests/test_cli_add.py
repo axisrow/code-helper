@@ -27,8 +27,10 @@ def _body(tmp_path, name: str) -> str:
 @pytest.mark.integration
 def test_add_agent_provider_model_creates_wrapper(tmp_path):
     """codex × ollama resolves to OPENAI_TOML by priority now: the wrapper runs
-    ``codex --profile <alias>``, and the TOML profile + model catalog are
-    written alongside it.
+    ``codex --profile <alias>``, and the TOML profile is written alongside it
+    — no model catalog (an empty synthesized ``base_instructions`` would
+    silently replace Codex's real system prompt; see
+    ``render.openai_toml_body``).
     """
     code = main(
         ["add", "--agent", "codex", "--provider", "ollama", "--model", "glm-5:cloud"]
@@ -42,7 +44,7 @@ def test_add_agent_provider_model_creates_wrapper(tmp_path):
     assert 'model = "glm-5:cloud"' in config
     assert 'base_url = "http://127.0.0.1:11434/v1/"' in config
     assert 'wire_api = "responses"' in config
-    assert paths.codex_catalog_for(alias).exists()
+    assert not paths.codex_catalog_for(alias).exists()
 
 
 @pytest.mark.integration

@@ -25,7 +25,6 @@ from codehelper.services.model import (
 from codehelper.services.paths import Paths
 from codehelper.services.render import (
     anthropic_base_url,
-    openai_catalog_body,
     openai_toml_body,
     render_script,
 )
@@ -908,7 +907,7 @@ def test_render_openai_toml_wrapper_alias_is_quoted():
 def test_openai_toml_body_carries_marker_model_base_url_wire_api():
     """The profile body matches the contract in issue #7, with /v1/ derived."""
     spec = _toml_spec(model="glm-5.2:cloud")
-    body = openai_toml_body(spec, "/home/u/.codex/glm-5-codex.model.json")
+    body = openai_toml_body(spec)
     # Marker on line 1 — what the ownership guard keys off.
     assert body.startswith("# codehelper: managed wrapper")
     assert 'model = "glm-5.2:cloud"' in body  # `:` and `.` => must be quoted
@@ -916,7 +915,11 @@ def test_openai_toml_body_carries_marker_model_base_url_wire_api():
     # not a hardcoded "ollama-launch" — that is what makes a second
     # OpenAI-compatible provider a PROVIDERS entry rather than a renderer edit.
     assert 'model_provider = "ollama"' in body
-    assert 'model_catalog_json = "/home/u/.codex/glm-5-codex.model.json"' in body
+    # No catalog: an empty base_instructions would silently replace Codex's
+    # real system prompt. glm-5.2:cloud resolves in MODEL_CONTEXT_WINDOWS, so
+    # the window rides along as a plain config.toml key instead.
+    assert "model_catalog_json" not in body
+    assert "model_context_window = 1000000" in body
     assert "[model_providers.ollama]" in body
     # The display name is the provider's description (falling back to its name).
     assert 'name = "local Ollama daemon"' in body
@@ -926,15 +929,28 @@ def test_openai_toml_body_carries_marker_model_base_url_wire_api():
 
 
 @pytest.mark.unit
+def test_openai_toml_body_omits_context_window_for_unknown_model():
+    """An unrecognised model gets NO ``model_context_window`` — never a guess.
+
+    Codex falls through to its own ``model_info_from_slug`` fallback, which
+    carries the real bundled system prompt (unlike the removed catalog).
+    """
+    spec = _toml_spec(model="some-unknown-model")
+    body = openai_toml_body(spec)
+    assert "model_context_window" not in body
+    assert "model_catalog_json" not in body
+
+
+@pytest.mark.unit
 def test_openai_toml_body_quoted_model_with_colon_and_dot():
     """A model like `glm-5.2:cloud` MUST be in quotes or Codex rejects the TOML."""
     spec = _toml_spec(model="glm-5.2:cloud")
-    body = openai_toml_body(spec, "/x.json")
+    body = openai_toml_body(spec)
     assert 'model = "glm-5.2:cloud"' in body
     # A double quote in the model would be escaped, not break the string.
     weird = 'we"ird'
     spec2 = _toml_spec(model=weird)
-    body2 = openai_toml_body(spec2, "/x.json")
+    body2 = openai_toml_body(spec2)
     assert 'model = "we\\"ird"' in body2
 
 
@@ -964,7 +980,7 @@ def test_openai_toml_wrapper_body_is_unchanged_for_a_literal_provider():
 def test_openai_toml_profile_has_no_env_key_for_a_literal_provider():
     """GOLDEN: no env_key line for a non-secret provider (ollama)."""
     spec = _toml_spec(model="glm-5.2:cloud", alias="glm-5-codex")
-    body = openai_toml_body(spec, "/home/u/.codex/glm-5-codex.model.json")
+    body = openai_toml_body(spec)
     assert "env_key" not in body
 
 
@@ -996,7 +1012,7 @@ def test_openai_toml_profile_carries_env_key_for_a_secret_provider():
     spec = build_spec(
         agent="codex", provider=_secret_toml_provider(), model="m", alias="x"
     )
-    body = openai_toml_body(spec, "/x.json")
+    body = openai_toml_body(spec)
     assert 'env_key = "SECRET_API_KEY"' in body
 
 
@@ -1028,54 +1044,31 @@ def test_an_existing_ollama_wrapper_reinstalls_as_a_no_op(tmp_path):
 
 
 @pytest.mark.unit
-def test_openai_catalog_body_has_context_window_for_unknown_model():
-    """The catalog gives Codex a context window for models it does not know."""
-    import json
+def test_openai_toml_body_never_carries_base_instructions_or_catalog_path():
+    """REGRESSION: no ``base_instructions``/catalog line, in any form.
 
+    Codex's ``ModelInfo::get_model_instructions`` returns ``base_instructions``
+    verbatim as the session's real system prompt when no ``model_messages``
+    template is set — an empty synthesized value is not "no override", it IS
+    the (empty) instructions, and a matched catalog entry never falls back to
+    Codex's own bundled prompt (``used_fallback_model_metadata`` is only set
+    for an UNMATCHED slug). The old catalog wrote exactly this. Pin that the
+    profile carries no path to any such catalog and the string never appears.
+    """
     spec = _toml_spec(model="glm-5.2:cloud")
-    payload = json.loads(openai_catalog_body(spec))
-    assert payload["version"] == 1
-    entry = payload["models"][0]
-    assert entry["slug"] == "glm-5.2:cloud"
-    assert entry["context_window"] >= 1
-
-
-@pytest.mark.unit
-def test_openai_catalog_body_carries_every_required_modelinfo_field():
-    """The catalog entry carries every field Codex's ``ModelInfo`` load
-    actually requires (verified against codex-rs/protocol/src/openai_models.rs
-    and the live v0.149.1 binary): the serde-mandatory fields fail the load
-    with "missing field" when absent, and ``base_instructions`` is required by
-    the legacy-merge validator even though serde defaults it. The minimal
-    ``{id, name, context_window}`` body the old catalog shipped was missing
-    both classes — a second startup error that stayed hidden behind the
-    wire_api one."""
-    import json
-
-    spec = _toml_spec(model="glm-5.2:cloud")
-    entry = json.loads(openai_catalog_body(spec))["models"][0]
-    required = {
-        "slug",
-        "display_name",
-        "base_instructions",  # codex >= 0.149 rejects a model without it
-        "supported_reasoning_levels",
-        "shell_type",
-        "visibility",
-        "supported_in_api",
-        "priority",
-        "support_verbosity",
-        "truncation_policy",
-        "experimental_supported_tools",
-    }
-    assert required <= entry.keys()
-    assert entry["truncation_policy"] == {
-        "mode": "tokens",
-        "limit": entry["context_window"],
-    }
+    body = openai_toml_body(spec)
+    assert "model_catalog_json" not in body
+    assert "base_instructions" not in body
+    assert ".model.json" not in body
 
 
 @pytest.mark.integration
-def test_install_openai_toml_writes_three_files(tmp_path):
+def test_install_openai_toml_writes_two_files_no_catalog(tmp_path):
+    """REGRESSION: install writes only the wrapper + TOML profile — no
+    ``<alias>.model.json`` catalog (see ``openai_toml_body`` for why: an
+    empty synthesized ``base_instructions`` would silently replace Codex's
+    real system prompt for every wrapper reading it).
+    """
     paths = Paths.from_home(tmp_path)
     spec = _toml_spec()
 
@@ -1083,19 +1076,17 @@ def test_install_openai_toml_writes_three_files(tmp_path):
 
     assert paths.script_for("glm-5-codex").exists()
     assert paths.codex_config_for("glm-5-codex").exists()
-    assert paths.codex_catalog_for("glm-5-codex").exists()
-    # The wrapper is executable; the config/catalog are owner-only (no token,
-    # but they are our generated config — 0o600, not 0o755).
+    assert not paths.codex_catalog_for("glm-5-codex").exists()
+    # The wrapper is executable; the config is owner-only (no token,
+    # but it is our generated config — 0o600, not 0o755).
     assert stat.S_IMODE(paths.script_for("glm-5-codex").stat().st_mode) & stat.S_IXUSR
     config_mode = stat.S_IMODE(paths.codex_config_for("glm-5-codex").stat().st_mode)
     assert config_mode == 0o600
-    catalog_mode = stat.S_IMODE(paths.codex_catalog_for("glm-5-codex").stat().st_mode)
-    assert catalog_mode == 0o600
 
 
 @pytest.mark.integration
-def test_install_openai_toml_is_idempotent_across_three_files(tmp_path):
-    """A byte-identical re-install of all three files is a no-op."""
+def test_install_openai_toml_is_idempotent_across_two_files(tmp_path):
+    """A byte-identical re-install of both files is a no-op."""
     paths = Paths.from_home(tmp_path)
     spec = _toml_spec()
 
@@ -1104,6 +1095,55 @@ def test_install_openai_toml_is_idempotent_across_three_files(tmp_path):
 
     assert first is True
     assert second is False
+
+
+@pytest.mark.integration
+def test_install_openai_toml_cleans_up_a_stale_catalog_from_a_prior_version(
+    tmp_path,
+):
+    """MIGRATION: a marker-owned ``<alias>.model.json`` left by a previous
+    version of this tool (before the catalog write was removed) is deleted on
+    the very next install under the SAME alias — not just on a shape switch
+    away from OPENAI_TOML. Leaving it would mean a user who re-installs to
+    pick up this fix still has the empty-``base_instructions`` catalog sitting
+    on disk, one stray ``model_catalog_json`` hand-edit away from being read
+    again.
+    """
+    import json
+
+    paths = Paths.from_home(tmp_path)
+    spec = _toml_spec(model="glm-5.2:cloud", alias="glm-5-codex")
+    install_wrapper(paths, spec)
+    stale_catalog = paths.codex_catalog_for("glm-5-codex")
+    stale_catalog.parent.mkdir(parents=True, exist_ok=True)
+    stale_catalog.write_text(
+        json.dumps({"version": 1, "managed_by": "codehelper", "models": []}),
+        encoding="utf-8",
+    )
+    assert stale_catalog.exists()
+
+    wrote = install_wrapper(paths, spec)
+
+    assert wrote is True  # the cleanup alone counts as a change
+    assert not stale_catalog.exists()
+
+
+@pytest.mark.integration
+def test_install_openai_toml_leaves_a_foreign_catalog_alone(tmp_path):
+    """A hand-curated catalog with no ``managed_by`` marker is NOT swept up
+    by the migration cleanup — only a catalog this tool can prove it wrote
+    is ever deleted without ``--force``.
+    """
+    paths = Paths.from_home(tmp_path)
+    spec = _toml_spec(model="glm-5.2:cloud", alias="glm-5-codex")
+    foreign_catalog = paths.codex_catalog_for("glm-5-codex")
+    foreign_catalog.parent.mkdir(parents=True, exist_ok=True)
+    foreign_catalog.write_text('{"hand": "curated"}', encoding="utf-8")
+
+    install_wrapper(paths, spec)
+
+    assert foreign_catalog.exists()
+    assert foreign_catalog.read_text(encoding="utf-8") == '{"hand": "curated"}'
 
 
 @pytest.mark.integration
@@ -1136,7 +1176,7 @@ def test_install_openai_toml_force_overwrites_foreign_config(tmp_path):
 
 
 @pytest.mark.integration
-def test_install_openai_toml_dry_run_writes_nothing_and_lists_three(tmp_path, capsys):
+def test_install_openai_toml_dry_run_writes_nothing_and_lists_two(tmp_path, capsys):
     paths = Paths.from_home(tmp_path)
     spec = _toml_spec()
 
@@ -1147,10 +1187,10 @@ def test_install_openai_toml_dry_run_writes_nothing_and_lists_three(tmp_path, ca
     assert not paths.codex_catalog_for("glm-5-codex").exists()
     out = capsys.readouterr().out
     assert "would write" in out
-    # All three intended writes are announced.
+    # Both intended writes are announced — no catalog.
     assert str(paths.script_for("glm-5-codex")) in out
     assert str(paths.codex_config_for("glm-5-codex")) in out
-    assert str(paths.codex_catalog_for("glm-5-codex")) in out
+    assert str(paths.codex_catalog_for("glm-5-codex")) not in out
 
 
 @pytest.mark.integration
@@ -1215,7 +1255,7 @@ def test_openai_toml_body_for_non_ollama_provider_pins_extension_point():
     renderer appends ``/`` only, so ``.../v1`` -> ``.../v1/`` not ``.../v1/v1/``).
     """
     spec = _acme_spec(model="acme-7b")
-    body = openai_toml_body(spec, "/home/u/.codex/acme-codex.model.json")
+    body = openai_toml_body(spec)
     assert 'model = "acme-7b"' in body
     assert 'model_provider = "acme-openai"' in body
     assert "[model_providers.acme-openai]" in body
@@ -1239,7 +1279,7 @@ def test_openai_toml_body_gemini_keeps_full_openai_root():
     spec = build_spec(
         agent="codex", provider="gemini", model="gemini-2.5-pro", alias="gem"
     )
-    body = openai_toml_body(spec, "/home/u/.codex/gem.model.json")
+    body = openai_toml_body(spec)
     assert 'model_provider = "gemini"' in body
     assert "[model_providers.gemini]" in body
     assert (
@@ -1257,7 +1297,7 @@ def test_openai_toml_body_quotes_wire_api():
     invalid TOML. Pin the quotes so a regression to a bare value is caught.
     """
     spec = _toml_spec()
-    body = openai_toml_body(spec, "/x.json")
+    body = openai_toml_body(spec)
     assert 'wire_api = "responses"' in body
     # The bare form must NOT appear anywhere.
     assert "wire_api = responses" not in body
@@ -1280,7 +1320,7 @@ def test_openai_toml_body_escapes_control_chars_and_stays_parseable():
 
     model = "weird\tname\nx"
     spec = _toml_spec(model=model)
-    body = openai_toml_body(spec, "/x.json")
+    body = openai_toml_body(spec)
     # No literal control chars inside the model string line.
     model_line = next(ln for ln in body.splitlines() if ln.startswith("model = "))
     assert "\n" not in model_line and "\t" not in model_line
@@ -1290,13 +1330,11 @@ def test_openai_toml_body_escapes_control_chars_and_stays_parseable():
 
 
 @pytest.mark.integration
-def test_install_openai_toml_refuses_foreign_catalog(tmp_path):
-    """A foreign catalog (no sibling profile marker) is not clobbered (F1-own).
-
-    The catalog is JSON with no comment marker; authorship is proven by the
-    sibling profile's marker. A catalog with no (or foreign) profile is NOT
-    ours, so the guard refuses without --force — closing the permissive
-    structural-JSON check the original shipped.
+def test_install_openai_toml_ignores_a_foreign_catalog(tmp_path):
+    """No renderer writes or checks a catalog any more, so a pre-existing
+    hand-curated ``<alias>.model.json`` (no ``managed_by`` marker — not one
+    this tool could have written) is neither read nor touched by install: it
+    is not our file's business any more, foreign or otherwise.
     """
     paths = Paths.from_home(tmp_path)
     spec = _toml_spec()
@@ -1307,12 +1345,11 @@ def test_install_openai_toml_refuses_foreign_catalog(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(CodeHelperError, match="refusing to overwrite"):
-        install_wrapper(paths, spec)
+    assert install_wrapper(paths, spec) is True
 
-    # Untouched — a hand-curated context_window was not silently flattened.
+    # Untouched — a hand-curated context_window was not touched.
     assert "hand-curated" in catalog.read_text(encoding="utf-8")
-    assert not paths.script_for("glm-5-codex").exists()
+    assert paths.script_for("glm-5-codex").exists()
 
 
 @pytest.mark.integration
@@ -1628,17 +1665,26 @@ def test_edit_token_preserves_the_base_url(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_shape_switch_cleans_up_orphaned_openai_toml_siblings(tmp_path):
-    """Reusing an alias for a non-OPENAI_TOML shape removes the old siblings (F8).
+    """Reusing an alias for a non-OPENAI_TOML shape removes the old profile,
+    and a stale catalog left by a PREVIOUS version of this tool (F8).
 
-    A previous OPENAI_TOML install leaves ``~/.codex/<alias>.*`` behind; the
-    new wrapper no longer dispatches ``codex --profile <alias>``, so those
-    files are orphans. Only OUR siblings (marker on the profile) are removed.
+    A previous OPENAI_TOML install leaves ``~/.codex/<alias>.config.toml``
+    behind; the new wrapper no longer dispatches ``codex --profile <alias>``,
+    so it is an orphan. The catalog is manufactured by hand — no renderer
+    writes one any more — to prove a leftover from before this fix is still
+    swept up on a shape switch. Only OUR siblings (marker/``managed_by``) are
+    removed.
     """
     paths = Paths.from_home(tmp_path)
     alias = "glm-5-codex"
     install_wrapper(paths, _toml_spec(model="glm-5.2:cloud", alias=alias))
     assert paths.codex_config_for(alias).exists()
-    assert paths.codex_catalog_for(alias).exists()
+    stale_catalog = paths.codex_catalog_for(alias)
+    stale_catalog.write_text(
+        '{"version": 1, "managed_by": "codehelper", "models": []}',
+        encoding="utf-8",
+    )
+    assert stale_catalog.exists()
 
     # Switch the alias to the launcher shape (claude × ollama via ollama-launch).
     launcher_spec = build_spec(
@@ -1653,7 +1699,7 @@ def test_shape_switch_cleans_up_orphaned_openai_toml_siblings(tmp_path):
     # The wrapper was rewritten; the orphaned siblings are gone.
     assert paths.script_for(alias).exists()
     assert not paths.codex_config_for(alias).exists()
-    assert not paths.codex_catalog_for(alias).exists()
+    assert not stale_catalog.exists()
 
 
 @pytest.mark.integration
@@ -1838,7 +1884,6 @@ def test_install_openai_toml_skip_still_cleans_orphaned_siblings_and_reports_it(
     alias = "glm-5-codex"
     install_wrapper(paths, _toml_spec(model="glm-5.2:cloud", alias=alias))
     assert paths.codex_config_for(alias).exists()
-    assert paths.codex_catalog_for(alias).exists()
 
     # Switch shapes once (this itself cleans up — assert a clean starting
     # point by re-manufacturing an orphaned sibling by hand afterwards).
@@ -1853,14 +1898,14 @@ def test_install_openai_toml_skip_still_cleans_orphaned_siblings_and_reports_it(
     assert not paths.codex_config_for(alias).exists()
 
     # Re-create an orphaned, OUR-marked profile by hand (simulating a leftover
-    # from an install that predates this cleanup, or a partial failure) with
-    # no matching catalog — the wrapper slot for a second install of the SAME
-    # launcher_spec is now byte-identical (SKIP).
+    # from an install that predates this cleanup, or a partial failure) —
+    # the wrapper slot for a second install of the SAME launcher_spec is now
+    # byte-identical (SKIP).
     from codehelper.services.render import openai_toml_body
 
     stray_profile = paths.codex_config_for(alias)
     stray_profile.write_text(
-        openai_toml_body(_toml_spec(alias=alias), "/nonexistent.json"),
+        openai_toml_body(_toml_spec(alias=alias)),
         encoding="utf-8",
     )
     assert stray_profile.exists()
@@ -1870,88 +1915,6 @@ def test_install_openai_toml_skip_still_cleans_orphaned_siblings_and_reports_it(
     # cleaned up — that must still be reported as a change.
     assert wrote is True
     assert not stray_profile.exists()
-
-
-@pytest.mark.integration
-def test_catalog_survives_missing_profile_on_reinstall(tmp_path):
-    """M4: our own catalog is NOT misclassified as foreign when the sibling
-    profile has been removed — it proves its own authorship via the
-    ``managed_by`` field in the JSON body, independent of the profile.
-    """
-    paths = Paths.from_home(tmp_path)
-    alias = "glm-5-codex"
-    install_wrapper(paths, _toml_spec(model="glm-5.2:cloud", alias=alias))
-
-    # Simulate losing the profile (user tidying ~/.codex, a sync conflict)
-    # while the catalog — which self-identifies — remains.
-    paths.codex_config_for(alias).unlink()
-    assert paths.codex_catalog_for(alias).exists()
-
-    # A re-install (any model) must NOT refuse the catalog as foreign.
-    wrote = install_wrapper(paths, _toml_spec(model="glm-5.3:cloud", alias=alias))
-    assert wrote is True
-    assert paths.codex_catalog_for(alias).exists()
-    assert paths.codex_config_for(alias).exists()  # profile rewritten too
-
-
-@pytest.mark.unit
-def test_openai_catalog_body_carries_managed_by_marker():
-    """M4: the catalog's own JSON body proves authorship without its sibling."""
-    import json
-
-    from codehelper.services.render import (
-        CATALOG_MANAGED_BY_KEY,
-        CATALOG_MANAGED_BY_VALUE,
-    )
-
-    spec = _toml_spec()
-    payload = json.loads(openai_catalog_body(spec))
-    assert payload[CATALOG_MANAGED_BY_KEY] == CATALOG_MANAGED_BY_VALUE
-
-
-@pytest.mark.integration
-def test_install_openai_toml_refuses_foreign_catalog_next_to_our_profile(tmp_path):
-    """Codex adversarial-review finding: a hand-curated catalog sitting next to
-    OUR already-installed, marker-carrying profile must NOT be silently
-    overwritten on a routine re-install.
-
-    Reproduces the exact reported scenario: install once (profile + catalog
-    both ours), hand-edit the catalog to a researched ``context_window`` (no
-    ``managed_by`` field — indistinguishable from a legacy pre-migration
-    catalog we wrote), then re-run the SAME install. Before this fix,
-    ``_ownership_catalog``'s sibling-profile fallback classified the catalog as
-    "ours" purely because the neighbouring profile carried our marker, so
-    ``_decide`` routed straight to WRITE — no ``OVERWRITE_FOREIGN``, no
-    ``--force`` prompt, no confirm — and the researched value was flattened
-    back to :data:`_DEFAULT_CONTEXT_WINDOW`. The catalog's ownership must now
-    be provable on its OWN (:func:`_ownership_catalog_marker`), matching the
-    guarantee :func:`_cleanup_openai_toml_siblings` already gives on delete
-    (see ``test_shape_switch_cleanup_leaves_a_legacy_catalog_with_no_self_marker``).
-    """
-    paths = Paths.from_home(tmp_path)
-    spec = _toml_spec(model="glm-5.2:cloud", alias="glm-5-codex")
-    install_wrapper(paths, spec)
-    assert paths.codex_config_for("glm-5-codex").exists()  # profile is ours
-
-    # Hand-curate the catalog with a researched context_window — no managed_by.
-    catalog = paths.codex_catalog_for("glm-5-codex")
-    catalog.write_text(
-        '{"version": 1, "models": [{"id": "hand-curated", "context_window": 999999}]}',
-        encoding="utf-8",
-    )
-
-    # A routine re-install of the SAME spec must refuse the catalog, not
-    # silently flatten it — same guard as any other foreign file.
-    with pytest.raises(CodeHelperError, match="refusing to overwrite"):
-        install_wrapper(paths, spec)
-
-    survived = catalog.read_text(encoding="utf-8")
-    assert "hand-curated" in survived
-    assert "999999" in survived
-
-    # --force still recovers the normal way, same as the other two slots.
-    assert install_wrapper(paths, spec, force=True) is True
-    assert "hand-curated" not in catalog.read_text(encoding="utf-8")
 
 
 @pytest.mark.unit
@@ -2183,7 +2146,14 @@ def test_remove_wrapper_survives_a_failed_sibling_unlink(tmp_path, monkeypatch):
     install_wrapper(paths, spec)
     set_default_wrapper(paths, "codex", spec.alias)
 
+    # No renderer writes a catalog any more; manufacture a legacy, marker-
+    # owned one by hand so its unlink is still exercised — the same leftover
+    # `_cleanup_stale_catalog` targets on a fresh install.
     catalog = paths.codex_catalog_for(spec.alias)
+    catalog.write_text(
+        '{"version": 1, "managed_by": "codehelper", "models": []}',
+        encoding="utf-8",
+    )
     real_unlink = Path.unlink
 
     def flaky_unlink(self, *a, **kw):

@@ -38,7 +38,9 @@ def _patch(**overrides) -> DefaultPatch:
         display_name="local Ollama daemon",
         base_url="http://127.0.0.1:11434/v1/",
         wire_api="responses",
-        catalog_json="/home/user/.codex/model.json",
+        # glm-5.2:cloud resolves in MODEL_CONTEXT_WINDOWS (1M) — matches
+        # resolve_default_patch's real behavior for this model.
+        context_window=1_000_000,
     )
     base.update(overrides)
     return DefaultPatch(**base)
@@ -54,11 +56,59 @@ def test_patch_from_scratch_when_file_absent():
     result = patch_config_toml("", _patch())
     assert 'model = "glm-5.2:cloud"' in result
     assert 'model_provider = "ollama"' in result
-    assert 'model_catalog_json = "/home/user/.codex/model.json"' in result
+    assert "model_catalog_json" not in result
+    assert "model_context_window = 1000000" in result
     assert "[model_providers.ollama]" in result
     assert 'name = "local Ollama daemon"' in result
     assert 'base_url = "http://127.0.0.1:11434/v1/"' in result
     assert 'wire_api = "responses"' in result
+
+
+@pytest.mark.unit
+def test_patch_omits_context_window_for_unknown_model():
+    """No guessed window — an unrecognized model gets no declaration at all."""
+    result = patch_config_toml(
+        "", _patch(model="some-unknown-model", context_window=None)
+    )
+    assert "model_context_window" not in result
+    assert "model_catalog_json" not in result
+
+
+@pytest.mark.unit
+def test_patch_scrubs_a_stale_model_catalog_json_line():
+    """MIGRATION: a ``model_catalog_json`` line left by a previous version of
+    this tool (before the catalog write was removed) is DELETED by the next
+    patch, not merely left alone or overwritten with a new value — the whole
+    point is that no line pointing at that catalog survives.
+    """
+    original = (
+        'model = "old-model"\n'
+        'model_provider = "ollama"\n'
+        'model_catalog_json = "/home/user/.codex/model.json"\n'
+        "\n"
+        "[model_providers.ollama]\n"
+        'name = "old"\n'
+        'base_url = "http://old/v1/"\n'
+        'wire_api = "chat"\n'
+    )
+    result = patch_config_toml(original, _patch())
+    assert "model_catalog_json" not in result
+    assert 'model = "glm-5.2:cloud"' in result
+
+
+@pytest.mark.unit
+def test_patch_removes_context_window_when_new_model_is_unknown():
+    """set-default onto a known 1M model, then onto an unknown one, must
+    REMOVE the stale window line — otherwise codex carries an oversized
+    window into a session whose real window may be far smaller.
+    """
+    with_window = patch_config_toml("", _patch())
+    assert "model_context_window = 1000000" in with_window
+
+    without_window = patch_config_toml(
+        with_window, _patch(model="some-unknown-model", context_window=None)
+    )
+    assert "model_context_window" not in without_window
 
 
 @pytest.mark.unit
@@ -84,7 +134,8 @@ def test_patch_replaces_existing_top_level_keys_in_place_not_duplicated():
     result = patch_config_toml(original, _patch())
     assert result.count("model = ") == 1
     assert result.count("model_provider = ") == 1
-    assert result.count("model_catalog_json = ") == 1
+    # A stale model_catalog_json line is scrubbed, not replaced.
+    assert result.count("model_catalog_json = ") == 0
     assert '"old-model"' not in result
     assert "# a comment above" in result
     assert "# a comment below" in result
@@ -210,7 +261,7 @@ def test_patch_appends_table_with_exactly_one_blank_line_regardless_of_trailing_
 
 @pytest.mark.unit
 def test_patch_handles_a_model_value_with_a_control_character():
-    """A ``--model``/``--catalog-json`` value containing a control character
+    """A ``--model`` value containing a control character
 
     (which ``toml_string`` encodes as ``\\uXXXX``) must not crash the
     in-place-replacement path: ``re.subn`` treats a plain string replacement
@@ -258,7 +309,7 @@ def test_resolve_default_patch_rejects_claude():
     # "cannot use shape" message (it DOES share OTHER shapes with ollama,
     # just not this one), the same error `add --shape openai-toml` would hit.
     with pytest.raises(CodeHelperError, match="cannot use shape openai-toml"):
-        resolve_default_patch(CLAUDE, OLLAMA, "glm-5.2:cloud", "/x/model.json")
+        resolve_default_patch(CLAUDE, OLLAMA, "glm-5.2:cloud")
 
 
 @pytest.mark.unit
@@ -270,7 +321,7 @@ def test_resolve_default_patch_rejects_launch_only_agent():
     with pytest.raises(
         CodeHelperError, match="cannot use shape openai-toml.*ollama-launch"
     ):
-        resolve_default_patch(opencode, OLLAMA, "glm-5.2:cloud", "/x/model.json")
+        resolve_default_patch(opencode, OLLAMA, "glm-5.2:cloud")
 
 
 @pytest.mark.unit
@@ -283,16 +334,23 @@ def test_resolve_default_patch_rejects_missing_wire_api():
         # this object is constructed directly, not through PROVIDERS.
     )
     with pytest.raises(CodeHelperError, match="invalid wire_api"):
-        resolve_default_patch(CODEX, bad_provider, "glm-5.2:cloud", "/x/model.json")
+        resolve_default_patch(CODEX, bad_provider, "glm-5.2:cloud")
 
 
 @pytest.mark.unit
 def test_resolve_default_patch_ok_for_codex_ollama():
-    result = resolve_default_patch(CODEX, OLLAMA, "glm-5.2:cloud", "/x/model.json")
+    result = resolve_default_patch(CODEX, OLLAMA, "glm-5.2:cloud")
     assert result.model == "glm-5.2:cloud"
     assert result.provider_table == "ollama"
     assert result.base_url == "http://127.0.0.1:11434/v1/"
     assert result.wire_api == "responses"
+    assert result.context_window == 1_000_000
+
+
+@pytest.mark.unit
+def test_resolve_default_patch_omits_context_window_for_unknown_model():
+    result = resolve_default_patch(CODEX, OLLAMA, "some-unknown-model")
+    assert result.context_window is None
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +371,6 @@ def test_set_default_dry_run_writes_nothing(tmp_path):
     assert wrote is True  # would-write is still "there's a change"
     assert not paths.codex_main_config().exists()
     assert not paths.codex_main_config_backup(1).exists()
-    assert not (paths.codex_dir / "model.json").exists()
 
 
 @pytest.mark.integration
@@ -332,27 +389,6 @@ def test_set_default_dry_run_never_prompts_or_refuses_without_force(tmp_path):
     assert wrote is True
     assert not paths.codex_main_config().exists()
     assert not paths.codex_main_config_backup(1).exists()
-    assert not (paths.codex_dir / "model.json").exists()
-
-
-@pytest.mark.integration
-def test_set_default_catalog_dry_run_never_refuses_a_foreign_catalog(tmp_path):
-    """Same contract as above, for the catalog's own ownership guard: a
-
-    hand-curated (foreign) ``model.json`` must not turn ``--dry-run`` into a
-    refusal.
-    """
-    paths = Paths.from_home(tmp_path)
-    _install(paths, force=True)  # config side already a no-op below
-
-    catalog_path = paths.codex_dir / "model.json"
-    catalog_path.write_text('{"hand": "curated"}', encoding="utf-8")
-
-    wrote = apply_set_default(
-        paths, agent=CODEX, provider=OLLAMA, model="glm-5.2:cloud", dry_run=True
-    )
-    assert wrote is True
-    assert catalog_path.read_text(encoding="utf-8") == '{"hand": "curated"}'
 
 
 @pytest.mark.integration
@@ -380,12 +416,11 @@ def test_set_default_second_noop_run_does_not_recreate_backup(tmp_path):
     _install(paths)
     backup_after_first = paths.codex_main_config_backup(1).read_text(encoding="utf-8")
 
-    wrote = _install(paths)  # identical args — true no-op on the config side
+    wrote = _install(paths)  # identical args — true no-op
     assert (
         paths.codex_main_config_backup(1).read_text(encoding="utf-8")
         == backup_after_first
     )
-    # The catalog write is also idempotent by this point, so overall no-op.
     assert wrote is False
 
 
@@ -434,521 +469,6 @@ def test_set_default_force_writes_on_non_tty(tmp_path):
     wrote = _install(paths, force=True)
     assert wrote is True
     assert paths.codex_main_config().exists()
-
-
-@pytest.mark.integration
-def test_set_default_writes_catalog_and_refuses_a_foreign_one(tmp_path):
-    paths = Paths.from_home(tmp_path)
-    # First establish the config side with --force so it is already a no-op
-    # on the next call — isolates the assertion to the CATALOG refusal path.
-    _install(paths, force=True)
-
-    catalog_path = paths.codex_dir / "model.json"
-    catalog_path.write_text('{"hand": "curated"}', encoding="utf-8")
-
-    with pytest.raises(CodeHelperError, match="refusing to overwrite"):
-        _install(paths, force=False)
-    assert catalog_path.read_text(encoding="utf-8") == '{"hand": "curated"}'
-
-    _install(paths, force=True)
-    assert "hand" not in catalog_path.read_text(encoding="utf-8")
-
-
-@pytest.mark.integration
-def test_set_default_leaves_config_untouched_when_catalog_write_is_refused(
-    tmp_path,
-):
-    """If the catalog write refuses (foreign catalog, no ``--force``),
-
-    ``config.toml`` must be left exactly as it was before this call — no
-    half-applied state where the config already points at
-    ``model_catalog_json`` but the catalog itself was never updated. The
-    catalog is the referenced artifact, so it must be written/verified
-    BEFORE config.toml is patched, not after.
-    """
-    paths = Paths.from_home(tmp_path)
-    paths.codex_main_config().parent.mkdir(parents=True, exist_ok=True)
-    original_config = 'some_other_key = "x"\n'
-    paths.codex_main_config().write_text(original_config, encoding="utf-8")
-
-    catalog_path = paths.codex_dir / "model.json"
-    catalog_path.write_text('{"hand": "curated"}', encoding="utf-8")
-
-    with pytest.raises(CodeHelperError, match="refusing to overwrite"):
-        _install(paths, force=False)
-
-    # Neither file changed, and no backup was rotated — the config write
-    # never happened because the catalog it depends on was refused first.
-    assert paths.codex_main_config().read_text(encoding="utf-8") == original_config
-    assert catalog_path.read_text(encoding="utf-8") == '{"hand": "curated"}'
-    assert not paths.codex_main_config_backup(1).exists()
-
-
-@pytest.mark.integration
-def test_set_default_catalog_overwrite_of_managed_catalog_requires_confirm(tmp_path):
-    """A SECOND ``set-default`` overwriting our OWN previously-managed
-
-    catalog (the common "change the default model" case, not a foreign file)
-    must still go through the confirm/force gate — round 1 only gated
-    FOREIGN catalogs, so a normal model switch silently clobbered the
-    previous default's catalog with zero confirmation and zero backup.
-    """
-    paths = Paths.from_home(tmp_path)
-    _install(paths, model="glm-4.7", force=True)
-    catalog_path = paths.codex_dir / "model.json"
-    assert "glm-4.7" in catalog_path.read_text(encoding="utf-8")
-
-    with pytest.raises(CodeHelperError, match="refusing without confirmation"):
-        _install(paths, model="glm-5.2:cloud", force=False)
-    # Refused before any write — the previous catalog survives untouched.
-    assert "glm-4.7" in catalog_path.read_text(encoding="utf-8")
-
-
-@pytest.mark.integration
-def test_set_default_restore_also_restores_the_paired_catalog(tmp_path):
-    """``--restore`` must undo BOTH halves of a ``set-default`` — config.toml
-
-    AND the catalog it references — or a restored config can end up pointing
-    at ``model_catalog_json`` while the catalog itself still describes the
-    model the restore was supposed to move away from.
-    """
-    paths = Paths.from_home(tmp_path)
-    _install(paths, model="glm-4.7", force=True)
-    catalog_path = paths.codex_dir / "model.json"
-    assert "glm-4.7" in catalog_path.read_text(encoding="utf-8")
-
-    _install(paths, model="glm-5.2:cloud", force=True)
-    assert "glm-5.2" in catalog_path.read_text(encoding="utf-8")
-    assert "glm-4.7" not in catalog_path.read_text(encoding="utf-8")
-
-    restore_default(paths, slot=1, force=True)
-
-    config_text = paths.codex_main_config().read_text(encoding="utf-8")
-    catalog_text = catalog_path.read_text(encoding="utf-8")
-    assert "glm-4.7" in config_text
-    assert "glm-5.2" not in config_text
-    # The catalog must match what the restored config now claims — NOT still
-    # describe the model set-default was just undone away from.
-    assert "glm-4.7" in catalog_text
-    assert "glm-5.2" not in catalog_text
-
-
-@pytest.mark.integration
-def test_set_default_refuses_stale_catalog_snapshot(tmp_path, monkeypatch):
-    """A catalog edited after the gate snapshot must not be silently clobbered.
-
-    The lock serializes codehelper's own ``set-default`` calls, but a hand-edit
-    (or another tool) landing between ``_gate_catalog_write``'s read and the
-    commit would otherwise be overwritten from the stale snapshot — the same
-    stale-write race the config.toml re-check already closes.
-    """
-    from codehelper.services import codex_default
-
-    paths = Paths.from_home(tmp_path)
-    _install(paths, model="glm-4.7", force=True)
-    catalog_path = paths.codex_dir / "model.json"
-
-    real_gate = codex_default._gate_catalog_write
-
-    def _gate_then_edit(
-        patch, agent, provider, catalog_path, *, dry_run, force, confirm
-    ):
-        plan = real_gate(
-            patch,
-            agent,
-            provider,
-            catalog_path,
-            dry_run=dry_run,
-            force=force,
-            confirm=confirm,
-        )
-        # Simulate a concurrent hand-edit landing after the gate snapshot.
-        catalog_path.write_text('{"hand": "edited"}', encoding="utf-8")
-        return plan
-
-    monkeypatch.setattr(codex_default, "_gate_catalog_write", _gate_then_edit)
-
-    with pytest.raises(CodeHelperError, match="stale catalog snapshot"):
-        _install(paths, model="glm-5.2:cloud", force=True)
-    # The concurrent edit survives — nothing was clobbered.
-    assert catalog_path.read_text(encoding="utf-8") == '{"hand": "edited"}'
-
-
-@pytest.mark.integration
-def test_set_default_rolls_back_catalog_when_config_write_fails(tmp_path, monkeypatch):
-    """A failed config.toml write must not leave the catalog half-updated.
-
-    The catalog is committed first; if the config write then fails (disk full,
-    permissions, read-only FS), the catalog is rolled back so the pair cannot
-    be left inconsistent.
-    """
-    from codehelper.services import codex_default
-
-    paths = Paths.from_home(tmp_path)
-    _install(paths, model="glm-4.7", force=True)
-    catalog_path = paths.codex_dir / "model.json"
-    original_catalog = catalog_path.read_text(encoding="utf-8")
-
-    real_atomic_write = codex_default.atomic_write
-
-    def _fail_config_write(path, content, mode=None):
-        if path == paths.codex_main_config():
-            raise OSError("disk full")
-        return real_atomic_write(path, content, mode=mode)
-
-    monkeypatch.setattr(codex_default, "atomic_write", _fail_config_write)
-
-    with pytest.raises(OSError, match="disk full"):
-        _install(paths, model="glm-5.2:cloud", force=True)
-    # The catalog was rolled back to its pre-write content.
-    assert catalog_path.read_text(encoding="utf-8") == original_catalog
-
-
-@pytest.mark.integration
-def test_set_default_reports_when_catalog_rollback_also_fails(tmp_path, monkeypatch):
-    """A rollback failure must surface BOTH failures, not silently replace one.
-
-    If the config.toml write fails and the catalog rollback meant to undo the
-    already-committed catalog write ALSO fails, the caller must be told the
-    pair is left inconsistent — not just see the rollback's own OSError with
-    no indication the original config write (or the pair mismatch) happened.
-    """
-    from codehelper.services import codex_default
-
-    paths = Paths.from_home(tmp_path)
-    _install(paths, model="glm-4.7", force=True)
-    catalog_path = paths.codex_dir / "model.json"
-    original_catalog = catalog_path.read_text(encoding="utf-8")
-
-    real_atomic_write = codex_default.atomic_write
-    calls = {"catalog_writes": 0}
-
-    def _fail_config_then_rollback(path, content, mode=None):
-        if path == paths.codex_main_config():
-            raise OSError("disk full")
-        if path == catalog_path:
-            calls["catalog_writes"] += 1
-            if calls["catalog_writes"] == 2:
-                # The 2nd catalog write is the rollback attempt.
-                raise OSError("rollback also failed: read-only FS")
-        return real_atomic_write(path, content, mode=mode)
-
-    monkeypatch.setattr(codex_default, "atomic_write", _fail_config_then_rollback)
-
-    with pytest.raises(CodeHelperError, match="disk full") as excinfo:
-        _install(paths, model="glm-5.2:cloud", force=True)
-    # Both the original failure and the rollback failure must be visible.
-    assert "rollback also failed" in str(excinfo.value)
-    assert "inconsistent" in str(excinfo.value)
-    # The catalog was left in the NEW (unrolled-back) state — the error must
-    # not claim a successful rollback.
-    assert catalog_path.read_text(encoding="utf-8") != original_catalog
-
-
-@pytest.mark.integration
-def test_restore_reports_when_config_rollback_also_fails(tmp_path, monkeypatch):
-    """Same double-failure guard on the ``restore_default`` rollback path."""
-    from codehelper.services import codex_default
-
-    paths = Paths.from_home(tmp_path)
-    _install(paths, model="glm-4.7", force=True)
-    _install(paths, model="glm-5.2:cloud", force=True)
-    config_path = paths.codex_main_config()
-    original_config = config_path.read_text(encoding="utf-8")
-
-    real_atomic_write = codex_default.atomic_write
-    calls = {"config_writes": 0}
-
-    def _fail_catalog_then_rollback(path, content, mode=None):
-        if path == config_path:
-            calls["config_writes"] += 1
-            if calls["config_writes"] == 2:
-                raise OSError("rollback also failed: read-only FS")
-            return real_atomic_write(path, content, mode=mode)
-        if path == paths.codex_dir / "model.json":
-            raise OSError("disk full")
-        return real_atomic_write(path, content, mode=mode)
-
-    monkeypatch.setattr(codex_default, "atomic_write", _fail_catalog_then_rollback)
-
-    with pytest.raises(CodeHelperError, match="disk full") as excinfo:
-        restore_default(paths, slot=1, force=True)
-    assert "rollback also failed" in str(excinfo.value)
-    assert "inconsistent" in str(excinfo.value)
-    # config.toml was left in the RESTORED state — the error must not claim a
-    # successful rollback.
-    assert config_path.read_text(encoding="utf-8") != original_config
-
-
-@pytest.mark.integration
-def test_set_default_reports_post_replace_catalog_write_failure(tmp_path, monkeypatch):
-    """A CATALOG write failing AFTER its content already landed must be
-
-    surfaced clearly, not let the raw post-replace exception propagate as if
-    nothing had happened. ``atomic_write`` performs ``os.replace`` (which
-    commits the new content) before an optional trailing ``chmod`` — a
-    chmod-stage failure raises, but the content is already committed. Before
-    the fix, ``catalog_wrote = _commit_catalog_write(catalog_plan)`` never
-    completed its assignment when the call raised, so the surrounding
-    ``except`` block (which needs ``catalog_wrote`` to decide whether to roll
-    back) was never even reached — the exception propagated straight out of
-    ``apply_set_default`` with no framing, despite the catalog content having
-    actually been replaced.
-    """
-    from codehelper.services import codex_default
-
-    paths = Paths.from_home(tmp_path)
-    _install(paths, model="glm-4.7", force=True)
-    catalog_path = paths.codex_dir / "model.json"
-
-    real_atomic_write = codex_default.atomic_write
-
-    def _write_then_fail_post_replace(path, content, mode=None):
-        if path == catalog_path:
-            # Simulate atomic_write's os.replace succeeding (content lands)
-            # and then its trailing chmod raising.
-            path.write_text(content, encoding="utf-8")
-            raise OSError("chmod failed: operation not permitted")
-        return real_atomic_write(path, content, mode=mode)
-
-    monkeypatch.setattr(codex_default, "atomic_write", _write_then_fail_post_replace)
-
-    with pytest.raises(CodeHelperError, match="chmod failed") as excinfo:
-        _install(paths, model="glm-5.2:cloud", force=True)
-    # The error must say the catalog's committed state is now uncertain,
-    # rather than silently proceeding as if the catalog write never landed.
-    assert "may or may not" in str(excinfo.value)
-    # The content actually DID land (os.replace succeeded before chmod
-    # raised) — config.toml must NOT have been written on top of it.
-    config_path = paths.codex_main_config()
-    assert "glm-4.7" in config_path.read_text(encoding="utf-8")
-
-
-@pytest.mark.integration
-def test_restore_attempts_rollback_when_config_write_fails_post_replace(
-    tmp_path, monkeypatch
-):
-    """A CONFIG restore write failing AFTER its content already landed must
-
-    still be tracked as written, so the ``except`` block's rollback gate
-    (``if config_wrote and plan.catalog_changed``) correctly fires a rollback
-    ATTEMPT. ``atomic_write`` performs ``os.replace`` (which commits the new
-    content) before an optional trailing ``chmod`` — a chmod-stage failure
-    raises, but the content is already committed. Before the fix,
-    ``config_wrote = True`` was only set once ``atomic_write`` returned
-    cleanly, so this exact failure left ``config_wrote`` at ``False`` and
-    the rollback attempt below was skipped entirely — the raw chmod OSError
-    propagated with no framing and no attempt to reconcile the pair, despite
-    config.toml having already been overwritten with the restored content.
-    """
-    from codehelper.services import codex_default
-
-    paths = Paths.from_home(tmp_path)
-    _install(paths, model="glm-4.7", force=True)
-    _install(paths, model="glm-5.2:cloud", force=True)
-    config_path = paths.codex_main_config()
-
-    real_atomic_write = codex_default.atomic_write
-
-    def _write_then_fail_post_replace(path, content, mode=None):
-        if path == config_path:
-            path.write_text(content, encoding="utf-8")
-            raise OSError("chmod failed: operation not permitted")
-        return real_atomic_write(path, content, mode=mode)
-
-    monkeypatch.setattr(codex_default, "atomic_write", _write_then_fail_post_replace)
-
-    # The rollback write also goes through the same (always-failing) mock,
-    # so the double-failure path fires — proving the rollback was ATTEMPTED
-    # (config_wrote was correctly True), which is what this test guards.
-    with pytest.raises(CodeHelperError, match="rolling back") as excinfo:
-        restore_default(paths, slot=1, force=True)
-    assert "inconsistent" in str(excinfo.value)
-
-
-@pytest.mark.integration
-def test_restore_ignores_catalog_change_when_catalog_not_restored(
-    tmp_path, monkeypatch
-):
-    """A concurrent hand-edit to the catalog must not abort a config-only restore.
-
-    When the catalog is not going to be restored (no catalog backup at the
-    slot), its staleness is irrelevant — the mandatory config.toml restore must
-    proceed.
-    """
-    from codehelper.services import codex_default
-
-    paths = Paths.from_home(tmp_path)
-    _install(paths, model="glm-4.7", force=True)
-    catalog_path = paths.codex_dir / "model.json"
-    assert catalog_path.exists()
-
-    def _edit_catalog(plan, *, force, confirm):
-        catalog_path.write_text('{"hand": "edited"}', encoding="utf-8")
-
-    monkeypatch.setattr(codex_default, "_confirm_restore", _edit_catalog)
-
-    restore_default(paths, slot=1, force=True)
-    assert "glm-4.7" not in paths.codex_main_config().read_text(encoding="utf-8")
-
-
-@pytest.mark.integration
-def test_restore_still_refuses_catalog_change_when_catalog_restored(
-    tmp_path, monkeypatch
-):
-    """The catalog stale-check is preserved when the catalog IS being restored.
-
-    Gating the check on ``catalog_changed`` must not weaken it for the case it
-    exists to protect — a concurrent catalog edit still aborts a restore that
-    would overwrite that catalog.
-    """
-    from codehelper.services import codex_default
-
-    paths = Paths.from_home(tmp_path)
-    _install(paths, model="glm-4.7", force=True)
-    _install(paths, model="glm-5.2:cloud", force=True)
-    _install(paths, model="glm-5.3:cloud", force=True)
-    catalog_path = paths.codex_dir / "model.json"
-
-    def _edit_catalog(plan, *, force, confirm):
-        catalog_path.write_text('{"hand": "edited"}', encoding="utf-8")
-
-    monkeypatch.setattr(codex_default, "_confirm_restore", _edit_catalog)
-
-    with pytest.raises(CodeHelperError, match="changed since it was read"):
-        restore_default(paths, slot=2, force=True)
-
-
-@pytest.mark.integration
-def test_restore_rolls_back_config_when_catalog_write_fails(tmp_path, monkeypatch):
-    """A failed catalog write must not leave config.toml half-restored.
-
-    config.toml is written first; if the catalog write then fails, the config
-    is rolled back so the pair cannot be left inconsistent.
-    """
-    from codehelper.services import codex_default
-
-    paths = Paths.from_home(tmp_path)
-    _install(paths, model="glm-4.7", force=True)
-    _install(paths, model="glm-5.2:cloud", force=True)
-    _install(paths, model="glm-5.3:cloud", force=True)
-    catalog_path = paths.codex_dir / "model.json"
-    config_path = paths.codex_main_config()
-    current_config = config_path.read_text(encoding="utf-8")
-
-    real_atomic_write = codex_default.atomic_write
-
-    def _fail_catalog_write(path, content, mode=None):
-        if path == catalog_path:
-            raise OSError("disk full")
-        return real_atomic_write(path, content, mode=mode)
-
-    monkeypatch.setattr(codex_default, "atomic_write", _fail_catalog_write)
-
-    with pytest.raises(OSError, match="disk full"):
-        restore_default(paths, slot=2, force=True)
-    # config.toml was rolled back to its pre-restore content.
-    assert config_path.read_text(encoding="utf-8") == current_config
-
-
-@pytest.mark.integration
-def test_set_default_restore_declining_catalog_leaves_both_files_untouched(
-    tmp_path,
-):
-    """A declined CATALOG confirm during ``--restore`` must not leave
-
-    config.toml already restored — both files must be gated BEFORE either is
-    written, or a declined catalog restore leaves config.toml pointing at
-    ``model_catalog_json`` while the catalog itself still describes the
-    model the restore was supposed to move away from (and, since
-    ``restore_default`` does not itself back up ``current`` before
-    overwriting, the pre-restore config would be unrecoverable).
-    """
-    paths = Paths.from_home(tmp_path)
-    _install(paths, model="glm-4.7", force=True)
-    _install(paths, model="glm-5.2:cloud", force=True)
-
-    config_before = paths.codex_main_config().read_text(encoding="utf-8")
-    catalog_path = paths.codex_dir / "model.json"
-    catalog_before = catalog_path.read_text(encoding="utf-8")
-
-    calls = []
-
-    def _accept_config_decline_catalog(path, preview):
-        calls.append(path)
-        return path == paths.codex_main_config()
-
-    with pytest.raises(CodeHelperError, match="refusing without confirmation"):
-        restore_default(paths, slot=1, confirm=_accept_config_decline_catalog)
-
-    # BOTH confirms were asked (proves the gate-both-first ordering), and
-    # NEITHER file was written despite the config confirm being accepted.
-    assert len(calls) == 2
-    assert paths.codex_main_config().read_text(encoding="utf-8") == config_before
-    assert catalog_path.read_text(encoding="utf-8") == catalog_before
-
-
-@pytest.mark.integration
-def test_set_default_declining_config_after_accepting_catalog_leaves_both_untouched(
-    tmp_path,
-):
-    """A declined CONFIG confirm during ``set-default`` must not leave the
-
-    catalog already overwritten — both writes must be gated before either is
-    committed, or a declined config confirm leaves the (unpatched, still
-    live) config.toml referencing a catalog that was already changed to
-    describe a different model.
-    """
-    paths = Paths.from_home(tmp_path)
-    _install(paths, model="glm-4.7", force=True)
-
-    config_before = paths.codex_main_config().read_text(encoding="utf-8")
-    catalog_path = paths.codex_dir / "model.json"
-    catalog_before = catalog_path.read_text(encoding="utf-8")
-
-    calls = []
-
-    def _accept_catalog_decline_config(path, preview):
-        calls.append(path)
-        return path == catalog_path
-
-    with pytest.raises(CodeHelperError, match="refusing without confirmation"):
-        _install(
-            paths,
-            model="glm-5.2:cloud",
-            force=False,
-            confirm=_accept_catalog_decline_config,
-        )
-
-    assert len(calls) == 2
-    assert paths.codex_main_config().read_text(encoding="utf-8") == config_before
-    assert catalog_path.read_text(encoding="utf-8") == catalog_before
-
-
-@pytest.mark.integration
-def test_set_default_catalog_confirm_prompt_shows_a_real_diff(tmp_path):
-    """The foreign-catalog confirm callback must see an actual preview of
-
-    what is about to change (a unified diff of old vs. new catalog content),
-    not an empty string — otherwise a user overwriting a hand-curated
-    ``model.json`` has no way to know what they're agreeing to.
-    """
-    paths = Paths.from_home(tmp_path)
-    _install(paths, force=True)
-
-    catalog_path = paths.codex_dir / "model.json"
-    catalog_path.write_text('{"hand": "curated"}', encoding="utf-8")
-
-    seen_previews = []
-
-    def _capture_confirm(path, preview):
-        seen_previews.append(preview)
-        return True
-
-    _install(paths, force=False, confirm=_capture_confirm)
-    assert len(seen_previews) == 1
-    assert seen_previews[0] != ""
-    assert "hand" in seen_previews[0]
 
 
 @pytest.mark.unit
@@ -1203,7 +723,7 @@ def test_resolve_default_patch_refuses_a_required_provider_with_no_base_url():
     whether any CLI entry point has grown a --base-url flag yet.
     """
     with pytest.raises(CodeHelperError, match="requires a base URL"):
-        resolve_default_patch(CODEX, get_provider("litellm"), "gpt-4o", "/x/model.json")
+        resolve_default_patch(CODEX, get_provider("litellm"), "gpt-4o")
 
 
 @pytest.mark.unit
@@ -1213,7 +733,7 @@ def test_resolve_default_patch_uses_the_substituted_provider():
     from codehelper.services.model import with_base_url
 
     litellm = with_base_url(get_provider("litellm"), "http://h:4000/v1")
-    result = resolve_default_patch(CODEX, litellm, "gpt-4o", "/x/model.json")
+    result = resolve_default_patch(CODEX, litellm, "gpt-4o")
     assert result.base_url == "http://h:4000/v1/"
 
 

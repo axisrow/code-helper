@@ -92,8 +92,8 @@ class ConfigShape(StrEnum):
     #: Codex's ``[model_providers.X]`` TOML profile (``base_url`` +
     #: ``wire_api`` + ``env_key``) plus ``-c`` overrides.
     #:
-    #: Implemented for ``codex × ollama`` (see ``render.openai_toml_body`` /
-    #: ``openai_catalog_body``): the renderer writes its own
+    #: Implemented for ``codex × ollama`` (see ``render.openai_toml_body``):
+    #: the renderer writes its own
     #: ``~/.codex/<alias>.config.toml`` and launches ``codex --profile <alias>``
     #: — this per-alias profile never reads or modifies ``~/.codex/config.toml``
     #: itself. That file has a separate, explicit writer instead: the
