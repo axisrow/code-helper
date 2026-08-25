@@ -97,18 +97,41 @@ def test_patch_scrubs_a_stale_model_catalog_json_line():
 
 
 @pytest.mark.unit
-def test_patch_removes_context_window_when_new_model_is_unknown():
-    """set-default onto a known 1M model, then onto an unknown one, must
-    REMOVE the stale window line — otherwise codex carries an oversized
-    window into a session whose real window may be far smaller.
+def test_patch_leaves_context_window_alone_when_new_model_is_unknown():
+    """set-default onto a known 1M model, then onto an unknown one, must LEAVE
+    the existing window line alone — never remove it. The line may be the
+    user's own manual setting for a custom model (codehelper only writes
+    ``model_context_window`` when it knows the real window), and an unknown
+    model must never be used as grounds to delete a key this ``set-default``
+    cannot attribute to itself.
     """
     with_window = patch_config_toml("", _patch())
     assert "model_context_window = 1000000" in with_window
 
-    without_window = patch_config_toml(
+    again = patch_config_toml(
         with_window, _patch(model="some-unknown-model", context_window=None)
     )
-    assert "model_context_window" not in without_window
+    assert "model_context_window = 1000000" in again
+
+
+@pytest.mark.unit
+def test_patch_leaves_a_manual_context_window_alone_when_model_is_unknown():
+    """A ``model_context_window`` the USER wrote for a custom model (codehelper
+    never writes the key for an unknown model) is preserved byte-for-byte by a
+    set-default onto an unknown model — the key is not codehelper's to remove.
+    """
+    original = (
+        'model = "my-custom-model"\n'
+        "model_context_window = 32000\n"
+        "\n"
+        "[model_providers.ollama]\n"
+        'name = "custom"\n'
+    )
+    result = patch_config_toml(
+        original, _patch(model="some-unknown-model", context_window=None)
+    )
+    assert "model_context_window = 32000" in result
+    assert 'model = "some-unknown-model"' in result
 
 
 @pytest.mark.unit

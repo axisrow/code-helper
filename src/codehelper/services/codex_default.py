@@ -221,14 +221,42 @@ def _first_real_table_boundary(text: str) -> int | None:
     return None
 
 
-def _patch_value_for(key: str, patch: DefaultPatch) -> str | int | None:
-    """The value ``key`` should carry, or ``None`` if the key must not appear.
+class _Skip:
+    """Sentinel class: "leave whatever line is already there completely alone".
+
+    A dedicated class rather than a bare ``object()`` so a type checker can
+    narrow ``isinstance(value, _Skip)`` away from the real ``str | int | None``
+    payloads instead of collapsing the whole union to ``object``.
+    """
+
+    __slots__ = ()
+    _instance: _Skip | None = None
+
+    def __new__(cls) -> _Skip:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+
+#: Sentinel for :func:`_patch_value_for`: "leave whatever line is already
+#: there completely alone". Used for ``model_context_window`` when this tool
+#: does NOT know the model's real window: unlike ``model_catalog_json``
+#: (removal-only, only ever written by this tool), a pre-existing
+#: ``model_context_window`` in the user's own ``config.toml`` may be a manual
+#: setting for a custom model — one this ``set-default`` knows nothing about
+#: must never delete it.
+_SKIP = _Skip()
+
+
+def _patch_value_for(key: str, patch: DefaultPatch) -> str | int | None | _Skip:
+    """The value ``key`` should carry, ``None`` to remove it, :data:`_SKIP` to
+    leave it alone.
 
     ``model``/``model_provider`` always carry a string. ``model_catalog_json``
     is REMOVAL-only (see :data:`_TOP_LEVEL_KEYS`'s docstring) — always
-    ``None``. ``model_context_window`` is ``patch.context_window`` verbatim:
-    an ``int`` when this tool knows the model's real window, ``None``
-    (omit/remove) otherwise — never a guessed floor.
+    ``None``. ``model_context_window`` is ``patch.context_window`` when this
+    tool knows the model's real window, :data:`_SKIP` otherwise — never a
+    guessed floor, and never a removal (see :data:`_SKIP`'s docstring).
     """
     if key == "model":
         return patch.model
@@ -237,7 +265,7 @@ def _patch_value_for(key: str, patch: DefaultPatch) -> str | int | None:
     if key == "model_catalog_json":
         return None
     if key == "model_context_window":
-        return patch.context_window
+        return patch.context_window if patch.context_window is not None else _SKIP
     raise AssertionError(f"unknown top-level key: {key!r}")  # pragma: no cover
 
 
@@ -253,10 +281,11 @@ def _patch_top_level(original: str, patch: DefaultPatch) -> str:
     - :func:`_patch_value_for` returns ``None`` → the key must NOT appear.
       An existing line for it is deleted outright (consuming its trailing
       newline, mirroring :func:`clear_config_toml`'s removal regex) rather
-      than replaced — this is how a stale ``model_catalog_json`` line (or a
-      ``model_context_window`` this ``set-default`` no longer declares) left
-      by an earlier run gets scrubbed, not merely overwritten with a new
-      value.
+      than replaced — this is how a stale ``model_catalog_json`` line left
+      by an earlier version of this tool gets scrubbed, not merely
+      overwritten with a new value.
+    - it returns :data:`_SKIP` → the key is not this run's business at all:
+      an existing line is left byte-for-byte alone.
     - a string value → quoted (``toml_string``), same as before.
     - an int value (``model_context_window`` only) → written BARE: the field
       is ``Option<i64>`` on Codex's side, and a quoted ``"1000000"`` would not
@@ -265,7 +294,8 @@ def _patch_top_level(original: str, patch: DefaultPatch) -> str:
     A present value (string or int) is replaced in place via an anchored,
     single-line, ``count=1`` regex if the key already exists, else appended
     (in :data:`_TOP_LEVEL_KEYS` order, skipping keys that were already found
-    or that resolve to ``None``) right before the top-level/table boundary.
+    or that resolve to ``None``/:data:`_SKIP`) right before the
+    top-level/table boundary.
     """
     boundary = _first_real_table_boundary(original)
     if boundary is None:
@@ -280,6 +310,8 @@ def _patch_top_level(original: str, patch: DefaultPatch) -> str:
 
         if value is None:
             top, _ = line_re.subn("", top, count=1)
+            continue
+        if isinstance(value, _Skip):
             continue
 
         replacement = (
@@ -503,8 +535,12 @@ def _verify_patch_applied(original: str, patched: str, patch: DefaultPatch) -> N
         "model": patch.model,
         "model_provider": patch.provider_table,
         "model_catalog_json": None,  # scrubbed, never written
-        "model_context_window": patch.context_window,
     }
+    # ``model_context_window`` is asserted only when this run WRITES it —
+    # with an unknown model the patch leaves any existing (possibly
+    # user-set) value alone, so there is nothing to assert it equals.
+    if patch.context_window is not None:
+        expected["model_context_window"] = patch.context_window
     actual = {k: data.get(k) for k in expected}
     table_expected = {
         "name": patch.display_name,
@@ -541,16 +577,27 @@ def _config_backup_slots(paths: Paths) -> tuple[Path, Path, Path]:
     )
 
 
+#: The keys ``clear_config_toml`` removes — everything in
+#: :data:`_TOP_LEVEL_KEYS` EXCEPT ``model_context_window``: an existing
+#: window may be the user's own manual setting for a custom model (this tool
+#: only ever writes it when it knows the model's real window), and "codex
+#: native" must not silently delete user configuration. A window WE wrote
+#: stays behind after a clear as a harmless leftover — a stale declared
+#: window is at worst a conservative compaction point, never the silent
+#: data loss a removed manual one would be.
+_CLEAR_KEYS = ("model", "model_provider", "model_catalog_json")
+
+
 def clear_config_toml(original: str, provider_table: str | None) -> str:
     """``original`` with this command's managed region removed. Pure, no IO.
 
-    The textual inverse of :func:`patch_config_toml`: drops the three
-    :data:`_TOP_LEVEL_KEYS` lines and, when ``provider_table`` names one, the
+    The textual inverse of :func:`patch_config_toml`: drops the
+    :data:`_CLEAR_KEYS` lines and, when ``provider_table`` names one, the
     whole ``[model_providers.<name>]`` block. Everything else — comments,
     key order, unrelated tables, the user's own ``[model_providers.*]``
-    entries — is left byte-for-byte alone, because this is the user's own
-    hand-maintained file and only the region this tool wrote is ours to take
-    back.
+    entries, a possibly-user-set ``model_context_window`` — is left
+    byte-for-byte alone, because this is the user's own hand-maintained file
+    and only the region this tool wrote is ours to take back.
 
     ``provider_table`` is ``None`` when ``model_provider`` names a provider
     NOT in this tool's registry (see :func:`current_default`) — i.e. this
@@ -563,7 +610,7 @@ def clear_config_toml(original: str, provider_table: str | None) -> str:
     if not provider_table:
         return original
     text = original
-    for key in _TOP_LEVEL_KEYS:
+    for key in _CLEAR_KEYS:
         # Consume the trailing newline with the line so removal does not
         # leave a blank gap where the key used to be.
         text = re.sub(rf"^{re.escape(key)}\s*=.*(?:\n|$)", "", text, flags=re.MULTILINE)
@@ -599,7 +646,7 @@ def _verify_cleared(original: str, cleared: str, provider_table: str | None) -> 
             f"please report it: {exc}"
         ) from None
 
-    leftover = [key for key in _TOP_LEVEL_KEYS if key in data]
+    leftover = [key for key in _CLEAR_KEYS if key in data]
     providers = data.get("model_providers")
     if provider_table and isinstance(providers, dict) and provider_table in providers:
         leftover.append(f"model_providers.{provider_table}")
@@ -766,11 +813,13 @@ def apply_set_default(
     now rides in ``config.toml`` itself, as the plain ``model_context_window``
     key (:data:`_TOP_LEVEL_KEYS`), and only when :func:`resolve_default_patch`
     resolves one via :func:`~codehelper.services.render.uniform_context_window`
-    — never a guessed floor. A stale ``model_catalog_json`` line left by an
-    older version of this tool is scrubbed by the same patch (see
-    :data:`_TOP_LEVEL_KEYS`'s docstring), so re-running ``set-default`` after
-    upgrading is itself the migration. Mirrors
-    ``wrappers.install_wrapper``'s shape (paths spec, dry_run, force,
+    — never a guessed floor, and never a removal either: an unrecognized
+    model leaves an existing ``model_context_window`` line untouched, since
+    it may be the user's own manual setting (see :data:`_SKIP`). A stale
+    ``model_catalog_json`` line left by an older version of this tool is
+    scrubbed by the same patch (see :data:`_TOP_LEVEL_KEYS`'s docstring), so
+    re-running ``set-default`` after upgrading is itself the migration.
+    Mirrors ``wrappers.install_wrapper``'s shape (paths spec, dry_run, force,
     confirm) so the CLI handler stays a thin shell.
 
     Args:

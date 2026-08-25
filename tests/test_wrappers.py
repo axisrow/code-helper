@@ -1098,16 +1098,19 @@ def test_install_openai_toml_is_idempotent_across_two_files(tmp_path):
 
 
 @pytest.mark.integration
-def test_install_openai_toml_cleans_up_a_stale_catalog_from_a_prior_version(
+def test_install_openai_toml_warns_about_a_stale_catalog_from_a_prior_version(
     tmp_path,
+    capsys,
 ):
     """MIGRATION: a marker-owned ``<alias>.model.json`` left by a previous
-    version of this tool (before the catalog write was removed) is deleted on
-    the very next install under the SAME alias — not just on a shape switch
-    away from OPENAI_TOML. Leaving it would mean a user who re-installs to
-    pick up this fix still has the empty-``base_instructions`` catalog sitting
-    on disk, one stray ``model_catalog_json`` hand-edit away from being read
-    again.
+    version of this tool (before the catalog write was removed) is NOT deleted
+    on re-install under the SAME alias — it is only warned about and left in
+    place. The ``managed_by=codehelper`` marker proves the file was at some
+    point written by this tool, not that a user has not hand-edited it since;
+    an install must never destroy data it cannot prove is byte-identical to
+    what it wrote (and the old renderer that produced the canonical bytes no
+    longer exists to compare against). The catalog is inert — nothing writes
+    ``model_catalog_json`` any more — so leaving it costs nothing.
     """
     import json
 
@@ -1124,15 +1127,18 @@ def test_install_openai_toml_cleans_up_a_stale_catalog_from_a_prior_version(
 
     wrote = install_wrapper(paths, spec)
 
-    assert wrote is True  # the cleanup alone counts as a change
-    assert not stale_catalog.exists()
+    assert wrote is False  # a byte-identical re-install is a no-op
+    assert stale_catalog.exists()
+    assert "stale codehelper-managed model catalog" in capsys.readouterr().err
 
 
 @pytest.mark.integration
-def test_install_openai_toml_leaves_a_foreign_catalog_alone(tmp_path):
-    """A hand-curated catalog with no ``managed_by`` marker is NOT swept up
-    by the migration cleanup — only a catalog this tool can prove it wrote
-    is ever deleted without ``--force``.
+def test_install_openai_toml_leaves_a_foreign_catalog_alone(tmp_path, capsys):
+    """A hand-curated catalog with no ``managed_by`` marker is left alone, and
+    NOT even warned about — no install-time sweep touches any catalog,
+    marker-owned or not (see
+    ``test_install_openai_toml_warns_about_a_stale_catalog_from_a_prior_version``);
+    only ``remove_wrapper`` ever deletes one, as the explicit removal action.
     """
     paths = Paths.from_home(tmp_path)
     spec = _toml_spec(model="glm-5.2:cloud", alias="glm-5-codex")
@@ -1144,6 +1150,7 @@ def test_install_openai_toml_leaves_a_foreign_catalog_alone(tmp_path):
 
     assert foreign_catalog.exists()
     assert foreign_catalog.read_text(encoding="utf-8") == '{"hand": "curated"}'
+    assert "stale codehelper-managed model catalog" not in capsys.readouterr().err
 
 
 @pytest.mark.integration
@@ -1664,16 +1671,17 @@ def test_edit_token_preserves_the_base_url(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_shape_switch_cleans_up_orphaned_openai_toml_siblings(tmp_path):
+def test_shape_switch_cleans_up_orphaned_openai_toml_siblings(tmp_path, capsys):
     """Reusing an alias for a non-OPENAI_TOML shape removes the old profile,
-    and a stale catalog left by a PREVIOUS version of this tool (F8).
+    and a stale catalog left by a PREVIOUS version of this tool (F8) is
+    warned about but left in place.
 
     A previous OPENAI_TOML install leaves ``~/.codex/<alias>.config.toml``
     behind; the new wrapper no longer dispatches ``codex --profile <alias>``,
     so it is an orphan. The catalog is manufactured by hand — no renderer
-    writes one any more — to prove a leftover from before this fix is still
-    swept up on a shape switch. Only OUR siblings (marker/``managed_by``) are
-    removed.
+    writes one any more — to prove a leftover from before this fix is never
+    deleted: the ``managed_by`` marker alone does not prove it was not
+    hand-edited since. Only the profile (marker-proven ours) is removed.
     """
     paths = Paths.from_home(tmp_path)
     alias = "glm-5-codex"
@@ -1696,10 +1704,12 @@ def test_shape_switch_cleans_up_orphaned_openai_toml_siblings(tmp_path):
     )
     assert install_wrapper(paths, launcher_spec) is True
 
-    # The wrapper was rewritten; the orphaned siblings are gone.
+    # The wrapper was rewritten; the orphaned PROFILE is gone, the stale
+    # catalog is only warned about.
     assert paths.script_for(alias).exists()
     assert not paths.codex_config_for(alias).exists()
-    assert not stale_catalog.exists()
+    assert stale_catalog.exists()
+    assert "stale codehelper-managed model catalog" in capsys.readouterr().err
 
 
 @pytest.mark.integration
@@ -2148,7 +2158,8 @@ def test_remove_wrapper_survives_a_failed_sibling_unlink(tmp_path, monkeypatch):
 
     # No renderer writes a catalog any more; manufacture a legacy, marker-
     # owned one by hand so its unlink is still exercised — the same leftover
-    # `_cleanup_stale_catalog` targets on a fresh install.
+    # `remove_wrapper` (and only `remove_wrapper`) deletes on an explicit,
+    # confirmed removal.
     catalog = paths.codex_catalog_for(spec.alias)
     catalog.write_text(
         '{"version": 1, "managed_by": "codehelper", "models": []}',
