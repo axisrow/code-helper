@@ -886,7 +886,6 @@ def _handle_set_default(args: argparse.Namespace | SetDefaultRequest) -> int:
         wrote = restore_default(
             paths,
             slot=slot,
-            catalog_json=req.catalog_json,
             dry_run=req.dry_run,
             force=req.force,
             confirm=_confirm_set_default,
@@ -916,7 +915,6 @@ def _handle_set_default(args: argparse.Namespace | SetDefaultRequest) -> int:
         agent=agent,
         provider=provider,
         model=req.model,
-        catalog_json=req.catalog_json,
         dry_run=req.dry_run,
         force=req.force,
         confirm=_confirm_set_default,
@@ -1440,11 +1438,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="backend URL for a provider with no address in the registry "
         "(e.g. litellm: http://localhost:4000/v1); REQUIRED for such a "
         "provider, or config.toml would be patched with a malformed URL",
-    )
-    p_set_default.add_argument(
-        "--catalog-json",
-        default=None,
-        help="path to the model catalog (default: ~/.codex/model.json)",
     )
     p_set_default.add_argument(
         "--slot",

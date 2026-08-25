@@ -759,7 +759,6 @@ class TuiSession:
                 ),
                 restore=False,
                 slot=None,
-                catalog_json=None,
                 dry_run=getattr(self.args, "dry_run", False),
                 force=False,
                 debug=getattr(self.args, "debug", False),

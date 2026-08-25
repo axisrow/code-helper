@@ -47,8 +47,6 @@ from codehelper.services.model import (
 from codehelper.services.naming import is_valid_alias_shape
 from codehelper.services.paths import Paths
 from codehelper.services.render import (
-    CATALOG_MANAGED_BY_KEY,
-    CATALOG_MANAGED_BY_VALUE,
     MARKER_PREFIX,
     render_legacy_script,
     render_script,
@@ -801,15 +799,16 @@ def _ownership_marker_only(path: Path) -> bool:
 def _ownership_catalog_marker(path: Path) -> bool:
     """True iff ``path`` is JSON carrying our own ``managed_by`` field.
 
-    The catalog's own proof of authorship (see ``render.CATALOG_MANAGED_BY_KEY``)
-    — independent of any sibling file. A purely structural test
-    (``{"version": 1, "models": [...]}`` alone) is too permissive: that shape
-    is generic enough that a hand-curated or third-party catalog plausibly
-    uses it too, and treating it as proof clobbers a researched
-    ``context_window`` with the :data:`_DEFAULT_CONTEXT_WINDOW` floor — silent
-    data loss without ``--force``. Requiring our specific marker field closes
-    that. Unreadable/non-JSON/missing key → False, the same safe-refuse answer
-    every other ownership check in this module gives.
+    No renderer writes a catalog any more (Codex requires a non-optional
+    ``base_instructions`` per entry, and an empty synthesized one silently
+    replaces Codex's real system prompt — see ``render.openai_toml_body``).
+    This check survives ONLY to let :func:`_warn_stale_catalog` recognise a
+    catalog a PREVIOUS version of this tool wrote (and :func:`remove_wrapper`
+    to delete one as part of an explicit removal) — never to gate a write,
+    since there is no longer a catalog write to gate. Unreadable/non-JSON/
+    missing key → False, the same safe-refuse answer every other ownership
+    check in this module gives (an unrecognised file is left alone, not swept
+    up as ours).
     """
     body = read_text_or_none(path)
     if body is None:
@@ -820,56 +819,20 @@ def _ownership_catalog_marker(path: Path) -> bool:
         data = json.loads(body)
     except ValueError:
         return False
-    return (
-        isinstance(data, dict)
-        and data.get(CATALOG_MANAGED_BY_KEY) == CATALOG_MANAGED_BY_VALUE
-    )
-
-
-def _ownership_catalog(paths: Paths, alias: str) -> bool:
-    """True iff the catalog for ``alias`` is one we wrote.
-
-    Proven ONLY by the catalog's own ``managed_by`` field
-    (:func:`_ownership_catalog_marker`) — no sibling-profile fallback. An earlier
-    version also accepted "the sibling ``<alias>.config.toml`` profile carries
-    our marker" as a second, migration-path proof (mirroring how
-    :func:`_ownership_full_match` accepts a byte-identical legacy render for the wrapper).
-    That fallback could not distinguish a legacy catalog WE wrote (before the
-    ``managed_by`` field existed) from a FOREIGN hand-curated catalog a user
-    simply placed next to our already-installed, marker-carrying profile —
-    both look identical to it: no ``managed_by``, sibling profile marked.
-    Reachable on an ordinary, idempotent re-install (no ``--alias`` typo, no
-    edge case): install once, hand-edit the catalog's ``context_window`` to a
-    researched value, re-run the SAME install command — the profile
-    byte-matches and is skipped, but the catalog no longer byte-matches, so
-    :func:`_decide` re-checks ownership, the fallback fires, and the
-    researched value is silently flattened back to
-    :data:`_DEFAULT_CONTEXT_WINDOW` with no prompt and no ``--force`` (the
-    catalog is classified "ours", so it never reaches the foreign-file guard
-    at all). :func:`_cleanup_openai_toml_siblings` already chose the
-    self-marker-only answer for the DELETE side of this exact ambiguity (see
-    its docstring); this brings the OVERWRITE side in line rather than leaving
-    it more permissive than a plain deletion. A catalog with no self-marker —
-    legacy or foreign, no longer distinguished — now routes to
-    ``OVERWRITE_FOREIGN`` like the other two slots, recoverable with
-    ``--force`` same as any foreign file; the byte-identical idempotence case
-    is handled earlier in :func:`_decide` (SKIP), so this only gates
-    non-identical existing catalogs.
-    """
-    return _ownership_catalog_marker(paths.codex_catalog_for(alias))
+    return isinstance(data, dict) and data.get("managed_by") == "codehelper"
 
 
 class _FilePlan(NamedTuple):
     """One file a wrapper install writes, and how to treat an existing copy.
 
     The plan is the shape-driven answer to "which files does this install
-    write?" — one entry for a single-shape wrapper, three for ``OPENAI_TOML``
-    (wrapper + TOML profile + catalog). Pairing each file with its own
-    ``managed_check`` and ``is_wrapper`` flag as data is what lets one
-    orchestrator (:func:`_install_plan`) handle every shape: the per-file
-    ownership predicate varies (marker+legacy for the wrapper, marker-only for
-    the TOML profile, structural-JSON for the catalog) without the orchestrator
-    knowing which shape it is looking at.
+    write?" — one entry for a single-shape wrapper, two for ``OPENAI_TOML``
+    (wrapper + TOML profile — no catalog, see ``_openai_toml_plan``). Pairing
+    each file with its own ``managed_check`` and ``is_wrapper`` flag as data
+    is what lets one orchestrator (:func:`_install_plan`) handle every shape:
+    the per-file ownership predicate varies (marker+legacy for the wrapper,
+    marker-only for the TOML profile) without the orchestrator knowing which
+    shape it is looking at.
     """
 
     path: Path
@@ -1018,41 +981,36 @@ def _wrapper_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_FilePlan
 
 
 def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_FilePlan]:
-    """The three-file plan: model catalog + TOML profile + bash wrapper.
+    """The two-file plan: TOML profile + bash wrapper.
 
-    Ordered so the on-PATH executable lands LAST: if a sibling write fails
-    mid-sequence (disk full, permission), no invocable wrapper is left
-    pointing at a missing profile/catalog — only harmless orphaned siblings
-    that the next idempotent install repairs. The wrapper-first order this
-    replaced could leave a broken executable on ``PATH`` during the failure
-    window.
+    No model catalog is written any more (see ``render.openai_toml_body`` for
+    why: Codex's ``ModelInfo`` requires a per-entry ``base_instructions``
+    string, and an empty synthesized one silently replaces Codex's real
+    system prompt) — a stale catalog from a PREVIOUS version of this tool is
+    only warned about, never written or deleted here (see
+    :func:`_warn_stale_catalog` in :func:`install_wrapper`).
+
+    Ordered so the on-PATH executable lands LAST: if the profile write fails
+    (disk full, permission), no invocable wrapper is left pointing at a
+    missing profile — only a harmless orphaned wrapper-less state the next
+    idempotent install repairs. The wrapper-first order this replaced could
+    leave a broken executable on ``PATH`` during the failure window.
 
     Each slot carries its own ownership check — :func:`_ownership_marker_only`
     for the wrapper AND the TOML profile (both carry the marker comment;
     OPENAI_TOML is a new shape with no pre-marker legacy form, so the
     legacy byte-match clause :func:`_ownership_full_match` uses for the other shapes would
     only ever match a third-party hand-written ``exec codex --profile`` script
-    and adopt it as ours), and :func:`_ownership_catalog` for the catalog (JSON
-    cannot carry a comment marker, so authorship is proven by the sibling
-    profile's marker). Modes: the wrapper follows :func:`_mode_for` (``0o700``
-    for a secret, else ``0o755``); the profile and catalog are ``0o600``
-    owner-only.
+    and adopt it as ours). Modes: the wrapper follows :func:`_mode_for` (``0o700``
+    for a secret, else ``0o755``); the profile is ``0o600`` owner-only.
     """
-    from codehelper.services.render import openai_catalog_body, openai_toml_body
+    from codehelper.services.render import openai_toml_body
 
-    catalog_path = paths.codex_catalog_for(spec.alias)
     config_path = paths.codex_config_for(spec.alias)
     return [
         _FilePlan(
-            catalog_path,
-            openai_catalog_body(spec),
-            0o600,
-            lambda _p: _ownership_catalog(paths, spec.alias),
-            False,
-        ),
-        _FilePlan(
             config_path,
-            openai_toml_body(spec, str(catalog_path)),
+            openai_toml_body(spec),
             0o600,
             _ownership_marker_only,
             False,
@@ -1067,65 +1025,24 @@ def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_File
     ]
 
 
-def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) -> bool:
-    """Remove the ``~/.codex/<alias>.config.toml`` + ``<alias>.model.json`` we wrote.
+def _remove_owned_paths(paths_to_check: list[Path], *, dry_run: bool) -> bool:
+    """Remove each path in ``paths_to_check`` that exists. Best-effort.
 
-    Only meaningful when a PREVIOUS install under ``alias`` was OPENAI_TOML and
-    the new one is not: the old profile/catalog no longer match anything the
-    new wrapper dispatches to, so leaving them is silent clutter (and a stale
-    catalog could mislead a later ``codex --profile <alias>`` if the alias is
-    ever reused for OPENAI_TOML again).
-
-    Each sibling is gated by ITS OWN ownership proof, independently —
-    :func:`_ownership_marker_only` for the profile, :func:`_ownership_catalog_marker`
-    for the catalog. This is deliberately NOT "the profile's marker decides
-    both": an earlier version inferred the catalog's fate from the profile
-    alone, which meant a hand-curated catalog sitting next to OUR profile was
-    deleted with no ``--force`` and no prompt — the exact thing the
-    install-time ownership guard exists to prevent, just reached through a
-    different door. A foreign profile or foreign catalog is left untouched,
-    matching what the install guard would have refused to overwrite.
-
-    Note this is stricter than :func:`_ownership_catalog` (the install-time
-    check, which also accepts the sibling-marker fallback for a catalog
-    written before :data:`render.CATALOG_MANAGED_BY_KEY` existed): a DELETE
-    has no ``--force`` escape hatch the way an overwrite does, and the
-    sibling-marker proof is fundamentally ambiguous for a delete — "the
-    profile next to this catalog is ours" cannot distinguish a legacy catalog
-    WE wrote from a foreign one a user happened to drop next to our profile.
-    An install-time overwrite gated on that proof is at least reversible by
-    restoring a backup; an unprompted delete is not, so cleanup only removes
-    what the catalog can prove about ITSELF. A legacy catalog with no
-    self-marker is deliberately left as a harmless orphan rather than risking
-    a foreign file's silent deletion — the safe direction to be wrong in.
-
-    Best-effort by design: called AFTER the wrapper install already succeeded
-    (see ``install_wrapper``), so a failure here must never make a successful
-    install look failed. An unlink failure is reported on stderr and skipped,
-    not raised — unlike the install-time write path, where a failure aborts
-    before anything user-visible has changed.
+    Callers pre-filter to paths already proven ours — this function only
+    performs the removal and reports it, so a failure here (permissions, a
+    concurrent delete) is reported on stderr and skipped, never raised: it
+    runs AFTER the wrapper install already succeeded, so it must never make a
+    successful install look failed.
 
     Returns:
-        True iff anything was removed (or, in dry-run, would be) — folded into
-        ``install_wrapper``'s own return value so a run whose only effect was
-        deleting orphaned siblings is not reported as "no changes".
+        True iff anything was removed (or, in dry-run, would be).
     """
     import sys
 
-    config_path = paths.codex_config_for(alias)
-    catalog_path = paths.codex_catalog_for(alias)
-
-    to_remove = [
-        path
-        for path, is_ours in (
-            (catalog_path, _ownership_catalog_marker(catalog_path)),
-            (config_path, _ownership_marker_only(config_path)),
-        )
-        if path.exists() and is_ours
-    ]
-
     changed = False
-    for path in to_remove:
+    for path in paths_to_check:
+        if not path.exists():
+            continue
         if dry_run:
             print(f"would remove orphaned sibling {path}")
             changed = True
@@ -1143,6 +1060,73 @@ def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) ->
     return changed
 
 
+def _warn_stale_catalog(paths: Paths, alias: str) -> None:
+    """Warn about a ``<alias>.model.json`` an OLDER version wrote; never delete.
+
+    No renderer writes a catalog any more (see ``render.openai_toml_body``:
+    Codex's ``ModelInfo`` requires a per-entry ``base_instructions`` string,
+    and an empty synthesized one silently replaces Codex's real system prompt
+    for every wrapper reading it). A leftover catalog is now INERT: no
+    ``set-default`` writes ``model_catalog_json`` any more, and the set-default
+    patch scrubs a stale ``model_catalog_json`` line when it rewrites the
+    profile. Deleting it on every install would therefore be convenience, not
+    hygiene — and it would be UNSAFE convenience: :func:`_ownership_catalog_marker`
+    proves the file was at some point written by this tool, but a user can
+    hand-edit a marker-bearing catalog afterwards, and a fresh install must
+    never destroy data it cannot prove is byte-identical to what it wrote
+    (the old renderer that produced the canonical bytes no longer exists to
+    compare against). Warn and leave the file alone; ``remove_wrapper`` still
+    removes a marker-owned catalog, because there the removal IS the explicit,
+    confirmed action.
+    """
+    import sys
+
+    catalog_path = paths.codex_catalog_for(alias)
+    if catalog_path.exists() and _ownership_catalog_marker(catalog_path):
+        print(
+            f"warning: stale codehelper-managed model catalog {catalog_path} "
+            f"left in place (nothing reads it any more; delete manually if "
+            f"you want it gone)",
+            file=sys.stderr,
+        )
+
+
+def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) -> bool:
+    """Remove the ``~/.codex/<alias>.config.toml`` profile we wrote.
+
+    Only meaningful when a PREVIOUS install under ``alias`` was OPENAI_TOML and
+    the new one is not: the old profile no longer matches anything the new
+    wrapper dispatches to, so leaving it is silent clutter. A stale catalog
+    from an older version of this tool is NOT swept here — it is only warned
+    about via :func:`_warn_stale_catalog`, for the same reason an install
+    never deletes one: ``managed_by=codehelper`` alone does not prove the file
+    was not hand-edited since.
+
+    The profile is gated by ITS OWN ownership proof — :func:`_ownership_marker_only`.
+    This is deliberately NOT "the profile's marker decides the sibling's fate":
+    an earlier version inferred the catalog's fate from the profile alone,
+    which meant a hand-curated catalog sitting next to OUR profile was deleted
+    with no ``--force`` and no prompt — the exact thing the install-time
+    ownership guard exists to prevent, just reached through a different door.
+    A foreign profile is left untouched, matching what the install guard
+    would have refused to overwrite.
+
+    Best-effort by design: called AFTER the wrapper install already succeeded
+    (see ``install_wrapper``), so a failure here must never make a successful
+    install look failed.
+
+    Returns:
+        True iff the profile was removed (or, in dry-run, would be) — folded
+        into ``install_wrapper``'s own return value so a run whose only effect
+        was deleting an orphaned sibling is not reported as "no changes".
+    """
+    config_path = paths.codex_config_for(alias)
+    _warn_stale_catalog(paths, alias)
+    return _remove_owned_paths(
+        [config_path] if _ownership_marker_only(config_path) else [], dry_run=dry_run
+    )
+
+
 def install_wrapper(
     paths: Paths,
     spec: WrapperSpec | str,
@@ -1158,11 +1142,12 @@ def install_wrapper(
     Idempotent: a byte-identical re-install is a no-op.
 
     The shape selects the file plan — one file for most shapes
-    (:func:`_wrapper_plan`), three for ``OPENAI_TOML``
-    (:func:`_openai_toml_plan`: bash wrapper + TOML profile + model catalog) —
-    and one orchestrator (:func:`_install_plan`) writes whichever plan it was
-    handed, so the ownership guard, dry-run, force, and confirm behaviour are
-    identical per file regardless of how many files a shape writes.
+    (:func:`_wrapper_plan`), two for ``OPENAI_TOML``
+    (:func:`_openai_toml_plan`: bash wrapper + TOML profile — no catalog, see
+    its docstring) — and one orchestrator (:func:`_install_plan`) writes
+    whichever plan it was handed, so the ownership guard, dry-run, force, and
+    confirm behaviour are identical per file regardless of how many files a
+    shape writes.
 
     Args:
         paths: Resolved :class:`Paths`.
@@ -1197,17 +1182,26 @@ def install_wrapper(
         paths, spec, plan, dry_run=dry_run, force=force, confirm=confirm
     )
 
-    # A non-OPENAI_TOML install under an alias that previously held an
-    # OPENAI_TOML install leaves the ``~/.codex/<alias>.*`` siblings orphaned
-    # — the new wrapper no longer dispatches ``codex --profile <alias>``. Runs
-    # regardless of whether the wrapper slot itself changed (a SKIP re-install
-    # under an alias that still carries stale siblings must still clean them
-    # up — the siblings are the whole point, not a side effect of the wrapper
-    # write), but only for OUR siblings; a refusal above already raised before
-    # reaching here, so nothing here is racing an unresolved guard decision.
-    # Its own return value is folded into ``wrote`` so a run whose only effect
-    # was deleting orphaned siblings is not reported as "no changes".
-    if spec.shape is not ConfigShape.OPENAI_TOML:
+    if spec.shape is ConfigShape.OPENAI_TOML:
+        # An earlier version of this tool wrote a ``<alias>.model.json``
+        # catalog next to the profile; no renderer writes one any more (see
+        # ``render.openai_toml_body``). Warn about a leftover from THIS
+        # alias's own prior install, never delete: the ``managed_by=
+        # codehelper`` marker alone does not prove the file was not
+        # hand-edited since (see ``_warn_stale_catalog``).
+        _warn_stale_catalog(paths, spec.alias)
+    else:
+        # A non-OPENAI_TOML install under an alias that previously held an
+        # OPENAI_TOML install leaves the ``~/.codex/<alias>.*`` siblings
+        # orphaned — the new wrapper no longer dispatches ``codex --profile
+        # <alias>``. Runs regardless of whether the wrapper slot itself
+        # changed (a SKIP re-install under an alias that still carries stale
+        # siblings must still clean them up — the siblings are the whole
+        # point, not a side effect of the wrapper write), but only for OUR
+        # siblings; a refusal above already raised before reaching here, so
+        # nothing here is racing an unresolved guard decision. Its own
+        # return value is folded into ``wrote`` so a run whose only effect
+        # was deleting orphaned siblings is not reported as "no changes".
         cleaned = _cleanup_openai_toml_siblings(paths, spec.alias, dry_run=dry_run)
         wrote = wrote or cleaned
 

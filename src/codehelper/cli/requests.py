@@ -210,8 +210,7 @@ class SetDefaultRequest:
 
     ``restore`` with an optional ``slot`` reads a backup back; otherwise
     ``agent``/``provider``/``model`` (and ``base_url`` for a runtime-address
-    provider) define the patch to apply. ``catalog_json`` is an optional
-    override for the model-catalog path.
+    provider) define the patch to apply.
     """
 
     agent: str | None
@@ -220,7 +219,6 @@ class SetDefaultRequest:
     base_url: str | None
     restore: bool
     slot: int | None
-    catalog_json: str | None
     dry_run: bool
     force: bool
     debug: bool
@@ -234,7 +232,6 @@ class SetDefaultRequest:
             base_url=_g(args, "base_url"),
             restore=bool(_g(args, "restore", False)),
             slot=_g(args, "slot"),
-            catalog_json=_g(args, "catalog_json"),
             dry_run=bool(_g(args, "dry_run", False)),
             force=bool(_g(args, "force", False)),
             debug=bool(_g(args, "debug", False)),

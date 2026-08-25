@@ -205,7 +205,7 @@ def test_litellm_declares_both_shapes():
         ConfigShape.OPENAI_TOML,
         ConfigShape.ANTHROPIC_SETTINGS,
     }
-    assert litellm.wire_api == "chat"
+    assert litellm.wire_api == "responses"
     assert litellm.base_url_policy is BaseUrlPolicy.REQUIRED
     assert litellm.base_url == ""
 

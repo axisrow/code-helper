@@ -36,14 +36,11 @@ __all__ = [
     "render_script",
     "render_legacy_script",
     "openai_toml_body",
-    "openai_catalog_body",
     "openai_base_url",
     "anthropic_base_url",
     "openai_env_key",
     "toml_string",
     "MARKER_PREFIX",
-    "CATALOG_MANAGED_BY_KEY",
-    "CATALOG_MANAGED_BY_VALUE",
     "MODEL_CONTEXT_WINDOWS",
     "uniform_context_window",
 ]
@@ -279,13 +276,6 @@ def _render_openai_toml(spec: WrapperSpec, token: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-#: ``model_catalog_json`` floors for models the catalog describes. No axis
-#: carries a context window, so these are pragmatic defaults a future data
-#: source can override in one place.
-_DEFAULT_CONTEXT_WINDOW = 128000
-_DEFAULT_MAX_OUTPUT = 32768
-
-
 def openai_base_url(provider_base_url: str, is_openai_root: bool = False) -> str:
     """Derive the OpenAI-compatible ``base_url`` for the TOML profile.
 
@@ -372,7 +362,7 @@ def openai_env_key(provider: Provider) -> str:
     return provider.token_env_var
 
 
-def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
+def openai_toml_body(spec: WrapperSpec) -> str:
     """The ``~/.codex/<alias>.config.toml`` profile body (pure, no IO).
 
     Codex ≥ 0.146.0 resolves profiles from per-file config: the basename
@@ -399,9 +389,22 @@ def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
       and bare roots);
     - ``wire_api`` is ``spec.provider.wire_api``.
 
-    ``catalog_path`` is the already-resolved ``<alias>.model.json`` location,
-    passed in (rather than computed) because this function is pure and has no
-    ``Paths`` — the install path owns the resolution.
+    No model catalog is written any more (see the removed
+    ``openai_catalog_body``): Codex's ``ModelInfo`` requires a ``base_instructions``
+    string per catalog entry, and this tool has no real system prompt to put
+    there — an empty one is not "no override", it IS the session's
+    instructions (``ModelInfo::get_model_instructions`` returns
+    ``base_instructions`` verbatim when no ``model_messages`` template is set),
+    silently replacing Codex's real coding-agent prompt for every wrapper on a
+    matched catalog entry. Without a catalog, an unrecognised slug falls
+    through to Codex's own ``model_info_from_slug``, which carries the real
+    bundled prompt — worse context-window guessing, but a working agent.
+    ``model_context_window`` (a plain top-level ``config.toml`` key, applied
+    unconditionally by Codex's ``with_config_overrides``) covers the one thing
+    the catalog existed for, and only rides along when the model resolves to a
+    known window via :func:`uniform_context_window` — never a guessed floor,
+    the same conditional-emission rule :func:`_render_anthropic_env` uses for
+    ``CLAUDE_CODE_MAX_CONTEXT_TOKENS``.
 
     The marker on line 1 is the same comment the bash wrapper carries, which is
     what lets the ownership guard recognise this as ours. Every quoted value
@@ -425,7 +428,10 @@ def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
         f"{_marker(spec)}\n",
         f'model = "{toml_string(spec.model)}"\n',
         f'model_provider = "{toml_string(table)}"\n',
-        f'model_catalog_json = "{toml_string(catalog_path)}"\n',
+    ]
+    if (window := uniform_context_window([spec.model])) is not None:
+        lines.append(f"model_context_window = {window}\n")
+    lines += [
         "\n",
         f"[model_providers.{table}]\n",
         f'name = "{toml_string(display_name)}"\n',
@@ -436,47 +442,6 @@ def openai_toml_body(spec: WrapperSpec, catalog_path: str) -> str:
     if env_key:
         lines.append(f'env_key = "{toml_string(env_key)}"\n')
     return "".join(lines)
-
-
-#: Top-level marker key in the catalog JSON — the JSON equivalent of
-#: ``render.MARKER_PREFIX``. JSON has no comments, so the bash/TOML marker
-#: comment cannot ride along; this field is what lets the catalog prove its
-#: OWN authorship instead of borrowing the sibling profile's marker (see
-#: ``wrappers._ownership_catalog``). A catalog we wrote before this field existed
-#: has no key at all — treated the same as "not (self-)provably ours", exactly
-#: like a markerless pre-marker wrapper before the byte-match migration path.
-CATALOG_MANAGED_BY_KEY = "managed_by"
-CATALOG_MANAGED_BY_VALUE = "codehelper"
-
-
-def openai_catalog_body(spec: WrapperSpec) -> str:
-    """The ``~/.codex/<alias>.model.json`` catalog body (pure, no IO).
-
-    Without a catalog, Codex does not learn the context window of a model it
-    does not ship knowledge of (``glm-5.2:cloud`` etc.). This is a minimal
-    entry so the model is usable; the real window is unknown to this tool, so
-    :data:`_DEFAULT_CONTEXT_WINDOW` is a floor, not a measurement.
-
-    Carries :data:`CATALOG_MANAGED_BY_KEY` at the top level — proof of
-    authorship the catalog can offer on its OWN, without needing its sibling
-    ``<alias>.config.toml`` profile to still exist. Extra top-level keys are
-    harmless: Codex reads ``models``, and a catalog is JSON, so an unknown key
-    is simply ignored by any conformant reader.
-    """
-    import json
-
-    entry = {
-        "id": spec.model,
-        "name": spec.model,
-        "context_window": _DEFAULT_CONTEXT_WINDOW,
-        "max_output_tokens": _DEFAULT_MAX_OUTPUT,
-    }
-    body = {
-        "version": 1,
-        CATALOG_MANAGED_BY_KEY: CATALOG_MANAGED_BY_VALUE,
-        "models": [entry],
-    }
-    return json.dumps(body, indent=2) + "\n"
 
 
 def toml_string(value: str) -> str:

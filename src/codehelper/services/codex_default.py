@@ -40,7 +40,6 @@ from codehelper.backends._atomic import (
     atomic_write,
     file_lock,
     read_text_or_none,
-    remove_file,
 )
 from codehelper.backends._atomic import rotate_backups as _rotate_backups
 from codehelper.errors import CodeHelperError
@@ -53,13 +52,10 @@ from codehelper.services.model import (
 )
 from codehelper.services.paths import Paths
 from codehelper.services.render import (
-    CATALOG_MANAGED_BY_KEY,
     openai_base_url,
-    openai_catalog_body,
     toml_string,
+    uniform_context_window,
 )
-from codehelper.services.spec import build_spec
-from codehelper.services.wrappers import _ownership_catalog_marker
 
 __all__ = [
     "DefaultPatch",
@@ -71,16 +67,6 @@ __all__ = [
     "current_default",
     "restore_default",
 ]
-
-#: The literal alias fed to build_spec purely to obtain a WrapperSpec to hand
-#: to render.openai_catalog_body — never used as a path or file name (the
-#: catalog path here comes from --catalog-json / the default below, not
-#: Paths.codex_catalog_for). Passes validate_alias trivially.
-_CATALOG_SPEC_ALIAS = "set-default"
-
-#: Default location of the DEFAULT catalog, distinct from the per-alias
-#: <alias>.model.json the OPENAI_TOML wrapper shape writes.
-_DEFAULT_CATALOG_NAME = "model.json"
 
 
 @dataclass(frozen=True)
@@ -95,13 +81,15 @@ class DefaultPatch:
     display_name: str
     base_url: str
     wire_api: str
-    #: ``model_catalog_json``'s value, as a string (already resolved).
-    catalog_json: str
+    #: ``model_context_window``'s value, or None to omit/remove the key.
+    #: Never a guessed floor — see :data:`MODEL_CONTEXT_WINDOWS`: only a model
+    #: this tool actually knows the real window for gets one declared, the
+    #: same conditional-emission rule ``render.openai_toml_body`` and
+    #: ``_render_anthropic_env`` use.
+    context_window: int | None
 
 
-def resolve_default_patch(
-    agent: Agent, provider: Provider, model: str, catalog_path: str
-) -> DefaultPatch:
+def resolve_default_patch(agent: Agent, provider: Provider, model: str) -> DefaultPatch:
     """Resolve a :class:`DefaultPatch` from the axes. Pure, no IO.
 
     Reuses :func:`resolve_shape` — the SAME compatibility check ``add`` uses —
@@ -152,13 +140,30 @@ def resolve_default_patch(
         display_name=provider.description or provider.name,
         base_url=openai_base_url(provider.base_url, provider.base_url_is_openai_root),
         wire_api=provider.wire_api,
-        catalog_json=catalog_path,
+        context_window=uniform_context_window([model]),
     )
 
 
 #: Top-level scalar keys this command manages, in the order a fresh insert
 #: appends them (matches the issue's own example layout).
-_TOP_LEVEL_KEYS = ("model", "model_provider", "model_catalog_json")
+#:
+#: ``model_catalog_json`` is a REMOVAL-only key, kept here (rather than
+#: dropped from the tuple) so a fresh ``set-default`` scrubs a stale line an
+#: older version of this tool left behind — that older catalog carried an
+#: empty ``base_instructions`` per entry, silently replacing Codex's real
+#: system prompt (see ``render.openai_toml_body``). :func:`_patch_value_for`
+#: always returns ``None`` for it, and :func:`_patch_top_level` treats
+#: ``None`` as "this key must not appear" rather than a value to write.
+#: ``_without_managed_region`` (below) already excludes every key in this
+#: tuple from BOTH sides of its structural comparison, so a key going from
+#: "present with a value" to "absent" is not read as unmanaged content
+#: changing.
+_TOP_LEVEL_KEYS = (
+    "model",
+    "model_provider",
+    "model_catalog_json",
+    "model_context_window",
+)
 
 #: Matches the START of a line that COULD be a table header — `[table]` or
 #: `[[array]]`. MULTILINE, anchored to line start so a `[` inside a string
@@ -216,27 +221,81 @@ def _first_real_table_boundary(text: str) -> int | None:
     return None
 
 
-def _patch_value_for(key: str, patch: DefaultPatch) -> str:
+class _Skip:
+    """Sentinel class: "leave whatever line is already there completely alone".
+
+    A dedicated class rather than a bare ``object()`` so a type checker can
+    narrow ``isinstance(value, _Skip)`` away from the real ``str | int | None``
+    payloads instead of collapsing the whole union to ``object``.
+    """
+
+    __slots__ = ()
+    _instance: _Skip | None = None
+
+    def __new__(cls) -> _Skip:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+
+#: Sentinel for :func:`_patch_value_for`: "leave whatever line is already
+#: there completely alone". Used for ``model_context_window`` when this tool
+#: does NOT know the model's real window: unlike ``model_catalog_json``
+#: (removal-only, only ever written by this tool), a pre-existing
+#: ``model_context_window`` in the user's own ``config.toml`` may be a manual
+#: setting for a custom model — one this ``set-default`` knows nothing about
+#: must never delete it.
+_SKIP = _Skip()
+
+
+def _patch_value_for(key: str, patch: DefaultPatch) -> str | int | None | _Skip:
+    """The value ``key`` should carry, ``None`` to remove it, :data:`_SKIP` to
+    leave it alone.
+
+    ``model``/``model_provider`` always carry a string. ``model_catalog_json``
+    is REMOVAL-only (see :data:`_TOP_LEVEL_KEYS`'s docstring) — always
+    ``None``. ``model_context_window`` is ``patch.context_window`` when this
+    tool knows the model's real window, :data:`_SKIP` otherwise — never a
+    guessed floor, and never a removal (see :data:`_SKIP`'s docstring).
+    """
     if key == "model":
         return patch.model
     if key == "model_provider":
         return patch.provider_table
     if key == "model_catalog_json":
-        return patch.catalog_json
+        return None
+    if key == "model_context_window":
+        return patch.context_window if patch.context_window is not None else _SKIP
     raise AssertionError(f"unknown top-level key: {key!r}")  # pragma: no cover
 
 
 def _patch_top_level(original: str, patch: DefaultPatch) -> str:
-    """Replace/insert the three top-level scalar keys. Pure, no IO.
+    """Replace/insert/remove the top-level scalar keys. Pure, no IO.
 
     Operates ONLY on the slice before the first REAL table header (see
     :func:`_first_real_table_boundary` — a line starting with ``[`` inside an
     open multi-line array/inline table does not count) or the whole file if
     there is none. A table with a colliding-looking body can never be
-    touched by this step. Each key is handled independently: replaced in
-    place via an anchored, single-line, ``count=1`` regex if present, else
-    appended (in :data:`_TOP_LEVEL_KEYS` order, skipping keys that were
-    already found) right before the top-level/table boundary.
+    touched by this step. Each key is handled independently:
+
+    - :func:`_patch_value_for` returns ``None`` → the key must NOT appear.
+      An existing line for it is deleted outright (consuming its trailing
+      newline, mirroring :func:`clear_config_toml`'s removal regex) rather
+      than replaced — this is how a stale ``model_catalog_json`` line left
+      by an earlier version of this tool gets scrubbed, not merely
+      overwritten with a new value.
+    - it returns :data:`_SKIP` → the key is not this run's business at all:
+      an existing line is left byte-for-byte alone.
+    - a string value → quoted (``toml_string``), same as before.
+    - an int value (``model_context_window`` only) → written BARE: the field
+      is ``Option<i64>`` on Codex's side, and a quoted ``"1000000"`` would not
+      deserialize as one.
+
+    A present value (string or int) is replaced in place via an anchored,
+    single-line, ``count=1`` regex if the key already exists, else appended
+    (in :data:`_TOP_LEVEL_KEYS` order, skipping keys that were already found
+    or that resolve to ``None``/:data:`_SKIP`) right before the
+    top-level/table boundary.
     """
     boundary = _first_real_table_boundary(original)
     if boundary is None:
@@ -247,15 +306,27 @@ def _patch_top_level(original: str, patch: DefaultPatch) -> str:
     missing: list[str] = []
     for key in _TOP_LEVEL_KEYS:
         value = _patch_value_for(key, patch)
-        line_re = re.compile(rf"^{re.escape(key)}\s*=.*$", re.MULTILINE)
-        replacement = f'{key} = "{toml_string(value)}"'
+        line_re = re.compile(rf"^{re.escape(key)}\s*=.*(?:\n|$)", re.MULTILINE)
+
+        if value is None:
+            top, _ = line_re.subn("", top, count=1)
+            continue
+        if isinstance(value, _Skip):
+            continue
+
+        replacement = (
+            f"{key} = {value}"
+            if isinstance(value, int)
+            else f'{key} = "{toml_string(value)}"'
+        )
+        no_newline_re = re.compile(rf"^{re.escape(key)}\s*=.*$", re.MULTILINE)
         # A callable replacement, NOT a template string: re.subn treats a
         # string replacement as a backreference template and interprets any
         # ``\`` in it (e.g. the ``\uXXXX`` toml_string emits for a control
-        # character in a user-supplied --model/--catalog-json value) as an
-        # escape — ``\u`` is not a valid one, so re.error crashes instead of
-        # patching. A lambda's return value is used verbatim, no re-parsing.
-        new_top, count = line_re.subn(lambda m, r=replacement: r, top, count=1)
+        # character in a user-supplied --model value) as an escape — ``\u``
+        # is not a valid one, so re.error crashes instead of patching. A
+        # lambda's return value is used verbatim, no re-parsing.
+        new_top, count = no_newline_re.subn(lambda m, r=replacement: r, top, count=1)
         if count:
             top = new_top
         else:
@@ -342,10 +413,8 @@ def diff_preview(original: str, patched: str, *, label: str = "config.toml") -> 
 
     Empty string when the two are identical (the no-op case) — callers print
     this as-is under ``--dry-run`` and before an interactive confirm. ``label``
-    names the file in the diff headers — defaults to ``config.toml`` (the
-    original, only caller) but ``_write_catalog`` passes its own catalog path
-    so the confirm prompt shows what is actually about to change there too,
-    instead of an empty preview.
+    names the file in the diff headers — defaults to ``config.toml``, the
+    only caller.
     """
     return "".join(
         difflib.unified_diff(
@@ -465,8 +534,13 @@ def _verify_patch_applied(original: str, patched: str, patch: DefaultPatch) -> N
     expected = {
         "model": patch.model,
         "model_provider": patch.provider_table,
-        "model_catalog_json": patch.catalog_json,
+        "model_catalog_json": None,  # scrubbed, never written
     }
+    # ``model_context_window`` is asserted only when this run WRITES it —
+    # with an unknown model the patch leaves any existing (possibly
+    # user-set) value alone, so there is nothing to assert it equals.
+    if patch.context_window is not None:
+        expected["model_context_window"] = patch.context_window
     actual = {k: data.get(k) for k in expected}
     table_expected = {
         "name": patch.display_name,
@@ -503,162 +577,27 @@ def _config_backup_slots(paths: Paths) -> tuple[Path, Path, Path]:
     )
 
 
-def _catalog_backup_slots(catalog_path: Path) -> tuple[Path, Path, Path]:
-    """The catalog's own 3-slot ring, next to the catalog itself.
-
-    Not routed through ``Paths`` (unlike the config ring) because the catalog
-    path is user-choosable via ``--catalog-json`` and need not live under
-    ``~/.codex`` at all — the backups simply live beside whatever file the
-    catalog actually is, ``<catalog>.bak1``/``.bak2``/``.bak3``.
-    """
-    return (
-        catalog_path.with_name(catalog_path.name + ".bak3"),
-        catalog_path.with_name(catalog_path.name + ".bak2"),
-        catalog_path.with_name(catalog_path.name + ".bak1"),
-    )
-
-
-def _resolve_catalog_path(paths: Paths, catalog_json: str | None) -> Path:
-    if catalog_json:
-        return Path(catalog_json)
-    return paths.codex_dir / _DEFAULT_CATALOG_NAME
-
-
-@dataclass(frozen=True)
-class _CatalogPlan:
-    """What :func:`_gate_catalog_write` decided, ready for
-
-    :func:`_commit_catalog_write` — the confirm/refuse decision and the
-    write itself are split into two calls so :func:`apply_set_default` can
-    confirm BOTH the catalog and the config.toml writes before committing
-    EITHER one (see the ordering comment there).
-    """
-
-    catalog_path: Path
-    body: str
-    existing: str | None
-    overwriting: bool
-    #: True when there is nothing to do — ``body`` already matches
-    #: ``existing`` exactly (idempotent no-op).
-    no_op: bool
-
-
-def _gate_catalog_write(
-    patch: DefaultPatch,
-    agent: Agent,
-    provider: Provider,
-    catalog_path: Path,
-    *,
-    dry_run: bool,
-    force: bool,
-    confirm,
-) -> _CatalogPlan:
-    """Decide whether the catalog write is allowed, WITHOUT writing anything.
-
-    Reuses the SAME structural ``managed_by`` proof
-    (``wrappers._ownership_catalog_marker``) the per-alias OPENAI_TOML catalogs use
-    — a hand-curated ``~/.codex/model.json`` is protected exactly like a
-    hand-curated ``<alias>.model.json`` would be. EVERY real overwrite of
-    EXISTING content — foreign or our own previously-managed catalog — goes
-    through the confirm/force gate, same posture as config.toml. A managed
-    catalog is not exempt: it is exactly the common case (a second
-    ``set-default`` changing the model), and silently clobbering it with no
-    confirm was the actual gap — the confirm/force gate previously fired only
-    for a FOREIGN catalog, so switching models normally overwrote the
-    previous default's catalog with no prompt and no way back.
-
-    Args:
-        confirm: ``(path: Path, preview: str) -> bool`` — same signature as
-            :func:`apply_set_default`'s ``confirm``, called with a unified
-            diff of the existing catalog against the new one (via
-            :func:`diff_preview`) whenever existing content would be
-            overwritten, so the prompt shows what is about to change, same as
-            the config.toml patch prompt.
-
-    Raises:
-        CodeHelperError: the overwrite is refused (no ``--force``/confirm).
-            Never raises under ``--dry-run`` — that path only previews.
-    """
-    spec = build_spec(
-        agent=agent,
-        provider=provider,
-        model=patch.model,
-        alias=_CATALOG_SPEC_ALIAS,
-        shape=ConfigShape.OPENAI_TOML,
-    )
-    body = openai_catalog_body(spec)
-
-    existing = read_text_or_none(catalog_path)
-    if existing == body:
-        return _CatalogPlan(catalog_path, body, existing, False, no_op=True)
-
-    foreign = existing is not None and not _ownership_catalog_marker(catalog_path)
-    overwriting_existing_content = existing is not None
-
-    if dry_run:
-        return _CatalogPlan(
-            catalog_path, body, existing, overwriting_existing_content, no_op=False
-        )
-
-    catalog_preview = diff_preview(existing or "", body, label=str(catalog_path))
-    if overwriting_existing_content and not force:
-        if not (confirm and confirm(catalog_path, catalog_preview)):
-            if foreign:
-                raise CodeHelperError(
-                    f"{catalog_path} exists and was not created by codehelper "
-                    f"(missing {CATALOG_MANAGED_BY_KEY!r} marker) — refusing to "
-                    f"overwrite (use --force)"
-                )
-            raise CodeHelperError(
-                f"about to overwrite {catalog_path} — refusing without "
-                f"confirmation (use --force, or re-run interactively)"
-            )
-
-    return _CatalogPlan(
-        catalog_path, body, existing, overwriting_existing_content, no_op=False
-    )
-
-
-def _commit_catalog_write(plan: _CatalogPlan) -> bool:
-    """The write-only half of the catalog flow — commits a plan already
-
-    confirmed/force-gated by :func:`_gate_catalog_write`. Returns whether
-    anything changed (``True`` unless ``plan.no_op``).
-    """
-    if plan.no_op:
-        return False
-    if plan.overwriting:
-        assert plan.existing is not None  # implied by `overwriting`
-        _rotate_backups(_catalog_backup_slots(plan.catalog_path), current=plan.existing)
-    atomic_write(plan.catalog_path, plan.body, mode=None)
-    print(f"wrote {plan.catalog_path}")
-    return True
-
-
-def _rollback_catalog(plan: _CatalogPlan) -> None:
-    """Undo a catalog write that succeeded but whose paired config write failed.
-
-    Best-effort: restores the catalog to its pre-write content (or removes it
-    if it did not exist), so a failed ``config.toml`` write cannot leave a live
-    config<->catalog mismatch. The extra backup slot rotated by the original
-    write is left in place — the ring is append-only and harmless.
-    """
-    if plan.existing is None:
-        remove_file(plan.catalog_path)
-    else:
-        atomic_write(plan.catalog_path, plan.existing, mode=None)
+#: The keys ``clear_config_toml`` removes — everything in
+#: :data:`_TOP_LEVEL_KEYS` EXCEPT ``model_context_window``: an existing
+#: window may be the user's own manual setting for a custom model (this tool
+#: only ever writes it when it knows the model's real window), and "codex
+#: native" must not silently delete user configuration. A window WE wrote
+#: stays behind after a clear as a harmless leftover — a stale declared
+#: window is at worst a conservative compaction point, never the silent
+#: data loss a removed manual one would be.
+_CLEAR_KEYS = ("model", "model_provider", "model_catalog_json")
 
 
 def clear_config_toml(original: str, provider_table: str | None) -> str:
     """``original`` with this command's managed region removed. Pure, no IO.
 
-    The textual inverse of :func:`patch_config_toml`: drops the three
-    :data:`_TOP_LEVEL_KEYS` lines and, when ``provider_table`` names one, the
+    The textual inverse of :func:`patch_config_toml`: drops the
+    :data:`_CLEAR_KEYS` lines and, when ``provider_table`` names one, the
     whole ``[model_providers.<name>]`` block. Everything else — comments,
     key order, unrelated tables, the user's own ``[model_providers.*]``
-    entries — is left byte-for-byte alone, because this is the user's own
-    hand-maintained file and only the region this tool wrote is ours to take
-    back.
+    entries, a possibly-user-set ``model_context_window`` — is left
+    byte-for-byte alone, because this is the user's own hand-maintained file
+    and only the region this tool wrote is ours to take back.
 
     ``provider_table`` is ``None`` when ``model_provider`` names a provider
     NOT in this tool's registry (see :func:`current_default`) — i.e. this
@@ -671,7 +610,7 @@ def clear_config_toml(original: str, provider_table: str | None) -> str:
     if not provider_table:
         return original
     text = original
-    for key in _TOP_LEVEL_KEYS:
+    for key in _CLEAR_KEYS:
         # Consume the trailing newline with the line so removal does not
         # leave a blank gap where the key used to be.
         text = re.sub(rf"^{re.escape(key)}\s*=.*(?:\n|$)", "", text, flags=re.MULTILINE)
@@ -707,7 +646,7 @@ def _verify_cleared(original: str, cleared: str, provider_table: str | None) -> 
             f"please report it: {exc}"
         ) from None
 
-    leftover = [key for key in _TOP_LEVEL_KEYS if key in data]
+    leftover = [key for key in _CLEAR_KEYS if key in data]
     providers = data.get("model_providers")
     if provider_table and isinstance(providers, dict) and provider_table in providers:
         leftover.append(f"model_providers.{provider_table}")
@@ -730,7 +669,7 @@ def _verify_cleared(original: str, cleared: str, provider_table: str | None) -> 
         display_name="",
         base_url="",
         wire_api="",
-        catalog_json="",
+        context_window=None,
     )
     if _without_managed_region(
         tomllib.loads(original), probe
@@ -858,45 +797,48 @@ def apply_set_default(
     agent: Agent,
     provider: Provider,
     model: str,
-    catalog_json: str | None = None,
     dry_run: bool = False,
     force: bool = False,
     confirm=None,
 ) -> bool:
     """Patch Codex's ``~/.codex/config.toml`` to default onto ``agent``/``provider``/``model``.
 
-    Orchestrates the whole ``set-default`` flow: pre-check -> resolve patch ->
-    apply -> post-check -> GATE both the catalog write and the config.toml
-    patch (confirm/force, raising on refusal) BEFORE committing EITHER one ->
-    only once both gates pass, commit the catalog write then the config.toml
-    write. Gating both up front — rather than writing the catalog as soon as
-    its own gate passes, then separately gating config.toml — is what
-    guarantees a refusal on either file leaves BOTH files untouched; the
-    two-phase ``_gate_catalog_write``/``_commit_catalog_write`` split exists
-    specifically to make this possible. Mirrors ``wrappers.install_wrapper``'s
-    shape (paths spec, dry_run, force, confirm) so the CLI handler stays a
-    thin shell.
+    Orchestrates the whole ``set-default`` flow: resolve patch -> apply ->
+    verify -> confirm/force gate (raising on refusal) -> commit. A single
+    file — no paired catalog: an earlier version of this function also wrote
+    ``~/.codex/model.json`` for the context window, but Codex's ``ModelInfo``
+    requires a per-entry ``base_instructions`` string, and an empty
+    synthesized one silently replaces Codex's real system prompt for the
+    default session (see ``render.openai_toml_body``). The context window
+    now rides in ``config.toml`` itself, as the plain ``model_context_window``
+    key (:data:`_TOP_LEVEL_KEYS`), and only when :func:`resolve_default_patch`
+    resolves one via :func:`~codehelper.services.render.uniform_context_window`
+    — never a guessed floor, and never a removal either: an unrecognized
+    model leaves an existing ``model_context_window`` line untouched, since
+    it may be the user's own manual setting (see :data:`_SKIP`). A stale
+    ``model_catalog_json`` line left by an older version of this tool is
+    scrubbed by the same patch (see :data:`_TOP_LEVEL_KEYS`'s docstring), so
+    re-running ``set-default`` after upgrading is itself the migration.
+    Mirrors ``wrappers.install_wrapper``'s shape (paths spec, dry_run, force,
+    confirm) so the CLI handler stays a thin shell.
 
     Args:
         confirm: ``(path: Path, preview: str) -> bool`` — called ONLY when a
             real, visible write is about to happen and neither ``--force`` nor
             an existing no-op short-circuit applies (``preview`` is a unified
-            diff — of the config patch, or of the catalog's old vs. new
-            content — in both cases via :func:`diff_preview`). ``None``
-            behaves like "always refuse" (the fail-fast-off-a-TTY default the
-            CLI layer supplies).
+            diff via :func:`diff_preview`). ``None`` behaves like "always
+            refuse" (the fail-fast-off-a-TTY default the CLI layer supplies).
 
     Returns:
         True if anything was written (or would be, under ``--dry-run``);
-        False on a true no-op (config.toml and catalog both already match).
+        False on a true no-op (config.toml already matches).
 
     Raises:
         CodeHelperError: incompatible agent/provider, unparseable existing
             config.toml, a patch that fails its own post-write verification,
             or a refused overwrite (no ``--force``/confirmation).
     """
-    catalog_path = _resolve_catalog_path(paths, catalog_json)
-    patch = resolve_default_patch(agent, provider, model, str(catalog_path))
+    patch = resolve_default_patch(agent, provider, model)
 
     config_path = paths.codex_main_config()
     original = read_text_or_none(config_path) or ""
@@ -906,47 +848,21 @@ def apply_set_default(
     _verify_patch_applied(original, patched, patch)
 
     config_changed = patched != original
+    if not config_changed:
+        print("no changes to config.toml")
+        return False
 
-    # GATE both writes (confirm/force, raise on refusal) BEFORE committing
-    # EITHER one — this is what guarantees a refusal on either file leaves
-    # BOTH files completely untouched, no matter which order they're checked
-    # in. An earlier version of this function wrote the catalog immediately
-    # once its own gate passed, then gated config.toml separately — so a
-    # catalog write that succeeded followed by a DECLINED config confirm left
-    # the catalog already changed while the (unpatched) config.toml, in the
-    # common case where the catalog path is unchanged across runs, still
-    # actively referenced it: not "harmless and unreferenced" as a prior
-    # comment here claimed, but a live config<->catalog mismatch. Gating both
-    # first removes the whole class of "one file wrote, the other refused"
-    # states.
-    catalog_plan = _gate_catalog_write(
-        patch,
-        agent,
-        provider,
-        catalog_path,
-        dry_run=dry_run,
-        force=force,
-        confirm=confirm,
-    )
-
-    preview = diff_preview(original, patched) if config_changed else ""
-    if config_changed and not dry_run:
-        if not force and not (confirm and confirm(config_path, preview)):
-            raise CodeHelperError(
-                f"about to patch {config_path} — refusing without "
-                f"confirmation (use --force, or re-run interactively)"
-            )
-
-    # Both gates passed (or --dry-run, which never raises) — now commit.
+    preview = diff_preview(original, patched)
     if dry_run:
-        if not catalog_plan.no_op:
-            print(f"would write {catalog_path}")
-        if config_changed:
-            print(preview or "(no textual change)")
-            print(f"would write {config_path}")
-        else:
-            print("no changes to config.toml")
-        return not catalog_plan.no_op or config_changed
+        print(preview or "(no textual change)")
+        print(f"would write {config_path}")
+        return True
+
+    if not force and not (confirm and confirm(config_path, preview)):
+        raise CodeHelperError(
+            f"about to patch {config_path} — refusing without "
+            f"confirmation (use --force, or re-run interactively)"
+        )
 
     with file_lock(config_path):
         current_now = read_text_or_none(config_path) or ""
@@ -955,105 +871,32 @@ def apply_set_default(
                 f"{config_path} changed since it was read — refusing to write "
                 "a stale config snapshot; re-run to patch the current file"
             )
-        # The catalog is written from a snapshot captured at gate time; a
-        # concurrent hand-edit (or another tool) landing after that snapshot
-        # must not be silently clobbered. Re-read it under the same lock and
-        # refuse if it moved — the same stale-snapshot guard as config.toml.
-        if not catalog_plan.no_op:
-            current_catalog = read_text_or_none(catalog_path)
-            if current_catalog != catalog_plan.existing:
-                raise CodeHelperError(
-                    f"{catalog_path} changed since it was read — refusing to "
-                    "write a stale catalog snapshot; re-run to patch the "
-                    "current file"
-                )
-        # ``atomic_write`` can raise AFTER its content-committing ``os.replace``
-        # — the trailing chmod that restores an existing destination's prior
-        # mode bits is not inside that call's replace-guarded try/except. So a
-        # raised exception does not prove the write never landed: treat the
-        # catalog as possibly-written the moment we ask it to write, not only
-        # when the call returns cleanly, and surface (rather than propagate
-        # unrolled) a post-replace failure so the pair's state is never
-        # silently ambiguous.
-        catalog_wrote = not catalog_plan.no_op
-        if catalog_wrote:
-            try:
-                _commit_catalog_write(catalog_plan)
-            except BaseException as catalog_exc:
-                raise CodeHelperError(
-                    f"writing {catalog_path} failed ({catalog_exc}) — its "
-                    "content may or may not have been replaced (the failure "
-                    "could be pre- or post-commit); re-run to verify and "
-                    "reconcile before writing config.toml"
-                ) from catalog_exc
+        _rotate_backups(_config_backup_slots(paths), current=original)
+        atomic_write(config_path, patched, mode=None)
+        print(f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})")
 
-        try:
-            if config_changed:
-                _rotate_backups(_config_backup_slots(paths), current=original)
-                atomic_write(config_path, patched, mode=None)
-                print(
-                    f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})"
-                )
-            else:
-                print("no changes to config.toml")
-        except BaseException as config_exc:
-            # The catalog was committed first; if the config.toml write then
-            # fails (disk full, permissions, read-only FS), roll the catalog
-            # back so the pair cannot be left inconsistent. If the rollback
-            # ITSELF fails, the original failure must not be silently
-            # replaced by the rollback's — both are surfaced, and the caller
-            # is told explicitly the pair was left inconsistent.
-            if catalog_wrote:
-                try:
-                    _rollback_catalog(catalog_plan)
-                except BaseException as rollback_exc:
-                    raise CodeHelperError(
-                        f"{config_path} write failed ({config_exc}), and rolling "
-                        f"back the already-written {catalog_path} ALSO failed "
-                        f"({rollback_exc}) — the config<->catalog pair is left "
-                        "inconsistent; manual recovery required"
-                    ) from config_exc
-            raise
-
-    return config_changed or catalog_wrote
+    return True
 
 
 @dataclass(frozen=True)
 class _RestorePlan:
-    """Everything :func:`restore_default` needs, read once before any write.
-
-    Reading both files up front is what lets confirmation happen for BOTH
-    restores before EITHER is written — see :func:`_confirm_restore`.
-    """
+    """Everything :func:`restore_default` needs, read once before any write."""
 
     config_path: Path
     backup_path: Path
     backup_body: str
     current: str
-    catalog_path: Path
-    catalog_backup_path: Path
-    catalog_backup_body: str | None
-    catalog_current: str | None
 
     @property
     def config_changed(self) -> bool:
         return self.current != self.backup_body
 
-    @property
-    def catalog_changed(self) -> bool:
-        return (
-            self.catalog_backup_body is not None
-            and self.catalog_current != self.catalog_backup_body
-        )
 
-
-def _restore_plan(paths: Paths, *, slot: int, catalog_json: str | None) -> _RestorePlan:
-    """Read the backup slot and the current files a restore would overwrite.
+def _restore_plan(paths: Paths, *, slot: int) -> _RestorePlan:
+    """Read the backup slot and the current file a restore would overwrite.
 
     Raises:
-        CodeHelperError: no config backup exists at ``slot``. A missing
-            CATALOG backup is not an error — only the config.toml restore is
-            mandatory (see :func:`restore_default`'s docstring).
+        CodeHelperError: no config backup exists at ``slot``.
     """
     backup_path = paths.codex_main_config_backup(slot)
     backup_body = read_text_or_none(backup_path)
@@ -1061,104 +904,65 @@ def _restore_plan(paths: Paths, *, slot: int, catalog_json: str | None) -> _Rest
         raise CodeHelperError(f"no backup found at {backup_path}; nothing to restore")
 
     config_path = paths.codex_main_config()
-    catalog_path = _resolve_catalog_path(paths, catalog_json)
-    catalog_backup_path = _catalog_backup_slots(catalog_path)[3 - slot]
     return _RestorePlan(
         config_path=config_path,
         backup_path=backup_path,
         backup_body=backup_body,
         current=read_text_or_none(config_path) or "",
-        catalog_path=catalog_path,
-        catalog_backup_path=catalog_backup_path,
-        catalog_backup_body=read_text_or_none(catalog_backup_path),
-        catalog_current=read_text_or_none(catalog_path),
     )
 
 
 def _confirm_restore(plan: _RestorePlan, *, force: bool, confirm) -> None:
-    """Collect every confirmation a restore needs, before ANY file is written.
-
-    Writing config first (as an earlier version of this function did) and then
-    asking about the catalog meant a declined catalog confirm left config.toml
-    ALREADY overwritten with ``backup_body`` — an inconsistent config<->catalog
-    pairing (the exact thing the paired restore exists to avoid) with no
-    rollback, since ``restore_default`` does not itself back up ``current``
-    before overwriting it. Collecting every confirmation up front means a
-    refusal on either file leaves BOTH files completely untouched.
+    """Confirm the restore before ANY file is written.
 
     Raises:
-        CodeHelperError: either overwrite is refused (no ``--force``, no
+        CodeHelperError: the overwrite is refused (no ``--force``, no
             confirmation).
     """
-    if plan.config_changed:
-        preview = diff_preview(plan.current, plan.backup_body)
-        if not force and not (confirm and confirm(plan.config_path, preview)):
-            raise CodeHelperError(
-                f"about to restore {plan.config_path} from {plan.backup_path} — "
-                f"refusing without confirmation (use --force)"
-            )
-    if plan.catalog_changed:
-        assert plan.catalog_backup_body is not None  # implied by catalog_changed
-        catalog_preview = diff_preview(
-            plan.catalog_current or "",
-            plan.catalog_backup_body,
-            label=str(plan.catalog_path),
+    if not plan.config_changed:
+        return
+    preview = diff_preview(plan.current, plan.backup_body)
+    if not force and not (confirm and confirm(plan.config_path, preview)):
+        raise CodeHelperError(
+            f"about to restore {plan.config_path} from {plan.backup_path} — "
+            f"refusing without confirmation (use --force)"
         )
-        if not force and not (confirm and confirm(plan.catalog_path, catalog_preview)):
-            raise CodeHelperError(
-                f"about to restore {plan.catalog_path} from "
-                f"{plan.catalog_backup_path} — refusing without confirmation "
-                f"(use --force)"
-            )
 
 
 def restore_default(
     paths: Paths,
     *,
     slot: int = 1,
-    catalog_json: str | None = None,
     dry_run: bool = False,
     force: bool = False,
     confirm=None,
 ) -> bool:
-    """Restore ``~/.codex/config.toml`` (and its paired catalog) from slot ``slot``.
+    """Restore ``~/.codex/config.toml`` from slot ``slot``.
 
     Does NOT itself create a new backup slot — restoring is the "put it back"
     operation, not a fresh edit to archive. If the user runs ``set-default``
     again afterwards, THAT invocation backs up the just-restored state.
 
-    Also restores the catalog's OWN backup at the same slot number, if one
-    exists (:func:`_catalog_backup_slots`) — a restored config.toml pointing
-    at ``model_catalog_json`` while the catalog itself still describes the
-    model this call just moved AWAY from is exactly the inconsistent
-    config<->catalog pairing this command exists to avoid. ``catalog_json``
-    resolves the catalog path the SAME way :func:`apply_set_default` does
-    (:func:`_resolve_catalog_path`) — pass the same value you passed to the
-    ``set-default`` call being undone, or omit it to use the default
-    ``~/.codex/model.json`` path. The catalog restore is best-effort: a
-    missing catalog backup (e.g. the catalog was never actually changed, or
-    this restores a state from before the catalog got its own backup ring)
-    is not an error — only the config.toml restore is mandatory.
+    No catalog to restore in step — ``apply_set_default`` no longer pairs a
+    ``~/.codex/model.json`` write with the config.toml patch (see its
+    docstring), so a restore here is a single-file operation.
 
     Raises:
         CodeHelperError: no config backup exists at ``slot``, or the overwrite
             is refused (no ``--force``/confirmation) — restoring can still
-            destroy a DIFFERENT current config.toml (or catalog) if either was
-            edited (by hand, or via another tool) since the backup was taken.
+            destroy a DIFFERENT current config.toml if it was edited (by
+            hand, or via another tool) since the backup was taken.
     """
-    plan = _restore_plan(paths, slot=slot, catalog_json=catalog_json)
+    plan = _restore_plan(paths, slot=slot)
 
-    if not plan.config_changed and not plan.catalog_changed:
+    if not plan.config_changed:
         print("no changes")
         return False
 
     if dry_run:
         # --dry-run never prompts and never refuses — it only previews, same
         # ordering as apply_set_default.
-        if plan.config_changed:
-            print(f"would restore {plan.config_path} from {plan.backup_path}")
-        if plan.catalog_changed:
-            print(f"would restore {plan.catalog_path} from {plan.catalog_backup_path}")
+        print(f"would restore {plan.config_path} from {plan.backup_path}")
         return True
 
     _confirm_restore(plan, force=force, confirm=confirm)
@@ -1170,52 +974,7 @@ def restore_default(
                 f"{plan.config_path} changed since it was read — refusing to "
                 "restore over a concurrent change; re-run to restore"
             )
-        # Only re-check the catalog when it is actually going to be restored —
-        # a concurrent hand-edit to a catalog this restore will NOT touch must
-        # not spuriously abort the mandatory config.toml restore.
-        if plan.catalog_changed:
-            current_catalog = read_text_or_none(plan.catalog_path)
-            if current_catalog != plan.catalog_current:
-                raise CodeHelperError(
-                    f"{plan.catalog_path} changed since it was read — refusing to "
-                    "restore over a concurrent change; re-run to restore"
-                )
-        # ``atomic_write`` can raise AFTER its content-committing ``os.replace``
-        # (the trailing chmod that restores an existing destination's prior
-        # mode bits sits outside that call's replace-guarded try/except), so a
-        # raised exception does not prove the write never landed. Mark
-        # ``config_wrote`` the moment the write is attempted, not only once it
-        # returns cleanly — otherwise a post-replace chmod failure here would
-        # skip the config rollback below despite config.toml already having
-        # been replaced.
-        config_wrote = False
-        try:
-            if plan.config_changed:
-                config_wrote = True
-                atomic_write(plan.config_path, plan.backup_body, mode=None)
-                print(f"restored {plan.config_path} from {plan.backup_path}")
-            if plan.catalog_changed:
-                assert (
-                    plan.catalog_backup_body is not None
-                )  # implied by catalog_changed
-                atomic_write(plan.catalog_path, plan.catalog_backup_body, mode=None)
-                print(f"restored {plan.catalog_path} from {plan.catalog_backup_path}")
-        except BaseException as restore_exc:
-            # config.toml was written first; if the catalog write then fails,
-            # roll the config back so the pair cannot be left inconsistent. If
-            # the rollback ITSELF fails, the original failure must not be
-            # silently replaced by the rollback's — both are surfaced, and the
-            # caller is told explicitly the pair was left inconsistent.
-            if config_wrote and plan.catalog_changed:
-                try:
-                    atomic_write(plan.config_path, plan.current, mode=None)
-                except BaseException as rollback_exc:
-                    raise CodeHelperError(
-                        f"{plan.catalog_path} restore failed ({restore_exc}), and "
-                        f"rolling back the already-restored {plan.config_path} "
-                        f"ALSO failed ({rollback_exc}) — the config<->catalog "
-                        "pair is left inconsistent; manual recovery required"
-                    ) from restore_exc
-            raise
+        atomic_write(plan.config_path, plan.backup_body, mode=None)
+        print(f"restored {plan.config_path} from {plan.backup_path}")
 
     return True

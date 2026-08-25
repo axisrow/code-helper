@@ -92,8 +92,8 @@ class ConfigShape(StrEnum):
     #: Codex's ``[model_providers.X]`` TOML profile (``base_url`` +
     #: ``wire_api`` + ``env_key``) plus ``-c`` overrides.
     #:
-    #: Implemented for ``codex × ollama`` (see ``render.openai_toml_body`` /
-    #: ``openai_catalog_body``): the renderer writes its own
+    #: Implemented for ``codex × ollama`` (see ``render.openai_toml_body``):
+    #: the renderer writes its own
     #: ``~/.codex/<alias>.config.toml`` and launches ``codex --profile <alias>``
     #: — this per-alias profile never reads or modifies ``~/.codex/config.toml``
     #: itself. That file has a separate, explicit writer instead: the
@@ -479,10 +479,13 @@ PROVIDERS: tuple[Provider, ...] = (
         auth="secret",
         token_env_var="LITELLM_API_KEY",
         model_list_api=ModelListAPI.OPENAI_V1,
-        # "chat", not "responses": LiteLLM's proxy implements
-        # /chat/completions across all its backends; /responses is not
-        # proxied uniformly for every provider it fronts.
-        wire_api="chat",
+        # "responses", the ONLY value current Codex accepts: chat/completions
+        # support was removed entirely (hard startup error since ~Feb 2026 —
+        # openai/codex discussion #7782). The old "chat, not responses" choice
+        # is moot because "chat" is no longer a wire_api a profile can carry;
+        # the LiteLLM proxy serves /v1/responses (the proxy itself must have
+        # responses mode enabled for the upstream backend).
+        wire_api="responses",
         description="LiteLLM proxy (user-supplied base URL)",
     ),
     Provider(
