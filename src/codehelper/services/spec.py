@@ -59,8 +59,8 @@ class TierModels:
 
     Claude Code asks for a haiku/sonnet/opus model separately, and a provider
     may map them to genuinely different models (``glm``) or to one model
-    repeated (``deepseek``). Collapsing this to a single field would lose the
-    former.
+    repeated (``deepseek-ollama``). Collapsing this to a single field would lose
+    the former.
     """
 
     haiku: str
@@ -265,7 +265,7 @@ _DEEPSEEK_MODEL = "deepseek-v4-flash:0731-cloud"
 
 PRESETS: tuple[Preset, ...] = (
     Preset(
-        alias="deepseek",
+        alias="deepseek-ollama",
         agent="claude",
         provider="ollama",
         shape=ConfigShape.ANTHROPIC_ENV,

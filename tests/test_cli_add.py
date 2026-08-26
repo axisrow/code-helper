@@ -258,7 +258,7 @@ def test_add_base_url_on_a_fixed_provider_is_refused(tmp_path, capsys):
 
 @pytest.mark.integration
 def test_add_base_url_with_a_preset_is_refused(tmp_path, capsys):
-    code = main(["add", "deepseek", "--base-url", "http://x/v1"])
+    code = main(["add", "deepseek-ollama", "--base-url", "http://x/v1"])
     assert code == 1
     assert "constructor form only" in capsys.readouterr().err
 
@@ -394,7 +394,7 @@ def test_add_auth_secret_on_an_already_secret_provider_is_a_no_op(
 
 @pytest.mark.integration
 def test_add_auth_applies_to_the_constructor_form_only(tmp_path, capsys):
-    code = main(["add", "deepseek", "--auth", "secret"])
+    code = main(["add", "deepseek-ollama", "--auth", "secret"])
     assert code == 1
     assert "constructor form only" in capsys.readouterr().err
 
@@ -652,6 +652,7 @@ def test_list_providers(tmp_path, capsys):
     assert main(["list", "providers"]) == 0
     out = capsys.readouterr().out
     assert "ollama" in out and "zai" in out and "litellm" in out
+    assert "deepseek" in out and "deepseek-openai" in out
 
 
 @pytest.mark.integration

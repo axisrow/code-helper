@@ -182,13 +182,13 @@ def test_switch_silent_when_env_token_matches_cached(tmp_path, monkeypatch, caps
 
 
 @pytest.mark.integration
-def test_switch_deepseek_to_glm_cross_provider(tmp_path, monkeypatch):
-    """deepseek -> glm (acceptance criteria in #60): both the model and
-    ANTHROPIC_BASE_URL must change, and deepseek's CLAUDE_CODE_SUBAGENT_MODEL
+def test_switch_deepseek_ollama_to_glm_cross_provider(tmp_path, monkeypatch):
+    """deepseek-ollama -> glm (acceptance criteria in #60): both the model and
+    ANTHROPIC_BASE_URL must change, and deepseek-ollama's CLAUDE_CODE_SUBAGENT_MODEL
     must not survive since the glm preset never sets one."""
     monkeypatch.setenv("ZAI_API_KEY", "sk-zai-secret")
 
-    assert _handle_switch(_preset_request("deepseek")) == 0
+    assert _handle_switch(_preset_request("deepseek-ollama")) == 0
     assert _settings(tmp_path)["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] == (
         "deepseek-v4-flash:0731-cloud"
     )
@@ -201,11 +201,11 @@ def test_switch_deepseek_to_glm_cross_provider(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_chip_preset_deepseek_applies_without_a_wrapper_file(tmp_path):
-    foreign = Paths.from_home(tmp_path).script_for("deepseek")
+def test_chip_preset_deepseek_ollama_applies_without_a_wrapper_file(tmp_path):
+    foreign = Paths.from_home(tmp_path).script_for("deepseek-ollama")
     foreign.parent.mkdir(parents=True)
     foreign.write_text("#!/bin/sh\necho foreign\n", encoding="utf-8")
-    assert _handle_switch(_preset_request("deepseek")) == 0
+    assert _handle_switch(_preset_request("deepseek-ollama")) == 0
     env = _settings(tmp_path)["env"]
     assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:11434"
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "deepseek-v4-flash:0731-cloud"

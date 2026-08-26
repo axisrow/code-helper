@@ -21,9 +21,14 @@ pip install -e ".[dev]"
 
 ```bash
 # curated presets
-codehelper add deepseek                  # create ~/.local/bin/deepseek
+codehelper add deepseek-ollama            # create ~/.local/bin/deepseek-ollama
 codehelper add glm                       # prompts for ZAI_API_KEY (or reads it from env)
-codehelper add deepseek --model X        # override the preset's model
+codehelper add deepseek-ollama --model X  # override the preset's model
+
+# cloud DeepSeek API: claude via its Anthropic-compatible surface, codex via
+# its OpenAI-compatible surface — both need DEEPSEEK_API_KEY
+codehelper add --agent claude --provider deepseek        --model deepseek-v4-flash
+codehelper add --agent codex  --provider deepseek-openai --model deepseek-v4-flash
 
 # build your own: agent + provider + model
 codehelper add --agent codex  --provider ollama --model glm-5:cloud
@@ -45,7 +50,7 @@ codehelper list providers                # backends and what they speak
 codehelper list matrix                   # which agent × provider pairings work
 codehelper add --agent codex --provider ollama --list-models
 
-codehelper --dry-run add deepseek        # preview, write nothing
+codehelper --dry-run add deepseek-ollama  # preview, write nothing
 codehelper add glm --profile work        # use a named token profile
 codehelper edit-token glm --profile work # rotate the selected profile
 codehelper edit-token glm                # choose a profile and rotate it
@@ -84,9 +89,12 @@ token-profile association.
 
 | Name | Agent | Backend | Auth |
 |---|---|---|---|
-| `deepseek` | Claude Code | local Ollama daemon, `deepseek-v4-flash:0731-cloud` | literal token (`ollama`) |
+| `deepseek-ollama` | Claude Code | local Ollama daemon, `deepseek-v4-flash:0731-cloud` | literal token (`ollama`) |
 | `glm` | Claude Code | Z.ai (`https://api.z.ai/api/anthropic`), `glm-5.3` | secret (`ZAI_API_KEY`) |
 | `glm-ollama` | Claude Code | `ollama launch claude --model glm-5.2:cloud` | none — `ollama launch` authenticates itself |
+
+There is no preset for the cloud DeepSeek API (`deepseek`/`deepseek-openai`
+providers) — use the constructor, as shown above.
 
 Presets exist alongside the constructor because they pin a curated model
 choice, not just "an agent and a provider". There is no `litellm` preset — a
@@ -127,7 +135,8 @@ window and auto-compacts there — even for models that really hold 1M.
 Generated wrappers and `switch` patches declare the real window via
 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` whenever the model is in the built-in
 catalog (`glm-5.3`, `glm-5.2`, `glm-5.2:cloud`,
-`deepseek-v4-flash:0731-cloud` — all 1M). Models outside the catalog are
+`deepseek-v4-flash:0731-cloud`, `deepseek-v4-pro`, `deepseek-v4-flash`,
+`deepseek-v4-flash-vision-exp` — all 1M). Models outside the catalog are
 left undeclared on purpose: a guessed window that exceeds the real one
 overflows the session mid-flight, so no data means no claim. If a model of
 yours is missing, add its real number to `MODEL_CONTEXT_WINDOWS` in
@@ -280,7 +289,8 @@ reads one back. Off a TTY, `set-default` refuses without `--force`, same as
 
 ## Where tokens live
 
-For a secret-auth provider (`zai`, `litellm`), profiles are stored per provider:
+For a secret-auth provider (`zai`, `litellm`, `deepseek`, `deepseek-openai`),
+profiles are stored per provider:
 
 ```json
 {

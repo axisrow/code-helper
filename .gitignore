@@ -11,3 +11,6 @@ venv/
 
 # Local release secrets (never committed)
 .env
+
+# Local agent notes (never committed)
+AGENTS.md

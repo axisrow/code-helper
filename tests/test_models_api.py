@@ -297,6 +297,29 @@ def test_gemini_openai_root_is_not_v1_normalized():
 
 
 @pytest.mark.unit
+def test_deepseek_anthropic_provider_lists_models_on_the_openai_surface():
+    """deepseek's base_url is the /anthropic path, which serves no OpenAI-style
+    model list — model_list_url redirects discovery to the OpenAI root."""
+    calls = []
+    list_models(
+        get_provider("deepseek"), fetch=_fetch_returning({"data": []}, record=calls)
+    )
+    assert calls[0][0] == "https://api.deepseek.com/v1/models"
+
+
+@pytest.mark.unit
+def test_deepseek_openai_bare_root_is_v1_normalized():
+    """deepseek-openai's base_url is a bare root — discovery hits /v1/models,
+    matching the endpoint the eventual install points Codex at."""
+    calls = []
+    list_models(
+        get_provider("deepseek-openai"),
+        fetch=_fetch_returning({"data": []}, record=calls),
+    )
+    assert calls[0][0] == "https://api.deepseek.com/v1/models"
+
+
+@pytest.mark.unit
 def test_empty_base_url_is_reported_before_any_normalization_or_fetch():
     """The clear "has no base URL configured" message must survive
     normalization — openai_base_url("") would otherwise turn it into a request
