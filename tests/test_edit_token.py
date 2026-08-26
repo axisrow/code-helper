@@ -58,7 +58,7 @@ def test_edit_token_unknown_name_exits_1(tmp_path, capsys):
 
 @pytest.mark.integration
 def test_edit_token_literal_auth_wrapper_rejected(tmp_path, capsys):
-    code = main(["edit-token", "deepseek"])
+    code = main(["edit-token", "deepseek-ollama"])
     assert code == 1
     err = capsys.readouterr().err
     assert "no editable token" in err

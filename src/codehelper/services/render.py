@@ -112,6 +112,9 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "glm-5.2": 1_000_000,
     "glm-5.2:cloud": 1_000_000,
     "deepseek-v4-flash:0731-cloud": 1_000_000,
+    "deepseek-v4-pro": 1_000_000,
+    "deepseek-v4-flash": 1_000_000,
+    "deepseek-v4-flash-vision-exp": 1_000_000,
 }
 
 

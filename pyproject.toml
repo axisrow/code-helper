@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "codehelper"
 dynamic = ["version"]
-description = "Manage generated Claude Code wrapper scripts (deepseek, glm, ...) in ~/.local/bin."
+description = "Manage generated Claude Code wrapper scripts (deepseek-ollama, glm, ...) in ~/.local/bin."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

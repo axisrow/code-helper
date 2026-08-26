@@ -8,7 +8,7 @@ had no names:
 ===========  =======  ==========================  =====================
 preset       agent    provider                    mechanism
 ===========  =======  ==========================  =====================
-deepseek     claude   ollama (direct HTTP)        ``ANTHROPIC_*`` env
+deepseek-ollama  claude   ollama (direct HTTP)    ``ANTHROPIC_*`` env
 glm          claude   z.ai                        ``ANTHROPIC_*`` env
 glm-ollama   claude   ollama (via ``launch``)     ``ollama launch``
 ===========  =======  ==========================  =====================
@@ -409,7 +409,8 @@ PROVIDERS: tuple[Provider, ...] = (
     Provider(
         name="ollama",
         # Three shapes: the daemon serves the Anthropic protocol directly (so
-        # `claude` can point straight at it — this is the `deepseek` preset),
+        # `claude` can point straight at it — this is the `deepseek-ollama`
+        # preset),
         # `ollama launch` can configure an agent for us (the `glm-ollama`
         # preset), and an OpenAI-compatible `/v1` endpoint feeds Codex's own
         # TOML profile (codex × ollama via OPENAI_TOML — no launcher binary
@@ -505,6 +506,53 @@ PROVIDERS: tuple[Provider, ...] = (
         model_list_api=ModelListAPI.OPENAI_V1,
         wire_api="chat",
         description="Google Gemini (OpenAI-compatible)",
+    ),
+    Provider(
+        name="deepseek",
+        # DeepSeek's Anthropic-compatible surface (https://api.deepseek.com/anthropic)
+        # drives Claude Code directly — the same two shapes as zai: a generated
+        # wrapper (ANTHROPIC_ENV) and a live `switch` (ANTHROPIC_SETTINGS).
+        shapes=frozenset({ConfigShape.ANTHROPIC_ENV, ConfigShape.ANTHROPIC_SETTINGS}),
+        base_url="https://api.deepseek.com/anthropic",
+        auth="secret",
+        token_env_var="DEEPSEEK_API_KEY",
+        # The /anthropic path serves no OpenAI-style model list, so discovery is
+        # pointed at the OpenAI surface explicitly (models_api.list_models uses
+        # model_list_url over base_url, then normalizes to .../v1/models).
+        model_list_api=ModelListAPI.OPENAI_V1,
+        model_list_url="https://api.deepseek.com",
+        # Discovery is available (OPENAI_V1 above), but these are the documented
+        # models to fall back on when the listing call fails — same role as
+        # zai's known_models, just not the only source.
+        known_models=(
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+        ),
+        description="DeepSeek (Anthropic-compatible)",
+    ),
+    Provider(
+        name="deepseek-openai",
+        # DeepSeek's OpenAI-compatible surface (https://api.deepseek.com, /v1 is
+        # a path alias) feeds Codex's TOML profile — the same single shape as
+        # gemini. DeepSeek natively serves the Responses API (POST /responses,
+        # added for Codex), so wire_api="responses" is the documented value.
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        base_url="https://api.deepseek.com",
+        # A bare root, NOT is_openai_root: openai_base_url appends /v1/ (the
+        # documented OpenAI surface), exactly like litellm's bare-root handling.
+        auth="secret",
+        token_env_var="DEEPSEEK_API_KEY",
+        model_list_api=ModelListAPI.OPENAI_V1,
+        # No model_list_url needed: base_url is already the OpenAI root, so
+        # discovery hits https://api.deepseek.com/v1/models directly.
+        wire_api="responses",
+        known_models=(
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+        ),
+        description="DeepSeek (OpenAI-compatible)",
     ),
     Provider(
         name="native",

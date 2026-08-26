@@ -439,7 +439,7 @@ def test_t_rotates_token_for_secret_wrapper_from_main_screen(monkeypatch):
     assert main(["add", "glm", "--profile", "default"]) == 0
     # Main screen rows: the two agent chipset rows (claude, codex), the proxy
     # chipset row, the `+ add agent` action row, then the wrapper list
-    # [deepseek, glm, glm-ollama] under Section("claude"). Five DOWNs reach
+    # [deepseek-ollama, glm, glm-ollama] under Section("claude"). Five DOWNs reach
     # glm; `t` opens its token profile picker, ENTER picks the first profile
     # (default), the getpass stub supplies the new token.
     _real_menu_keys(
@@ -1301,7 +1301,7 @@ def test_main_screen_marker_on_default_wrapper(monkeypatch):
         and e[0] not in ("add", "profile", "settings", "quit")
     }
     assert "●" in rows["glm"]
-    assert "●" not in rows["deepseek"]
+    assert "●" not in rows["deepseek-ollama"]
 
 
 @pytest.mark.integration
@@ -1317,7 +1317,7 @@ def test_main_screen_enter_sets_default_wrapper(monkeypatch):
 
     # Past the two agent chipset rows, the proxy row and the `+ add agent`
     # action row, then one more DOWN to reach glm (the second wrapper, after
-    # deepseek); Enter makes it the default.
+    # deepseek-ollama); Enter makes it the default.
     _real_menu_keys(
         monkeypatch, ["DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "ENTER", "CANCEL"]
     )
@@ -1345,7 +1345,7 @@ def test_wrapper_named_add_agent_is_selectable_from_main_screen(monkeypatch):
     )
     # The `add-agent` wrapper is the 8th selectable row: the two agent chipset
     # rows, the proxy row, the `+ add agent` action row, then the
-    # deepseek/glm/glm-ollama presets. Seven DOWNs reach it; Enter must set it
+    # deepseek-ollama/glm/glm-ollama presets. Seven DOWNs reach it; Enter must set it
     # as default, not open add-agent.
     _real_menu_keys(monkeypatch, ["DOWN"] * 7 + ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
@@ -1370,7 +1370,7 @@ def test_wrapper_named_add_wrapper_is_selectable_from_main_screen(monkeypatch):
     )
     # The `add-wrapper` wrapper is the 8th selectable row (two agent chipset
     # rows, the proxy row, the `+ add agent` action row, then the
-    # deepseek/glm/glm-ollama presets). Seven DOWNs reach it; Enter must set
+    # deepseek-ollama/glm/glm-ollama presets). Seven DOWNs reach it; Enter must set
     # it as default, not open the add flow.
     _real_menu_keys(monkeypatch, ["DOWN"] * 7 + ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
@@ -1390,14 +1390,14 @@ def test_main_screen_enter_on_an_unmanaged_foreign_file_does_not_set_a_ghost_def
     from codehelper.services.state import default_wrapper
 
     paths = Paths.default()
-    # A foreign executable at the "deepseek" preset's path — no ownership
+    # A foreign executable at the "deepseek-ollama" preset's path — no ownership
     # marker, so `is_installed` is True but `is_managed` is False.
     paths.bin_dir.mkdir(parents=True, exist_ok=True)
-    foreign = paths.script_for("deepseek")
+    foreign = paths.script_for("deepseek-ollama")
     foreign.write_text("#!/bin/sh\necho not ours\n", encoding="utf-8")
     foreign.chmod(0o755)
 
-    # `deepseek` is the first wrapper row, below the two agent chipset rows,
+    # `deepseek-ollama` is the first wrapper row, below the two agent chipset rows,
     # the proxy row and the `+ add agent` action row.
     _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "DOWN", "DOWN", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
@@ -1454,16 +1454,16 @@ def test_main_screen_groups_colliding_managed_wrapper_under_installed_agent(
 
 @pytest.mark.integration
 def test_main_screen_no_dead_end_for_non_secret_wrapper(monkeypatch, capsys):
-    """`t` on a non-secret wrapper (deepseek is literal) is a silent no-op —
+    """`t` on a non-secret wrapper (deepseek-ollama is literal) is a silent no-op —
     the old dead-end 'has no editable token.' screen is gone (issue #29)."""
-    # TOKEN on the first wrapper (deepseek, non-secret), reached past the two
+    # TOKEN on the first wrapper (deepseek-ollama, non-secret), reached past the two
     # agent chipset rows, the proxy row and the `+ add agent` action row, then
     # quit.
     _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "DOWN", "DOWN", "TOKEN", "CANCEL"])
     assert main(["tui"]) == 0
 
     output = capsys.readouterr().out
-    assert "deepseek has no editable token." not in output
+    assert "deepseek-ollama has no editable token." not in output
 
 
 @pytest.mark.integration
@@ -1508,7 +1508,7 @@ def test_e_on_chip_row_targets_highlighted_wrapper():
     from codehelper.cli.tui import TuiSession
 
     session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
-    session._chips = {"claude": ["native", "deepseek", "glm", "+ add"]}
+    session._chips = {"claude": ["native", "deepseek-ollama", "glm", "+ add"]}
     session._chip_index = {"claude": 2}
 
     assert session._token_action("agent:claude") == "token:glm"
@@ -1724,7 +1724,7 @@ def test_chips_include_claude_presets_without_wrapper_files(monkeypatch):
 
     claude = frames[0]["claude"]
     assert "glm" in claude
-    assert "deepseek" in claude
+    assert "deepseek-ollama" in claude
     assert "glm-ollama" in claude
 
 
@@ -1771,7 +1771,7 @@ def test_right_moves_the_chip_cursor_and_wraps(monkeypatch):
 
     # cursor on native
     assert f"{tui._REVERSE}✓ native{tui._RESET}" in frames[0]["claude"]
-    assert f"{tui._REVERSE}deepseek{tui._RESET}" in frames[1]["claude"]
+    assert f"{tui._REVERSE}deepseek-ollama{tui._RESET}" in frames[1]["claude"]
     assert f"{tui._REVERSE}glm{tui._RESET}" in frames[2]["claude"]
     assert f"{tui._REVERSE}glm-ollama{tui._RESET}" in frames[3]["claude"]
 
@@ -1841,9 +1841,9 @@ def test_chip_cursor_is_independent_per_agent(monkeypatch):
 
     import codehelper.cli.tui as tui
 
-    assert f"{tui._REVERSE}deepseek{tui._RESET}" in frames[1]["claude"]
+    assert f"{tui._REVERSE}deepseek-ollama{tui._RESET}" in frames[1]["claude"]
     assert (
-        f"{tui._REVERSE}deepseek{tui._RESET}" in frames[3]["claude"]
+        f"{tui._REVERSE}deepseek-ollama{tui._RESET}" in frames[3]["claude"]
     )  # survived the row round-trip
 
 
@@ -1933,7 +1933,7 @@ def test_enter_on_an_agent_row_applies_the_highlighted_chip(monkeypatch):
     _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
-    assert seen == ["deepseek"]
+    assert seen == ["deepseek-ollama"]
 
 
 @pytest.mark.unit
@@ -1944,13 +1944,13 @@ def test_claude_chip_request_is_a_noninteractive_hot_apply():
 
     request = tui.TuiSession(
         argparse.Namespace(dry_run=False, debug=False)
-    )._switch_request(from_preset="deepseek")
+    )._switch_request(from_preset="deepseek-ollama")
     assert request.force is True
-    assert request.from_preset == "deepseek"
+    assert request.from_preset == "deepseek-ollama"
 
 
 @pytest.mark.integration
-def test_enter_on_deepseek_chip_hot_applies_without_confirmation(monkeypatch):
+def test_enter_on_deepseek_ollama_chip_hot_applies_without_confirmation(monkeypatch):
     from codehelper.services.paths import Paths
 
     _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
@@ -1966,13 +1966,13 @@ def test_enter_on_deepseek_chip_hot_applies_without_confirmation(monkeypatch):
 
 
 @pytest.mark.integration
-def test_deepseek_chip_can_switch_back_to_native(monkeypatch):
+def test_deepseek_ollama_chip_can_switch_back_to_native(monkeypatch):
     """The reverse hot-apply explicitly resets the managed Claude env."""
     import codehelper.cli.tui as tui
     from codehelper.services.claude_settings import MANAGED_ENV_KEYS, current_switch
     from codehelper.services.paths import Paths
 
-    # Start on native, apply deepseek, move the chip cursor back, and apply
+    # Start on native, apply deepseek-ollama, move the chip cursor back, and apply
     # native.  The cursor must remain on the Claude row throughout.
     frames = _capture_frames(monkeypatch, ["RIGHT", "ENTER", "LEFT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
@@ -1992,7 +1992,7 @@ def test_deepseek_chip_can_switch_back_to_native(monkeypatch):
 
 
 @pytest.mark.integration
-def test_deepseek_chip_can_switch_to_glm_with_zai_url(monkeypatch):
+def test_deepseek_ollama_chip_can_switch_to_glm_with_zai_url(monkeypatch):
     """A live provider change updates both the model and endpoint."""
     from codehelper.services.paths import Paths
 
@@ -2078,11 +2078,11 @@ def test_enter_on_an_already_applied_chip_does_not_rewrite(monkeypatch):
 
 
 @pytest.mark.integration
-def test_enter_on_the_selected_deepseek_chip_is_a_silent_noop(monkeypatch):
+def test_enter_on_the_selected_deepseek_ollama_chip_is_a_silent_noop(monkeypatch):
     from codehelper.services.claude_settings import apply_switch
     from codehelper.services.wrappers import get_spec
 
-    spec = get_spec("deepseek")
+    spec = get_spec("deepseek-ollama")
     apply_switch(
         Paths.default(),
         provider=spec.provider,
@@ -2099,7 +2099,7 @@ def test_enter_on_the_selected_deepseek_chip_is_a_silent_noop(monkeypatch):
 
     # Frame 1 is after Right, frame 2 after the no-op Enter.  The same chip
     # stays selected; Enter must not reset or advance the chip cursor.
-    selected = f"{tui._REVERSE}✓ deepseek{tui._RESET}"
+    selected = f"{tui._REVERSE}✓ deepseek-ollama{tui._RESET}"
     assert selected in frames[1]["claude"]
     assert frames[2]["claude"] == frames[1]["claude"]
 
@@ -2138,7 +2138,7 @@ def test_a_removed_wrapper_disappears_from_the_strip(monkeypatch):
 
     import codehelper.cli.tui as tui
 
-    assert f"{tui._REVERSE}deepseek{tui._RESET}" in frames[1]["claude"]
+    assert f"{tui._REVERSE}deepseek-ollama{tui._RESET}" in frames[1]["claude"]
 
 
 @pytest.mark.unit

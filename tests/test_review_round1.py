@@ -322,7 +322,7 @@ def test_model_override_refreshes_the_description(tmp_path):
     """``list`` is the only place a user sees what a wrapper points at."""
     from codehelper.services.spec import get_preset, spec_from_preset
 
-    spec = spec_from_preset(get_preset("deepseek"), model_override="qwen3")
+    spec = spec_from_preset(get_preset("deepseek-ollama"), model_override="qwen3")
     assert "deepseek-v4-flash" not in spec.description
     assert "qwen3" in spec.description
 

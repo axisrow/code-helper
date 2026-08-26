@@ -97,6 +97,8 @@ def test_registry_has_builtin_providers():
         "zai",
         "litellm",
         "gemini",
+        "deepseek",
+        "deepseek-openai",
         "native",
     }
 
@@ -120,6 +122,62 @@ def test_gemini_is_openai_only_and_uses_documented_conventions():
 
 
 @pytest.mark.unit
+def test_deepseek_is_anthropic_compatible_and_switchable():
+    """Portrait of the cloud DeepSeek provider: Anthropic surface for claude,
+    switchable, discovery redirected to the OpenAI surface."""
+    deepseek = get_provider("deepseek")
+    assert deepseek.shapes == {
+        ConfigShape.ANTHROPIC_ENV,
+        ConfigShape.ANTHROPIC_SETTINGS,
+    }
+    assert deepseek.base_url == "https://api.deepseek.com/anthropic"
+    assert deepseek.auth == "secret"
+    assert deepseek.token_env_var == "DEEPSEEK_API_KEY"
+    # The /anthropic path serves no OpenAI model list — discovery must be
+    # pointed at the OpenAI root explicitly (models_api.list_models uses
+    # model_list_url over base_url).
+    assert deepseek.model_list_api is ModelListAPI.OPENAI_V1
+    assert deepseek.model_list_url == "https://api.deepseek.com"
+    assert deepseek.known_models == (
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+    )
+
+
+@pytest.mark.unit
+def test_deepseek_openai_is_openai_only_and_uses_documented_conventions():
+    """Portrait of the codex-facing provider: bare OpenAI root (NOT
+    is_openai_root — openai_base_url appends /v1/), Responses wire_api."""
+    ds = get_provider("deepseek-openai")
+    assert ds.shapes == {ConfigShape.OPENAI_TOML}
+    assert ds.base_url == "https://api.deepseek.com"
+    assert ds.base_url_is_openai_root is False
+    assert ds.auth == "secret"
+    assert ds.token_env_var == "DEEPSEEK_API_KEY"
+    assert ds.model_list_api is ModelListAPI.OPENAI_V1
+    assert ds.wire_api == "responses"
+
+
+@pytest.mark.unit
+def test_deepseek_pairing_matrix():
+    """claude x deepseek works (ANTHROPIC_ENV); codex x deepseek-openai works
+    (OPENAI_TOML); the cross pairings are impossible by shape intersection."""
+    assert (
+        resolve_shape(get_agent("claude"), get_provider("deepseek"))
+        is ConfigShape.ANTHROPIC_ENV
+    )
+    assert (
+        resolve_shape(get_agent("codex"), get_provider("deepseek-openai"))
+        is ConfigShape.OPENAI_TOML
+    )
+    with pytest.raises(CodeHelperError, match="no common configuration"):
+        resolve_shape(get_agent("claude"), get_provider("deepseek-openai"))
+    with pytest.raises(CodeHelperError, match="no common configuration"):
+        resolve_shape(get_agent("codex"), get_provider("deepseek"))
+
+
+@pytest.mark.unit
 def test_claude_gemini_has_no_common_configuration_mechanism():
     with pytest.raises(CodeHelperError, match="no common configuration"):
         resolve_shape(get_agent("claude"), get_provider("gemini"))
@@ -127,7 +185,7 @@ def test_claude_gemini_has_no_common_configuration_mechanism():
 
 @pytest.mark.unit
 def test_ollama_declares_three_shapes():
-    """One provider, three connection mechanisms: direct HTTP (deepseek),
+    """One provider, three connection mechanisms: direct HTTP (deepseek-ollama),
     `ollama launch` (glm-ollama), and a Codex TOML profile (codex × ollama) —
     plus ANTHROPIC_SETTINGS, so a live claude session can `switch` to it too."""
     ollama = get_provider("ollama")
@@ -290,6 +348,7 @@ def test_compatible_providers_for_claude():
         "ollama",
         "zai",
         "litellm",
+        "deepseek",
     }
 
 
@@ -300,6 +359,7 @@ def test_compatible_providers_for_codex_excludes_zai():
         "ollama",
         "litellm",
         "gemini",
+        "deepseek-openai",
     }
 
 
@@ -719,6 +779,7 @@ def test_switchable_providers_includes_native_and_the_settings_providers():
         "ollama",
         "zai",
         "litellm",
+        "deepseek",
         "native",
     }
 
