@@ -220,6 +220,26 @@ def test_rename_profile_preserves_the_token(tmp_path):
 
 
 @pytest.mark.unit
+def test_rename_profile_finds_a_profile_stored_under_a_retired_provider_name(
+    tmp_path,
+):
+    """A profile visible via profile_names(paths, "ollama-direct") only
+    because it lives under the retired "ollama" key (see
+    test_profile_names_includes_profiles_saved_under_a_retired_provider_name)
+    must actually be renamable through the current name — not silently
+    no-op just because rename_profile only ever looked at the CURRENT
+    name's own dict entry."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "ollama", "sk-legacy", profile_name="work")
+    assert "work" in profile_names(paths, "ollama-direct")
+
+    rename_profile(paths, "ollama-direct", "work", "personal")
+
+    assert credential_for(paths, "ollama-direct", "personal") == "sk-legacy"
+    assert "work" not in profile_names(paths, "ollama-direct")
+
+
+@pytest.mark.unit
 def test_save_credential_empty_token_is_a_noop(tmp_path):
     paths = _paths(tmp_path)
     save_credential(paths, "litellm", "")

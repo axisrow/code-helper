@@ -386,6 +386,16 @@ def rename_profile(
 ) -> None:
     """Rename one provider profile without exposing or losing its token.
 
+    ``old_name`` is looked up across every name in :func:`_storage_names`
+    (``provider_name`` plus its retired predecessor, if any) — not just
+    ``provider_name`` itself — because :func:`profile_names` (which is what a
+    caller lists ``old_name`` from in the first place) already includes
+    profiles still parked under a RETIRED provider name. Without this, a
+    profile visible only because of that legacy fallback would silently fail
+    to rename: the write always lands under the CURRENT name regardless of
+    which name the old entry was found under, so a stale legacy entry gets
+    migrated forward by the rename itself rather than left behind.
+
     Serialized against other writers in this module via :func:`_locked_update`
     (issue #17).
     """
@@ -393,14 +403,27 @@ def rename_profile(
         return
     with _locked_update(paths):
         data = load_credentials(paths)
-        profiles = data.get(provider_name)
-        if not profiles or old_name not in profiles:
+        source_name = next(
+            (
+                name
+                for name in _storage_names(provider_name)
+                if old_name in data.get(name, {})
+            ),
+            None,
+        )
+        if source_name is None:
             return
-        if new_name in profiles:
+        profiles = data[source_name]
+        target_profiles = data.setdefault(provider_name, {})
+        if new_name in target_profiles or (
+            source_name != provider_name and new_name in profiles
+        ):
             raise CodeHelperError(
                 f"profile {new_name!r} already exists for provider {provider_name}"
             )
-        profiles[new_name] = profiles.pop(old_name)
+        target_profiles[new_name] = profiles.pop(old_name)
+        if source_name != provider_name and not profiles:
+            del data[source_name]
         try:
             atomic_write(
                 paths.credentials_file(),
