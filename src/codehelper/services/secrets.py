@@ -435,6 +435,13 @@ def invalidate_cached_credential(
     env value is not meant to be cached at all, so simply removing the stale
     entry is enough — the next env-free run falls through to a fresh prompt.
 
+    Also drops the same profile cached under ``provider_name``'s RETIRED
+    predecessor name, if any (see :func:`_storage_names`) — :func:`credential_for`
+    falls back to that legacy key when the current name has no entry, so
+    dropping only the current name here would leave a stale/revoked token
+    cached under the old key fully reachable again on the very next
+    ``credential_for`` call, defeating the whole point of invalidating it.
+
     Like :func:`cache_freshly_typed_token`, this runs AFTER the wrapper
     install already succeeded, so a write failure here (full disk,
     unwritable ``config_dir``, permission error) must not surface as an
@@ -444,7 +451,8 @@ def invalidate_cached_credential(
     via :func:`_locked_update` (issue #17).
     """
     with _locked_update(paths):
-        _invalidate_locked(paths, provider_name, profile_name)
+        for name in _storage_names(provider_name):
+            _invalidate_locked(paths, name, profile_name)
 
 
 def _invalidate_locked(paths: Paths, provider_name: str, profile_name: str) -> None:

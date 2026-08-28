@@ -278,6 +278,41 @@ def test_invalidate_cached_credential_missing_file_is_a_noop(tmp_path):
 
 
 @pytest.mark.unit
+def test_invalidate_cached_credential_also_drops_the_retired_name_entry(tmp_path):
+    """A token cached under a RETIRED provider name (e.g. "ollama" before the
+    ollama -> ollama-direct rename) must not survive invalidating the CURRENT
+    name — credential_for falls back to the retired name (see
+    test_credential_for_finds_a_token_saved_under_a_retired_provider_name), so
+    if invalidation only dropped the current name's entry, a revoked/rotated
+    token cached under the old key would resurface on the very next
+    credential_for("ollama-direct") call, silently reinstalling it into a
+    freshly generated wrapper."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "ollama", "sk-old-revoked")
+    assert credential_for(paths, "ollama-direct") == "sk-old-revoked"
+
+    invalidate_cached_credential(paths, "ollama-direct")
+
+    assert credential_for(paths, "ollama-direct") == ""
+
+
+@pytest.mark.unit
+def test_invalidate_cached_credential_retired_name_drop_preserves_other_profiles(
+    tmp_path,
+):
+    """Dropping the retired-name entry during invalidation must only remove
+    the targeted profile, not every profile cached under the retired name."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "ollama", "sk-old-default")
+    save_credential(paths, "ollama", "sk-old-proxy", profile_name="proxy")
+
+    invalidate_cached_credential(paths, "ollama-direct")
+
+    assert credential_for(paths, "ollama-direct") == ""
+    assert credential_for(paths, "ollama-direct", "proxy") == "sk-old-proxy"
+
+
+@pytest.mark.unit
 def test_invalidate_cached_credential_swallows_oserror(tmp_path, capsys, monkeypatch):
     """Matches cache_freshly_typed_token's own OSError handling (finding K):
     the docstring promises "never raises", but until this fix the body called
