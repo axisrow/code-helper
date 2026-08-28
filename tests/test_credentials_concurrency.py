@@ -299,7 +299,7 @@ def test_seed_default_profile_race_loses_an_update_on_the_unlocked_path(tmp_path
         try:
             secrets_module.profile_names = _profile_names_then_wait
             results[label] = _seed_default_profile_check_outside_lock(
-                paths, "ollama", token
+                paths, "ollama-direct", token
             )
         except BaseException as exc:  # pragma: no cover - diagnostic only
             errors.append(exc)
@@ -321,7 +321,10 @@ def test_seed_default_profile_race_loses_an_update_on_the_unlocked_path(tmp_path
     )
 
     final = load_credentials(paths)
-    assert final.get("ollama", {}).get(DEFAULT_PROFILE) in ("token-A", "token-B"), (
+    assert final.get("ollama-direct", {}).get(DEFAULT_PROFILE) in (
+        "token-A",
+        "token-B",
+    ), (
         "expected exactly one of the two tokens to survive (the other "
         f"silently overwritten), got: {final}"
     )
@@ -343,7 +346,7 @@ def test_seed_default_profile_never_loses_a_concurrent_update(tmp_path):
     results: dict[str, bool] = {}
 
     def _seed(token: str) -> None:
-        results[token] = seed_default_profile(paths, "ollama", token)
+        results[token] = seed_default_profile(paths, "ollama-direct", token)
 
     threads = [threading.Thread(target=_seed, args=(t,)) for t in tokens]
     for t in threads:
@@ -357,7 +360,7 @@ def test_seed_default_profile_never_loses_a_concurrent_update(tmp_path):
     )
 
     final = load_credentials(paths)
-    assert final.get("ollama", {}).get(DEFAULT_PROFILE) == winners[0]
+    assert final.get("ollama-direct", {}).get(DEFAULT_PROFILE) == winners[0]
 
 
 @pytest.mark.unit

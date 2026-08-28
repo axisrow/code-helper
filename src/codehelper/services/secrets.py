@@ -41,7 +41,31 @@ from dataclasses import dataclass
 
 from codehelper.backends._atomic import atomic_write
 from codehelper.errors import CodeHelperError
+from codehelper.services.model import RETIRED_PROVIDER_NAMES
 from codehelper.services.paths import Paths
+
+#: Reverse of ``model.RETIRED_PROVIDER_NAMES`` — current provider name ->
+#: the retired name a pre-rename ``credentials.json`` may still hold a token
+#: under. Derived, not hand-maintained, so it cannot drift from the one
+#: source of truth in ``model.py``.
+_LEGACY_PROVIDER_NAME_FOR: dict[str, str] = {
+    current: retired for retired, current in RETIRED_PROVIDER_NAMES.items()
+}
+
+
+def _storage_names(provider_name: str) -> tuple[str, ...]:
+    """``provider_name``, plus its retired predecessor name if it has one.
+
+    The ONE decision point for "which keys in credentials.json/state.json
+    may this provider be stored under" — every read path below
+    (:func:`profile_names`, :func:`valid_active_profile`,
+    :func:`credential_for`) consults this instead of separately re-deriving
+    the same current-name/legacy-name fallback, so a second retired name
+    only ever needs updating here.
+    """
+    legacy_name = _LEGACY_PROVIDER_NAME_FOR.get(provider_name)
+    return (provider_name, legacy_name) if legacy_name else (provider_name,)
+
 
 try:
     import fcntl
@@ -134,8 +158,16 @@ def load_credentials(paths: Paths) -> dict[str, dict[str, str]]:
 
 
 def profile_names(paths: Paths, provider_name: str) -> tuple[str, ...]:
-    """Return the provider's profiles in stable display order."""
-    names = set(load_credentials(paths).get(provider_name, {}))
+    """Return the provider's profiles in stable display order.
+
+    Also includes any profile still stored under a RETIRED provider name
+    (see :func:`_storage_names`) — a rename must not orphan profiles a user
+    already saved under the old key.
+    """
+    creds = load_credentials(paths)
+    names: set[str] = set()
+    for name in _storage_names(provider_name):
+        names |= set(creds.get(name, {}))
     return tuple(sorted(names, key=lambda name: (name != DEFAULT_PROFILE, name)))
 
 
@@ -160,7 +192,10 @@ def valid_active_profile(paths: Paths, provider_name: str) -> str | None:
     if selection is None:
         return None
     active_provider_name, name = selection
-    if active_provider_name != provider_name:
+    # A pre-existing selection may still name a RETIRED provider (e.g.
+    # "ollama" before it was renamed to "ollama-direct") — match it against
+    # every name this provider may be stored under (see _storage_names).
+    if active_provider_name not in _storage_names(provider_name):
         return None
     return name if name in profile_names(paths, provider_name) else None
 
@@ -234,8 +269,23 @@ def seed_default_profile(paths: Paths, provider_name: str, token: str) -> bool:
 def credential_for(
     paths: Paths, provider_name: str, profile_name: str = DEFAULT_PROFILE
 ) -> str:
-    """The cached token for a profile, or ``""`` if none — never raises."""
-    return load_credentials(paths).get(provider_name, {}).get(profile_name, "")
+    """The cached token for a profile, or ``""`` if none — never raises.
+
+    Falls back to a RETIRED provider name (see :func:`_storage_names`, e.g.
+    ``"ollama"`` before it was renamed to ``"ollama-direct"``) when the
+    current name has no entry — a token cached under the old key before a
+    rename must stay reachable under the new one. Read-time fallback only:
+    this never rewrites ``credentials.json`` to migrate the key, so the old
+    entry is left in place (harmless — merely unreachable under its own
+    name going forward) until the next :func:`save_credential` for this
+    provider naturally lands it under the current name.
+    """
+    creds = load_credentials(paths)
+    for name in _storage_names(provider_name):
+        hit = creds.get(name, {}).get(profile_name, "")
+        if hit:
+            return hit
+    return ""
 
 
 #: Sibling lock file for ``credentials.json`` (issue #17). ``fcntl.flock`` is

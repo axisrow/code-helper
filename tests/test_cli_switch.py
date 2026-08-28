@@ -386,7 +386,7 @@ def test_switch_from_wrapper_rejects_a_non_claude_wrapper(tmp_path, monkeypatch)
                 "--agent",
                 "codex",
                 "--provider",
-                "ollama",
+                "ollama-direct",
                 "--model",
                 "x",
                 "--alias",
@@ -426,5 +426,5 @@ def test_list_providers_tags_native_as_switch_only(capsys):
     lines = {line.split()[0]: line for line in out.splitlines() if line.strip()}
     assert "(switch-only)" in lines["native"]
     assert "(switch-only)" not in lines["zai"]
-    assert "(switch-only)" not in lines["ollama"]
+    assert "(switch-only)" not in lines["ollama-direct"]
     assert "(switch-only)" not in lines["litellm"]

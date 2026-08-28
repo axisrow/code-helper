@@ -129,7 +129,7 @@ def test_deepseek_ollama_is_literal_auth():
     assert spec.provider.base_url == "http://127.0.0.1:11434"
     # Same provider as glm-ollama, different shape — that is the whole point
     # of naming the axes.
-    assert spec.provider.name == "ollama"
+    assert spec.provider.name == "ollama-direct"
     assert spec.shape is ConfigShape.ANTHROPIC_ENV
 
 
@@ -313,7 +313,9 @@ def test_command_shape_forwards_settings_only_to_claude_like_agents():
     from codehelper.services.model import get_agent
 
     # hermes is OLLAMA_LAUNCH-only, so the shape cannot resolve away from it
-    spec = build_spec(agent=get_agent("hermes"), provider="ollama", model="qwen3.5:9b")
+    spec = build_spec(
+        agent=get_agent("hermes"), provider="ollama-direct", model="qwen3.5:9b"
+    )
     body = render_script(spec, "")
     assert "--settings" not in body
     assert "exec ollama launch hermes --model 'qwen3.5:9b' -- \"$@\"" in body
@@ -578,7 +580,7 @@ def test_discover_managed_finds_ad_hoc_wrappers(tmp_path):
     """A wrapper built from the axes has no preset — the marker is its only record."""
     paths = Paths.from_home(tmp_path)
     install_wrapper(
-        paths, build_spec(agent="codex", provider="ollama", model="qwen3.5:9b")
+        paths, build_spec(agent="codex", provider="ollama-direct", model="qwen3.5:9b")
     )
     paths.script_for("stranger").write_text("#!/bin/sh\n", encoding="utf-8")
 
@@ -596,13 +598,13 @@ def test_spec_from_installed_reconstructs_a_user_agent_wrapper(tmp_path):
     paths = Paths.from_home(tmp_path)
     add_user_agent(paths, "myagent", "myagent", "a real CLI")
     agent = get_agent(paths, "myagent")
-    spec = build_spec(agent=agent, provider="ollama", model="qwen3.5:9b")
+    spec = build_spec(agent=agent, provider="ollama-direct", model="qwen3.5:9b")
     install_wrapper(paths, spec)
 
     rebuilt = spec_from_installed(paths, spec.alias)
     assert rebuilt is not None
     assert rebuilt.agent.name == "myagent"
-    assert rebuilt.provider.name == "ollama"
+    assert rebuilt.provider.name == "ollama-direct"
 
 
 @pytest.mark.integration
@@ -654,7 +656,7 @@ def test_valid_default_wrapper_returns_a_managed_alias(tmp_path):
 
     paths = Paths.from_home(tmp_path)
     install_wrapper(
-        paths, build_spec(agent="codex", provider="ollama", model="qwen3.5:9b")
+        paths, build_spec(agent="codex", provider="ollama-direct", model="qwen3.5:9b")
     )
     set_default_wrapper(paths, "codex", "qwen3.5-codex")
     assert valid_default_wrapper(paths, "codex") == "qwen3.5-codex"
@@ -709,7 +711,9 @@ def test_valid_default_wrapper_installed_wrapper_wins_over_same_named_preset(tmp
     # Install a codex wrapper named "glm" (collides with the claude preset).
     install_wrapper(
         paths,
-        build_spec(agent="codex", provider="ollama", model="qwen3.5:9b", alias="glm"),
+        build_spec(
+            agent="codex", provider="ollama-direct", model="qwen3.5:9b", alias="glm"
+        ),
     )
     set_default_wrapper(paths, "claude", "glm")
     assert (
@@ -891,7 +895,7 @@ def test_cli_dry_run_add_does_not_write(tmp_path):
 
 
 def _toml_spec(model: str = "glm-5.2:cloud", alias: str = "glm-5-codex") -> WrapperSpec:
-    return build_spec(agent="codex", provider="ollama", model=model, alias=alias)
+    return build_spec(agent="codex", provider="ollama-direct", model=model, alias=alias)
 
 
 @pytest.mark.unit
@@ -929,13 +933,13 @@ def test_openai_toml_body_carries_marker_model_base_url_wire_api():
     # Data-driven: table key + model_provider derive from spec.provider.name,
     # not a hardcoded "ollama-launch" — that is what makes a second
     # OpenAI-compatible provider a PROVIDERS entry rather than a renderer edit.
-    assert 'model_provider = "ollama"' in body
+    assert 'model_provider = "ollama-direct"' in body
     # No catalog: an empty base_instructions would silently replace Codex's
     # real system prompt. glm-5.2:cloud resolves in MODEL_CONTEXT_WINDOWS, so
     # the window rides along as a plain config.toml key instead.
     assert "model_catalog_json" not in body
     assert "model_context_window = 1000000" in body
-    assert "[model_providers.ollama]" in body
+    assert "[model_providers.ollama-direct]" in body
     # The display name is the provider's description (falling back to its name).
     assert 'name = "local Ollama daemon"' in body
     # base_url derives /v1/ from the provider's Anthropic-root base_url.
@@ -971,21 +975,23 @@ def test_openai_toml_body_quoted_model_with_colon_and_dot():
 
 @pytest.mark.unit
 def test_openai_toml_wrapper_body_is_unchanged_for_a_literal_provider():
-    """GOLDEN: byte-exact output for a non-secret (``ollama``, literal) provider.
+    """GOLDEN: byte-exact output for a non-secret (``ollama-direct``, literal)
+    provider.
 
     A literal string, not a re-render of the same function — proving the
     function equals itself proves nothing. This is what pins the OPENAI_TOML
     wrapper's structure across the env_key/export change added for a secret
-    provider (e.g. a runtime-``base_url`` LiteLLM proxy): for ``ollama`` the
-    output MUST stay exactly what it already is, or every previously-installed
-    ``codex × ollama`` wrapper stops matching ``_decide``'s SKIP path and gets
-    silently rewritten on the next ``add``.
+    provider (e.g. a runtime-``base_url`` LiteLLM proxy): for
+    ``ollama-direct`` the output MUST stay exactly what it already is, or
+    every previously-installed ``codex × ollama-direct`` wrapper stops
+    matching ``_decide``'s SKIP path and gets silently rewritten on the next
+    ``add``.
     """
     spec = _toml_spec(model="glm-5.2:cloud", alias="glm-5-codex")
     body = render_script(spec, "")
     assert body == (
         "#!/bin/bash\n"
-        "# codehelper: managed wrapper (agent=codex, provider=ollama, "
+        "# codehelper: managed wrapper (agent=codex, provider=ollama-direct, "
         "shape=openai-toml)\n"
         "exec codex --profile 'glm-5-codex' \"$@\"\n"
     )
@@ -993,7 +999,7 @@ def test_openai_toml_wrapper_body_is_unchanged_for_a_literal_provider():
 
 @pytest.mark.unit
 def test_openai_toml_profile_has_no_env_key_for_a_literal_provider():
-    """GOLDEN: no env_key line for a non-secret provider (ollama)."""
+    """GOLDEN: no env_key line for a non-secret provider (ollama-direct)."""
     spec = _toml_spec(model="glm-5.2:cloud", alias="glm-5-codex")
     body = openai_toml_body(spec)
     assert "env_key" not in body
@@ -1046,11 +1052,11 @@ def test_secret_openai_toml_token_with_a_quote_is_shell_safe():
 def test_an_existing_ollama_wrapper_reinstalls_as_a_no_op(tmp_path):
     """The install-time proof, not just the render-time one.
 
-    Installs `codex × ollama`, reinstalls the identical spec, and asserts
-    `install_wrapper` returns False (`_decide`'s SKIP path) — this is the
-    thing the golden byte tests above exist to protect: a structural change to
-    the renderer that DOES change ollama's output would turn this into a
-    silent rewrite instead of a no-op.
+    Installs `codex × ollama-direct`, reinstalls the identical spec, and
+    asserts `install_wrapper` returns False (`_decide`'s SKIP path) — this is
+    the thing the golden byte tests above exist to protect: a structural
+    change to the renderer that DOES change ollama-direct's output would turn
+    this into a silent rewrite instead of a no-op.
     """
     paths = Paths.from_home(tmp_path)
     spec = _toml_spec(model="glm-5.2:cloud", alias="glm-5-codex")
@@ -1417,7 +1423,7 @@ def test_install_openai_toml_refuses_handwritten_wrapper_without_marker(tmp_path
 
 @pytest.mark.integration
 def test_spec_from_installed_recovers_model_from_toml_profile(tmp_path):
-    """edit-token reaches a codex × ollama wrapper and recovers its model (F7).
+    """edit-token reaches a codex × ollama-direct wrapper and recovers its model (F7).
 
     The OPENAI_TOML wrapper body carries no model — it lives in the sibling
     TOML profile. spec_from_installed must read it from there, else edit-token
@@ -1431,7 +1437,7 @@ def test_spec_from_installed_recovers_model_from_toml_profile(tmp_path):
     assert spec is not None
     assert spec.model == "glm-5.2:cloud"
     assert spec.agent.name == "codex"
-    assert spec.provider.name == "ollama"
+    assert spec.provider.name == "ollama-direct"
     assert spec.shape is ConfigShape.OPENAI_TOML
 
 
@@ -1607,12 +1613,12 @@ def test_spec_from_installed_falls_back_to_the_default_for_overridable(
     import codehelper.services.model as model_mod
     from codehelper.services.model import BaseUrlPolicy
 
-    ollama = get_provider("ollama")
+    ollama = get_provider("ollama-direct")
     patched = replace(ollama, base_url_policy=BaseUrlPolicy.OVERRIDABLE)
     monkeypatch.setattr(
         model_mod,
         "PROVIDERS",
-        tuple(patched if p.name == "ollama" else p for p in model_mod.PROVIDERS),
+        tuple(patched if p.name == "ollama-direct" else p for p in model_mod.PROVIDERS),
     )
 
     paths = Paths.from_home(tmp_path)
@@ -1622,6 +1628,31 @@ def test_spec_from_installed_falls_back_to_the_default_for_overridable(
     recovered = spec_from_installed(paths, "ov")
     assert recovered is not None
     assert recovered.provider.base_url == "http://127.0.0.1:11434"
+
+
+@pytest.mark.integration
+def test_spec_from_installed_resolves_a_marker_from_before_the_ollama_rename(
+    tmp_path,
+):
+    """A wrapper marker written by an OLDER codehelper still says
+    ``provider=ollama`` (before the ollama -> ollama-direct rename, forced by
+    Codex CLI v0.150.1 reserving that name) — spec_from_installed must still
+    resolve it to the CURRENT ``ollama-direct`` Provider object via
+    get_provider_for_legacy_read, not treat the wrapper as foreign/corrupt.
+    """
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="claude", provider="ollama-direct", model="m", alias="old")
+    install_wrapper(paths, spec, token="")
+
+    script = paths.script_for("old")
+    body = script.read_text(encoding="utf-8")
+    legacy_body = body.replace("provider=ollama-direct", "provider=ollama")
+    assert legacy_body != body  # sanity: the replace actually matched
+    script.write_text(legacy_body, encoding="utf-8")
+
+    recovered = spec_from_installed(paths, "old")
+    assert recovered is not None
+    assert recovered.provider.name == "ollama-direct"
 
 
 @pytest.mark.integration
@@ -1654,7 +1685,9 @@ def test_spec_from_installed_ignores_a_file_base_url_for_a_fixed_provider(tmp_pa
     axis on which the file could carry a legitimate override, so honouring
     it would let a hand-edit silently redirect a wrapper's endpoint."""
     paths = Paths.from_home(tmp_path)
-    spec = build_spec(agent="claude", provider="ollama", model="m", alias="ollama-t")
+    spec = build_spec(
+        agent="claude", provider="ollama-direct", model="m", alias="ollama-t"
+    )
     install_wrapper(paths, spec, token="")
 
     script = paths.script_for("ollama-t")
@@ -1728,7 +1761,7 @@ def test_shape_switch_cleans_up_orphaned_openai_toml_siblings(tmp_path, capsys):
     # Switch the alias to the launcher shape (claude × ollama via ollama-launch).
     launcher_spec = build_spec(
         agent="claude",
-        provider="ollama",
+        provider="ollama-direct",
         model="glm-5:cloud",
         alias=alias,
         shape=ConfigShape.OLLAMA_LAUNCH,
@@ -1762,7 +1795,7 @@ def test_shape_switch_leaves_foreign_siblings(tmp_path):
 
     launcher_spec = build_spec(
         agent="claude",
-        provider="ollama",
+        provider="ollama-direct",
         model="glm-5:cloud",
         alias=alias,
         shape=ConfigShape.OLLAMA_LAUNCH,
@@ -1832,7 +1865,7 @@ def test_shape_switch_cleanup_refuses_to_delete_a_foreign_catalog(tmp_path):
 
     launcher_spec = build_spec(
         agent="claude",
-        provider="ollama",
+        provider="ollama-direct",
         model="glm-5:cloud",
         alias=alias,
         shape=ConfigShape.OLLAMA_LAUNCH,
@@ -1875,7 +1908,7 @@ def test_shape_switch_cleanup_leaves_a_legacy_catalog_with_no_self_marker(tmp_pa
 
     launcher_spec = build_spec(
         agent="claude",
-        provider="ollama",
+        provider="ollama-direct",
         model="glm-5:cloud",
         alias=alias,
         shape=ConfigShape.OLLAMA_LAUNCH,
@@ -1930,7 +1963,7 @@ def test_install_openai_toml_skip_still_cleans_orphaned_siblings_and_reports_it(
     # point by re-manufacturing an orphaned sibling by hand afterwards).
     launcher_spec = build_spec(
         agent="claude",
-        provider="ollama",
+        provider="ollama-direct",
         model="glm-5:cloud",
         alias=alias,
         shape=ConfigShape.OLLAMA_LAUNCH,
@@ -2065,7 +2098,7 @@ def test_describe_wrapper_marker_preserves_state_column_alignment():
     from codehelper.services.wrappers import describe_wrapper
 
     spec = build_spec(
-        agent="claude", provider="ollama", model="qwen3.5:9b", alias="glm"
+        agent="claude", provider="ollama-direct", model="qwen3.5:9b", alias="glm"
     )
     unmarked = describe_wrapper(
         spec, installed=True, installed_word="installed", not_installed_word="missing"
@@ -2086,7 +2119,7 @@ def test_remove_wrapper_removes_owned_siblings_and_clears_default(tmp_path):
     from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
-    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    spec = build_spec(agent="codex", provider="ollama-direct", model="remove-me")
     install_wrapper(paths, spec)
     set_default_wrapper(paths, "codex", spec.alias)
 
@@ -2104,7 +2137,7 @@ def test_remove_wrapper_asks_confirm_before_unlinking(tmp_path):
     from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
-    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    spec = build_spec(agent="codex", provider="ollama-direct", model="remove-me")
     install_wrapper(paths, spec)
 
     seen = []
@@ -2132,7 +2165,7 @@ def test_remove_wrapper_force_bypasses_confirm(tmp_path):
     from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
-    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    spec = build_spec(agent="codex", provider="ollama-direct", model="remove-me")
     install_wrapper(paths, spec)
 
     def explode(_targets):
@@ -2148,7 +2181,7 @@ def test_remove_wrapper_dry_run_never_asks_confirm(tmp_path):
     from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
-    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    spec = build_spec(agent="codex", provider="ollama-direct", model="remove-me")
     install_wrapper(paths, spec)
 
     def explode(_targets):
@@ -2183,7 +2216,7 @@ def test_remove_wrapper_survives_a_failed_sibling_unlink(tmp_path, monkeypatch):
     from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
-    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    spec = build_spec(agent="codex", provider="ollama-direct", model="remove-me")
     install_wrapper(paths, spec)
     set_default_wrapper(paths, "codex", spec.alias)
 
@@ -2239,7 +2272,7 @@ def test_remove_wrapper_reports_but_does_not_undo_a_failed_default_clear(
     from codehelper.services.wrappers import remove_wrapper
 
     paths = Paths.from_home(tmp_path)
-    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    spec = build_spec(agent="codex", provider="ollama-direct", model="remove-me")
     install_wrapper(paths, spec)
     set_default_wrapper(paths, "codex", spec.alias)
 
@@ -2268,7 +2301,7 @@ def test_cli_remove_refuses_off_a_tty_without_force(tmp_path, monkeypatch):
     same off-a-TTY fail-fast contract as ``add``'s foreign-file guard."""
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     paths = Paths.from_home(tmp_path)
-    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    spec = build_spec(agent="codex", provider="ollama-direct", model="remove-me")
     install_wrapper(paths, spec)
 
     assert main(["remove", spec.alias]) == 1
@@ -2279,7 +2312,7 @@ def test_cli_remove_refuses_off_a_tty_without_force(tmp_path, monkeypatch):
 def test_cli_remove_force_bypasses_confirm_off_a_tty(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     paths = Paths.from_home(tmp_path)
-    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    spec = build_spec(agent="codex", provider="ollama-direct", model="remove-me")
     install_wrapper(paths, spec)
 
     assert main(["remove", spec.alias, "--force"]) == 0
@@ -2290,7 +2323,7 @@ def test_cli_remove_force_bypasses_confirm_off_a_tty(tmp_path, monkeypatch):
 def test_cli_remove_dry_run_never_prompts_and_never_writes(tmp_path, monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     paths = Paths.from_home(tmp_path)
-    spec = build_spec(agent="codex", provider="ollama", model="remove-me")
+    spec = build_spec(agent="codex", provider="ollama-direct", model="remove-me")
     install_wrapper(paths, spec)
 
     assert main(["--dry-run", "remove", spec.alias]) == 0

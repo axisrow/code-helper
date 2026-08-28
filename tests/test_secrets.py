@@ -99,6 +99,33 @@ def test_credential_for_missing_provider_is_empty_string(tmp_path):
     assert credential_for(_paths(tmp_path), "litellm") == ""
 
 
+@pytest.mark.unit
+def test_credential_for_finds_a_token_saved_under_a_retired_provider_name(tmp_path):
+    """A token cached under "ollama" (before the ollama -> ollama-direct
+    rename) must stay reachable when queried under the CURRENT name — the
+    old credentials.json entry is not migrated in place, just still found."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "ollama", "sk-legacy")
+    assert credential_for(paths, "ollama-direct") == "sk-legacy"
+
+
+@pytest.mark.unit
+def test_credential_for_prefers_the_current_name_over_the_retired_one(tmp_path):
+    paths = _paths(tmp_path)
+    save_credential(paths, "ollama", "sk-legacy")
+    save_credential(paths, "ollama-direct", "sk-current")
+    assert credential_for(paths, "ollama-direct") == "sk-current"
+
+
+@pytest.mark.unit
+def test_profile_names_includes_profiles_saved_under_a_retired_provider_name(
+    tmp_path,
+):
+    paths = _paths(tmp_path)
+    save_credential(paths, "ollama", "sk-legacy", profile_name="proxy")
+    assert "proxy" in profile_names(paths, "ollama-direct")
+
+
 # --------------------------------------------------------------------------- #
 # save_credential
 # --------------------------------------------------------------------------- #
@@ -812,8 +839,8 @@ def test_token_for_discovery_still_uses_cache_for_a_fixed_provider(tmp_path):
 def test_token_for_discovery_empty_for_non_secret_provider(tmp_path):
     """A literal/none provider never needs a token — don't even read the cache."""
     paths = _paths(tmp_path)
-    save_credential(paths, "ollama", "should-not-be-returned")
-    provider = _Provider(auth="literal", token_env_var="DUMMY", name="ollama")
+    save_credential(paths, "dummy", "should-not-be-returned")
+    provider = _Provider(auth="literal", token_env_var="DUMMY", name="dummy")
     result = token_for_discovery(paths, provider, environ={"DUMMY": "sk-ignored"})
     assert result == ""
 

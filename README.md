@@ -31,9 +31,9 @@ codehelper add --agent claude --provider deepseek        --model deepseek-v4-fla
 codehelper add --agent codex  --provider deepseek-openai --model deepseek-v4-flash
 
 # build your own: agent + provider + model
-codehelper add --agent codex  --provider ollama --model glm-5:cloud
+codehelper add --agent codex  --provider ollama-direct --model glm-5:cloud
                                           # -> ~/.local/bin/glm-5-codex
-codehelper add --agent claude --provider ollama --model qwen3.5:9b \
+codehelper add --agent claude --provider ollama-direct --model qwen3.5:9b \
                 --alias qwen              # -> ~/.local/bin/qwen
 
 # a provider whose endpoint YOU choose (a self-hosted LiteLLM proxy) needs
@@ -48,7 +48,7 @@ codehelper list                          # wrappers + install state
 codehelper list agents                   # agents and how each can be configured
 codehelper list providers                # backends and what they speak
 codehelper list matrix                   # which agent × provider pairings work
-codehelper add --agent codex --provider ollama --list-models
+codehelper add --agent codex --provider ollama-direct --list-models
 
 codehelper --dry-run add deepseek-ollama  # preview, write nothing
 codehelper add glm --profile work        # use a named token profile
@@ -57,7 +57,7 @@ codehelper edit-token glm                # choose a profile and rotate it
 codehelper                               # arrow-key menu over all of the above
 
 # change what a bare `codex` (no wrapper) runs by default
-codehelper set-default --agent codex --provider ollama --model glm-5.2:cloud
+codehelper set-default --agent codex --provider ollama-direct --model glm-5.2:cloud
 codehelper set-default --restore         # undo the last set-default
 ```
 
@@ -148,7 +148,7 @@ yours is missing, add its real number to `MODEL_CONTEXT_WINDOWS` in
 an explanation rather than generating a wrapper that fails at runtime:
 
 ```
-        ollama         zai            litellm
+        ollama-direct  zai            litellm
 claude  anthropic-env  anthropic-env  anthropic-env
 codex   openai-toml    —              openai-toml
 ```
@@ -236,8 +236,8 @@ start on the backend you chose. It does this by patching Codex's own
 `model_catalog_json` keys, and the matching `[model_providers.X]` table.
 
 ```bash
-codehelper set-default --agent codex --provider ollama --model glm-5.2:cloud
-codehelper set-default --agent codex --provider ollama --model glm-5.2:cloud --dry-run
+codehelper set-default --agent codex --provider ollama-direct --model glm-5.2:cloud
+codehelper set-default --agent codex --provider ollama-direct --model glm-5.2:cloud --dry-run
 codehelper set-default --restore                # undo, from the newest backup
 codehelper set-default --restore --slot 2        # or an older one
 ```

@@ -43,7 +43,7 @@ from codehelper.services.render import _render_anthropic_env
 from codehelper.services.spec import TierModels, WrapperSpec
 
 ZAI = get_provider("zai")
-OLLAMA = get_provider("ollama")
+OLLAMA = get_provider("ollama-direct")
 LITELLM = get_provider("litellm")
 NATIVE = get_provider("native")
 
@@ -321,7 +321,7 @@ def test_patch_settings_native_keeps_empty_managed_keys_for_live_reset():
 
 @pytest.mark.unit
 def test_patch_settings_replaces_a_previous_switch():
-    """zai -> ollama must not leave zai's CLAUDE_CODE_SUBAGENT_MODEL behind."""
+    """zai -> ollama-direct must not leave zai's CLAUDE_CODE_SUBAGENT_MODEL behind."""
     original = {
         "env": {
             "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
@@ -330,7 +330,7 @@ def test_patch_settings_replaces_a_previous_switch():
         }
     }
     new_patch = SettingsPatch(
-        provider_name="ollama",
+        provider_name="ollama-direct",
         env={
             "ANTHROPIC_BASE_URL": "http://127.0.0.1:11434",
             "ANTHROPIC_AUTH_TOKEN": "ollama",

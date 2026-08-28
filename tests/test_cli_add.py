@@ -33,7 +33,15 @@ def test_add_agent_provider_model_creates_wrapper(tmp_path):
     ``render.openai_toml_body``).
     """
     code = main(
-        ["add", "--agent", "codex", "--provider", "ollama", "--model", "glm-5:cloud"]
+        [
+            "add",
+            "--agent",
+            "codex",
+            "--provider",
+            "ollama-direct",
+            "--model",
+            "glm-5:cloud",
+        ]
     )
     assert code == 0
     paths = Paths.from_home(tmp_path)
@@ -56,7 +64,7 @@ def test_add_codex_ollama_with_explicit_launcher_shape(tmp_path):
             "--agent",
             "codex",
             "--provider",
-            "ollama",
+            "ollama-direct",
             "--model",
             "glm-5:cloud",
             "--shape",
@@ -80,7 +88,7 @@ def test_add_explicit_alias_wins(tmp_path):
             "--agent",
             "codex",
             "--provider",
-            "ollama",
+            "ollama-direct",
             "--model",
             "glm-5:cloud",
             "--alias",
@@ -92,7 +100,7 @@ def test_add_explicit_alias_wins(tmp_path):
 
 @pytest.mark.integration
 def test_add_agent_requires_model(tmp_path, capsys):
-    assert main(["add", "--agent", "codex", "--provider", "ollama"]) == 1
+    assert main(["add", "--agent", "codex", "--provider", "ollama-direct"]) == 1
     assert "--model is required" in capsys.readouterr().err
 
 
@@ -104,13 +112,16 @@ def test_add_agent_and_provider_must_come_together(tmp_path, capsys):
 
 @pytest.mark.integration
 def test_preset_and_axes_are_mutually_exclusive(tmp_path, capsys):
-    assert main(["add", "glm", "--agent", "codex", "--provider", "ollama"]) == 1
+    assert main(["add", "glm", "--agent", "codex", "--provider", "ollama-direct"]) == 1
     assert "not both" in capsys.readouterr().err
 
 
 @pytest.mark.integration
 def test_unknown_agent_exits_1(tmp_path, capsys):
-    assert main(["add", "--agent", "nope", "--provider", "ollama", "--model", "m"]) == 1
+    assert (
+        main(["add", "--agent", "nope", "--provider", "ollama-direct", "--model", "m"])
+        == 1
+    )
     assert "unknown agent" in capsys.readouterr().err
 
 
@@ -133,7 +144,7 @@ def test_launch_only_agent_incompatible_with_zai(tmp_path, capsys):
     )
     err = capsys.readouterr().err
     assert "no common configuration" in err
-    assert "ollama" in err
+    assert "ollama-direct" in err
 
 
 @pytest.mark.integration
@@ -245,7 +256,7 @@ def test_add_base_url_on_a_fixed_provider_is_refused(tmp_path, capsys):
             "--agent",
             "claude",
             "--provider",
-            "ollama",
+            "ollama-direct",
             "--base-url",
             "http://x/v1",
             "--model",
@@ -320,7 +331,7 @@ def test_add_ollama_with_auth_secret_writes_a_secret_mode_wrapper(
             "--agent",
             "claude",
             "--provider",
-            "ollama",
+            "ollama-direct",
             "--auth",
             "secret",
             "--model",
@@ -348,7 +359,7 @@ def test_add_ollama_without_auth_flag_keeps_the_literal_default(tmp_path):
             "--agent",
             "claude",
             "--provider",
-            "ollama",
+            "ollama-direct",
             "--model",
             "glm-5:cloud",
             "--alias",
@@ -411,7 +422,7 @@ def test_add_auth_rejects_an_unknown_value(tmp_path, capsys):
                 "--agent",
                 "claude",
                 "--provider",
-                "ollama",
+                "ollama-direct",
                 "--auth",
                 "bogus",
                 "--model",
@@ -489,7 +500,7 @@ def test_bad_alias_is_rejected(tmp_path, capsys):
                 "--agent",
                 "codex",
                 "--provider",
-                "ollama",
+                "ollama-direct",
                 "--model",
                 "m",
                 "--alias",
@@ -511,7 +522,7 @@ def test_alias_may_not_shadow_an_agent_binary(tmp_path, capsys):
                 "--agent",
                 "codex",
                 "--provider",
-                "ollama",
+                "ollama-direct",
                 "--model",
                 "m",
                 "--alias",
@@ -532,7 +543,7 @@ def test_dry_run_in_constructor_mode_writes_nothing(tmp_path):
             "--agent",
             "codex",
             "--provider",
-            "ollama",
+            "ollama-direct",
             "--model",
             "glm-5:cloud",
         ]
@@ -555,7 +566,7 @@ def test_two_agents_on_one_model_coexist(tmp_path):
             "--agent",
             "codex",
             "--provider",
-            "ollama",
+            "ollama-direct",
             "--model",
             "glm-5:cloud",
             "--shape",
@@ -568,7 +579,7 @@ def test_two_agents_on_one_model_coexist(tmp_path):
             "--agent",
             "claude",
             "--provider",
-            "ollama",
+            "ollama-direct",
             "--model",
             "glm-5:cloud",
             "--shape",
@@ -651,7 +662,7 @@ def test_list_agents(tmp_path, capsys):
 def test_list_providers(tmp_path, capsys):
     assert main(["list", "providers"]) == 0
     out = capsys.readouterr().out
-    assert "ollama" in out and "zai" in out and "litellm" in out
+    assert "ollama-direct" in out and "zai" in out and "litellm" in out
     assert "deepseek" in out and "deepseek-openai" in out
 
 
@@ -699,7 +710,7 @@ def test_list_matrix_launch_only_agent_row(tmp_path, capsys):
     assert main(["list", "matrix"]) == 0
     lines = capsys.readouterr().out.splitlines()
     header_cols = lines[0].split()
-    ollama_idx = header_cols.index("ollama")
+    ollama_idx = header_cols.index("ollama-direct")
     zai_idx = header_cols.index("zai")
     row = next(line for line in lines if line.startswith("opencode")).split()
     # +1: each data row's first word is the agent name, not a provider column.
@@ -709,7 +720,17 @@ def test_list_matrix_launch_only_agent_row(tmp_path, capsys):
 
 @pytest.mark.integration
 def test_list_shows_ad_hoc_wrappers(tmp_path, capsys):
-    main(["add", "--agent", "codex", "--provider", "ollama", "--model", "qwen3.5:9b"])
+    main(
+        [
+            "add",
+            "--agent",
+            "codex",
+            "--provider",
+            "ollama-direct",
+            "--model",
+            "qwen3.5:9b",
+        ]
+    )
     capsys.readouterr()
 
     assert main(["list"]) == 0
@@ -727,7 +748,10 @@ def test_list_models_prints_and_writes_nothing(tmp_path, monkeypatch):
         api, "list_models", lambda p, **kw: ModelListResult(("a:1", "b:2"), "url")
     )
     assert (
-        main(["add", "--agent", "codex", "--provider", "ollama", "--list-models"]) == 0
+        main(
+            ["add", "--agent", "codex", "--provider", "ollama-direct", "--list-models"]
+        )
+        == 0
     )
     assert not Paths.from_home(tmp_path).bin_dir.exists()
 
