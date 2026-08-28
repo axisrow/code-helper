@@ -119,6 +119,13 @@ class _AgentBackend:
         read_applied: ``(paths) -> provider name | None``. MUST never raise —
             it runs once per main-loop iteration on the UI path, where an
             unreadable config means "nothing applied", not a crash.
+        read_applied_model: ``(paths) -> model | None``, or ``None`` when this
+            agent's config does not record a model this project can read back.
+            Same never-raise contract as ``read_applied``, and it runs on the
+            same once-per-iteration path. Optional because the two mechanisms
+            genuinely differ: codex's ``config.toml`` names the model right
+            next to the provider, while claude's richer readback is already
+            covered by an exact-env match.
         apply_wrapper: Method name taking ``(spec)`` — point the agent at an
             installed wrapper's backend.
         apply_native: Method name taking no arguments — clear the override.
@@ -127,9 +134,10 @@ class _AgentBackend:
             launch) is real and must be visible, not implied.
         chip_is_applied: Method name taking ``(agent_name, chip)`` — whether a
             backend chip is the one currently applied. Defaults to matching by
-            provider name; claude overrides it with an exact-env match because
-            its readback is richer than a provider name (see
-            :meth:`_chip_is_applied_switch`).
+            provider name; claude overrides it with an exact-env match and
+            codex with a provider+model match, each because its readback is
+            richer than a provider name alone (see
+            :meth:`_chip_is_applied_switch`, :meth:`_chip_is_applied_codex`).
     """
 
     read_applied: Callable[[Paths], str | None]
@@ -137,6 +145,7 @@ class _AgentBackend:
     apply_native: str
     lifecycle: str
     chip_is_applied: str
+    read_applied_model: Callable[[Paths], str | None] | None = None
 
 
 def _hint(
@@ -259,6 +268,7 @@ class TuiSession:
         "_tab_label",
         "_slot_label",
         "_applied",
+        "_applied_model",
         "_claude_active_env",
         "_proxy",
         "_chips",
@@ -278,6 +288,10 @@ class TuiSession:
         self._slot_label: str = ""
         #: agent name -> the provider its config currently names, or None.
         self._applied: dict[str, str | None] = {}
+        #: agent name -> the MODEL its config currently names, or None. Only
+        #: an agent whose `_AgentBackend` carries `read_applied_model` appears
+        #: here; the rest read as None and their predicate ignores it.
+        self._applied_model: dict[str, str | None] = {}
         #: Managed Claude env snapshot used for exact chip readback.
         self._claude_active_env: dict[str, str] | None = None
         #: The proxy snapshot the chipset row renders (state + address).
@@ -1387,6 +1401,11 @@ class TuiSession:
             name: backend.read_applied(paths)
             for name, backend in _AGENT_BACKENDS.items()
         }
+        self._applied_model = {
+            name: backend.read_applied_model(paths)
+            for name, backend in _AGENT_BACKENDS.items()
+            if backend.read_applied_model is not None
+        }
         from codehelper.services.claude_settings import active_switch_env
         from codehelper.services.proxy import proxy_status
 
@@ -1441,17 +1460,19 @@ class TuiSession:
     def _chip_is_applied(self, agent_name: str, chip) -> bool:
         """Whether ``chip`` is the backend currently in the agent's config.
 
-        The applied state is read back as a PROVIDER name (that is what the
-        config file records), while a chip is a wrapper — so a wrapper chip
-        matches when its provider matches. Two wrappers on the same provider
-        are therefore indistinguishable here and the first one is marked; the
-        same honest limitation ``current_switch`` documents for two providers
-        sharing one base URL. The action chip is never applied — it isn't a
-        backend at all.
-
-        The per-agent readback semantic (provider-name match vs. claude's
-        exact-env match) lives in ``_AgentBackend.chip_is_applied``, resolved
-        here by method name — never an ``if agent.name == ...`` branch.
+        A chip is a wrapper while the config records a backend, so how
+        precisely the two can be matched is per-agent and lives in
+        ``_AgentBackend.chip_is_applied``, resolved here by method name —
+        never an ``if agent.name == ...`` branch. Each agent matches as
+        exactly as its config allows: claude by exact env
+        (:meth:`_chip_is_applied_switch`), codex by provider AND model
+        (:meth:`_chip_is_applied_codex`). ``_chip_is_applied_provider`` — the
+        provider-name-only default — is the weakest of the three and marks
+        EVERY chip sharing that provider, not merely the first: the predicate
+        runs per chip with nothing tracking order. Any agent whose config
+        records more than a provider must therefore carry its own predicate
+        rather than fall back to it. The action chip is never applied — it
+        isn't a backend at all.
         """
         if chip == _ADD_CHIP:
             return False
@@ -1465,6 +1486,28 @@ class TuiSession:
         """Default readback: a backend chip matches when its provider is applied."""
         applied = self._applied.get(agent_name)
         return applied is not None and chip.provider.name == applied
+
+    def _chip_is_applied_codex(self, agent_name: str, chip) -> bool:
+        """codex readback: the applied chip is the provider AND model pair.
+
+        ``config.toml`` records ``model`` next to ``model_provider``, and
+        ``_patch_value_for`` writes the wrapper's own ``spec.model`` there
+        verbatim — so equality against ``chip.model`` is exact, not a
+        heuristic. Matching on the provider alone marked EVERY chip sharing
+        that provider (the predicate is evaluated per chip, with nothing
+        tracking which came first), which is how two codex wrappers on one
+        Ollama endpoint both rendered as applied.
+
+        A config that names a provider but no readable ``model`` falls back to
+        the provider-only answer rather than reporting nothing applied: a
+        hand-written ``config.toml`` may legitimately omit the key, and
+        silently dropping the ``✓`` would read as "native", which is a
+        different and equally wrong claim.
+        """
+        if not self._chip_is_applied_provider(agent_name, chip):
+            return False
+        model = self._applied_model.get(agent_name)
+        return model is None or chip.model == model
 
     def _chip_is_applied_switch(self, agent_name: str, chip) -> bool:
         """claude readback: exact-env match against the managed snapshot.
@@ -1869,7 +1912,10 @@ def _register_agent_backends() -> None:
     service imports for that reason.
     """
     from codehelper.services.claude_settings import current_switch
-    from codehelper.services.codex_default import current_default
+    from codehelper.services.codex_default import (
+        current_default,
+        current_default_model,
+    )
 
     _AGENT_BACKENDS.update(
         {
@@ -1885,7 +1931,8 @@ def _register_agent_backends() -> None:
                 apply_wrapper="_apply_set_default_wrapper",
                 apply_native="_apply_set_default_native",
                 lifecycle="next launch",
-                chip_is_applied="_chip_is_applied_provider",
+                chip_is_applied="_chip_is_applied_codex",
+                read_applied_model=current_default_model,
             ),
         }
     )

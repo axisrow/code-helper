@@ -885,6 +885,38 @@ def current_default(paths: Paths) -> str | None:
     return name
 
 
+def current_default_model(paths: Paths) -> str | None:
+    """Which model ``config.toml``'s top-level ``model`` key names, or ``None``.
+
+    The companion of :func:`current_default`, split out rather than folded
+    into it because the two have different audiences: `set-default`'s CLI
+    output and `state` reconciliation ask "which provider is live", while the
+    TUI chipset needs the pair to tell two wrappers on ONE provider apart.
+    Widening `current_default`'s return type would touch every one of those
+    call sites for a need only one of them has.
+
+    Same posture as `current_default`: read-only, **never raises**, a missing
+    or unparseable file reads as "nothing applied". Deliberately NOT validated
+    against any catalog — unlike a provider name, a model string is free-form
+    (`ollama pull` invents them), so the only meaningful check is the string
+    equality the caller performs against a wrapper's own `spec.model`, which
+    `_patch_value_for` wrote here verbatim.
+    """
+    text = read_text_or_none(paths.codex_main_config())
+    if not text:
+        return None
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - py3.11+ is the floor
+        return None
+    try:
+        data = tomllib.loads(text)
+    except ValueError:
+        return None
+    model = data.get("model")
+    return model if isinstance(model, str) else None
+
+
 def apply_set_default(
     paths: Paths,
     *,
