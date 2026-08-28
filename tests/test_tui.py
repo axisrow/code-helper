@@ -2398,3 +2398,45 @@ def test_delete_on_the_proxy_row_is_inert(monkeypatch):
     _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "d", "CANCEL"])
 
     assert main(["tui"]) == 0
+
+
+@pytest.mark.unit
+def test_codex_chip_readback_distinguishes_two_models_on_one_provider():
+    """Two codex wrappers sharing a provider but naming DIFFERENT models must
+    not both read as applied.
+
+    `config.toml` records `model` alongside `model_provider`, so unlike
+    claude's `current_switch` (which has to match a base URL back to a
+    provider) codex's readback has the model right there and can tell the two
+    apart. Matching on the provider name alone marked EVERY chip on that
+    provider — not merely "the first one", as the old docstring claimed,
+    since the predicate is evaluated per chip with nothing tracking which
+    came first.
+    """
+    from codehelper.cli.tui import TuiSession
+    from codehelper.services.codex_default import apply_set_default
+    from codehelper.services.model import get_agent, get_provider
+    from codehelper.services.spec import build_spec
+
+    paths = Paths.default()
+    applied = build_spec(
+        agent="codex", provider="ollama-direct", model="deepseek-v4-flash:0731-cloud"
+    )
+    other = build_spec(agent="codex", provider="ollama-direct", model="glm-5.3-flash")
+
+    # Make `applied` genuinely the live default, the way `set-default` does,
+    # so the readback runs against a real config.toml rather than a stub.
+    paths.codex_main_config().parent.mkdir(parents=True, exist_ok=True)
+    apply_set_default(
+        paths,
+        agent=get_agent("codex"),
+        provider=get_provider("ollama-direct"),
+        model="deepseek-v4-flash:0731-cloud",
+        force=True,
+    )
+
+    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session._refresh_active_label()
+
+    assert session._chip_is_applied("codex", applied) is True
+    assert session._chip_is_applied("codex", other) is False
