@@ -85,7 +85,7 @@ def test_add_order_is_agent_provider_model_alias(monkeypatch):
     old provider -> model -> alias order — with no separate agent screen
     after the model, since the agent is already scoped by then."""
     seen: list[str] = []
-    answers = iter(["add", "wrapper", "codex", "ollama", "model-x", "quit"])
+    answers = iter(["add", "wrapper", "codex", "ollama-direct", "model-x", "quit"])
 
     def _select(_items, *, prompt, **_kwargs):
         # The main-menu header is a callable (live active-profile display).
@@ -112,7 +112,7 @@ def test_add_order_is_agent_provider_model_alias(monkeypatch):
         "Add a wrapper for which agent?",
         "Select a provider for codex:",
     ]
-    assert "codex › Select a model for ollama:" in seen
+    assert "codex › Select a model for ollama-direct:" in seen
     assert not any(p == "Select an agent:" for p in seen)
     assert Paths.default().script_for("my-codex").exists()
 
@@ -129,7 +129,7 @@ def test_add_agent_branch_persists_a_user_agent_end_to_end(monkeypatch):
             "add",
             "wrapper",
             "myagent",  # the just-added agent appears in the picker
-            "ollama",
+            "ollama-direct",
             "model-x",
             "quit",
         ]
@@ -173,7 +173,7 @@ def test_alias_prompt_carries_a_breadcrumb_of_earlier_choices(monkeypatch):
     the furthest from the choices that led there — it must show them, since
     there is no separate summary screen."""
     seen: list[str] = []
-    answers = iter(["add", "wrapper", "codex", "ollama", "model-x", "quit"])
+    answers = iter(["add", "wrapper", "codex", "ollama-direct", "model-x", "quit"])
 
     def _select(_items, *, prompt, **_kwargs):
         seen.append(prompt() if callable(prompt) else prompt)
@@ -197,13 +197,13 @@ def test_alias_prompt_carries_a_breadcrumb_of_earlier_choices(monkeypatch):
     monkeypatch.setattr("codehelper.cli.menu.read_line", _read_line)
 
     assert main(["tui"]) == 0
-    assert captured_prompt["value"].startswith("codex › ollama › model-x › ")
+    assert captured_prompt["value"].startswith("codex › ollama-direct › model-x › ")
 
 
 @pytest.mark.integration
 def test_literal_provider_skips_profile_screen(monkeypatch):
     seen: list[str] = []
-    answers = iter(["add", "wrapper", "claude", "ollama", "model-x", "quit"])
+    answers = iter(["add", "wrapper", "claude", "ollama-direct", "model-x", "quit"])
 
     def _select(_items, *, prompt, **_kwargs):
         # The main-menu header is a callable (live active-profile display).
@@ -234,7 +234,15 @@ def test_escape_from_alias_reprompts_the_model_when_agent_is_prescoped(monkeypat
     from codehelper.cli.menu import MenuCancelled
 
     answers = iter(
-        ["add", "wrapper", "claude", "ollama", "__custom__", "__custom__", "quit"]
+        [
+            "add",
+            "wrapper",
+            "claude",
+            "ollama-direct",
+            "__custom__",
+            "__custom__",
+            "quit",
+        ]
     )
 
     def _select(_items, **_kwargs):
@@ -819,7 +827,7 @@ def test_set_default_confirmation_preview_is_visible_before_the_prompt(tmp_path)
     # NOT-YET-EXISTING ~/.codex/config.toml, which counts as a real change
     # and triggers `_confirm_set_default`'s preview + `[y/N]` prompt.
     paths = Paths.from_home(tmp_path)
-    spec = build_spec(agent="codex", provider="ollama", model="qwen3.5:9b")
+    spec = build_spec(agent="codex", provider="ollama-direct", model="qwen3.5:9b")
     install_wrapper(paths, spec)
     set_default_wrapper(paths, "codex", spec.alias)
 
@@ -1185,8 +1193,8 @@ def test_tui_provider_list_offers_ollama_with_a_token(monkeypatch):
     # seen_items order: [0] main menu, [1] kind, [2] agent, [3] provider list.
     provider_list = seen_items[3]
     values = [value for value, _label in provider_list]
-    assert "ollama" in values
-    assert "ollama:secret" in values
+    assert "ollama-direct" in values
+    assert "ollama-direct:secret" in values
     # litellm/zai are FIXED — no second row for either.
     assert "litellm:secret" not in values
     assert "zai:secret" not in values
@@ -1196,7 +1204,9 @@ def test_tui_provider_list_offers_ollama_with_a_token(monkeypatch):
 def test_tui_add_ollama_with_token_installs_a_secret_wrapper(monkeypatch):
     import codehelper.services.models_api as api
 
-    answers = iter(["add", "wrapper", "claude", "ollama:secret", "model-x", "quit"])
+    answers = iter(
+        ["add", "wrapper", "claude", "ollama-direct:secret", "model-x", "quit"]
+    )
 
     def _select(_items, **_kwargs):
         return next(answers)
@@ -1230,11 +1240,11 @@ def test_tui_profile_screen_finds_ollama_profiles_after_a_token_install(
     from codehelper.services.state import active_selection
 
     paths = Paths.default()
-    secrets.save_credential(paths, "ollama", "sk-ollama-proxy", "proxy")
+    secrets.save_credential(paths, "ollama-direct", "sk-ollama-proxy", "proxy")
 
     _tab_on_profile_screen(monkeypatch)
     assert main(["tui"]) == 0
-    assert active_selection(paths) == ("ollama", "proxy")
+    assert active_selection(paths) == ("ollama-direct", "proxy")
 
 
 # --- main screen = wrapper list, Enter = default, t = token (issue #29) -----
@@ -1340,7 +1350,10 @@ def test_wrapper_named_add_agent_is_selectable_from_main_screen(monkeypatch):
     install_wrapper(
         paths,
         build_spec(
-            agent="claude", provider="ollama", model="qwen3.5:9b", alias="add-agent"
+            agent="claude",
+            provider="ollama-direct",
+            model="qwen3.5:9b",
+            alias="add-agent",
         ),
     )
     # The `add-agent` wrapper is the 8th selectable row: the two agent chipset
@@ -1365,7 +1378,10 @@ def test_wrapper_named_add_wrapper_is_selectable_from_main_screen(monkeypatch):
     install_wrapper(
         paths,
         build_spec(
-            agent="claude", provider="ollama", model="qwen3.5:9b", alias="add-wrapper"
+            agent="claude",
+            provider="ollama-direct",
+            model="qwen3.5:9b",
+            alias="add-wrapper",
         ),
     )
     # The `add-wrapper` wrapper is the 8th selectable row (two agent chipset
@@ -1422,7 +1438,9 @@ def test_main_screen_groups_colliding_managed_wrapper_under_installed_agent(
     # Install a codex wrapper named "glm" (collides with the claude preset).
     install_wrapper(
         paths,
-        build_spec(agent="codex", provider="ollama", model="qwen3.5:9b", alias="glm"),
+        build_spec(
+            agent="codex", provider="ollama-direct", model="qwen3.5:9b", alias="glm"
+        ),
     )
 
     captured: list[list] = []

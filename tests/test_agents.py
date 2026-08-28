@@ -344,7 +344,7 @@ def test_wrapper_alias_cannot_shadow_a_user_agent_binary():
     req = AddRequest(
         name=None,
         agent="mytool",
-        provider="ollama",
+        provider="ollama-direct",
         model="model-x",
         alias="mytool",
         shape=None,
@@ -377,7 +377,7 @@ def test_wrapper_alias_check_fails_closed_on_a_corrupt_registry(tmp_path):
     req = AddRequest(
         name=None,
         agent="claude",
-        provider="ollama",
+        provider="ollama-direct",
         model="model-x",
         alias="mytool",
         shape=None,

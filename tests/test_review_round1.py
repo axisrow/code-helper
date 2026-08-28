@@ -42,7 +42,9 @@ def test_non_utf8_file_at_target_does_not_crash_the_guard(tmp_path):
     such protection, so the guard it was meant to feed never ran.
     """
     paths = _bin(tmp_path)
-    spec = build_spec(agent="claude", provider="ollama", model="m", alias="binfile")
+    spec = build_spec(
+        agent="claude", provider="ollama-direct", model="m", alias="binfile"
+    )
     (paths.bin_dir / "binfile").write_bytes(b"\x7fELF\x02\x01\x01\x00\xff\xfe\xfd")
 
     with pytest.raises(CodeHelperError, match="refusing to overwrite"):
@@ -52,7 +54,9 @@ def test_non_utf8_file_at_target_does_not_crash_the_guard(tmp_path):
 def test_force_overwrites_a_non_utf8_file(tmp_path):
     """``--force`` must be able to rescue the binary-in-the-way case."""
     paths = _bin(tmp_path)
-    spec = build_spec(agent="claude", provider="ollama", model="m", alias="binfile")
+    spec = build_spec(
+        agent="claude", provider="ollama-direct", model="m", alias="binfile"
+    )
     (paths.bin_dir / "binfile").write_bytes(b"\xff\xfe\xfd")
 
     assert install_wrapper(paths, spec, force=True) is True
@@ -100,7 +104,9 @@ def test_an_unreadable_file_is_never_mistaken_for_ours(tmp_path):
     from codehelper.services.wrappers import _ownership_full_match
 
     paths = _bin(tmp_path)
-    spec = build_spec(agent="claude", provider="ollama", model="m", alias="weird")
+    spec = build_spec(
+        agent="claude", provider="ollama-direct", model="m", alias="weird"
+    )
     (paths.bin_dir / "weird").write_bytes(b"\xff\xfe\xfd")
 
     assert read_text_or_none(paths.bin_dir / "weird") is None
@@ -118,7 +124,7 @@ def test_bogus_shape_is_a_clean_error_not_a_traceback(capsys):
             "--agent",
             "claude",
             "--provider",
-            "ollama",
+            "ollama-direct",
             "--model",
             "m",
             "--shape",
@@ -360,6 +366,6 @@ def test_http_protocol_error_does_not_escape_list_models():
     def fetch(url, timeout, token):
         raise http.client.IncompleteRead(b"partial")
 
-    result = list_models(get_provider("ollama"), fetch=fetch)
+    result = list_models(get_provider("ollama-direct"), fetch=fetch)
     assert not result.ok
     assert result.models == ()

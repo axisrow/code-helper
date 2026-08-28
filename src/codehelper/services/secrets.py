@@ -41,7 +41,31 @@ from dataclasses import dataclass
 
 from codehelper.backends._atomic import atomic_write
 from codehelper.errors import CodeHelperError
+from codehelper.services.model import RETIRED_PROVIDER_NAMES
 from codehelper.services.paths import Paths
+
+#: Reverse of ``model.RETIRED_PROVIDER_NAMES`` — current provider name ->
+#: the retired name a pre-rename ``credentials.json`` may still hold a token
+#: under. Derived, not hand-maintained, so it cannot drift from the one
+#: source of truth in ``model.py``.
+_LEGACY_PROVIDER_NAME_FOR: dict[str, str] = {
+    current: retired for retired, current in RETIRED_PROVIDER_NAMES.items()
+}
+
+
+def _storage_names(provider_name: str) -> tuple[str, ...]:
+    """``provider_name``, plus its retired predecessor name if it has one.
+
+    The ONE decision point for "which keys in credentials.json/state.json
+    may this provider be stored under" — every read path below
+    (:func:`profile_names`, :func:`valid_active_profile`,
+    :func:`credential_for`) consults this instead of separately re-deriving
+    the same current-name/legacy-name fallback, so a second retired name
+    only ever needs updating here.
+    """
+    legacy_name = _LEGACY_PROVIDER_NAME_FOR.get(provider_name)
+    return (provider_name, legacy_name) if legacy_name else (provider_name,)
+
 
 try:
     import fcntl
@@ -134,8 +158,16 @@ def load_credentials(paths: Paths) -> dict[str, dict[str, str]]:
 
 
 def profile_names(paths: Paths, provider_name: str) -> tuple[str, ...]:
-    """Return the provider's profiles in stable display order."""
-    names = set(load_credentials(paths).get(provider_name, {}))
+    """Return the provider's profiles in stable display order.
+
+    Also includes any profile still stored under a RETIRED provider name
+    (see :func:`_storage_names`) — a rename must not orphan profiles a user
+    already saved under the old key.
+    """
+    creds = load_credentials(paths)
+    names: set[str] = set()
+    for name in _storage_names(provider_name):
+        names |= set(creds.get(name, {}))
     return tuple(sorted(names, key=lambda name: (name != DEFAULT_PROFILE, name)))
 
 
@@ -160,7 +192,10 @@ def valid_active_profile(paths: Paths, provider_name: str) -> str | None:
     if selection is None:
         return None
     active_provider_name, name = selection
-    if active_provider_name != provider_name:
+    # A pre-existing selection may still name a RETIRED provider (e.g.
+    # "ollama" before it was renamed to "ollama-direct") — match it against
+    # every name this provider may be stored under (see _storage_names).
+    if active_provider_name not in _storage_names(provider_name):
         return None
     return name if name in profile_names(paths, provider_name) else None
 
@@ -234,8 +269,23 @@ def seed_default_profile(paths: Paths, provider_name: str, token: str) -> bool:
 def credential_for(
     paths: Paths, provider_name: str, profile_name: str = DEFAULT_PROFILE
 ) -> str:
-    """The cached token for a profile, or ``""`` if none — never raises."""
-    return load_credentials(paths).get(provider_name, {}).get(profile_name, "")
+    """The cached token for a profile, or ``""`` if none — never raises.
+
+    Falls back to a RETIRED provider name (see :func:`_storage_names`, e.g.
+    ``"ollama"`` before it was renamed to ``"ollama-direct"``) when the
+    current name has no entry — a token cached under the old key before a
+    rename must stay reachable under the new one. Read-time fallback only:
+    this never rewrites ``credentials.json`` to migrate the key, so the old
+    entry is left in place (harmless — merely unreachable under its own
+    name going forward) until the next :func:`save_credential` for this
+    provider naturally lands it under the current name.
+    """
+    creds = load_credentials(paths)
+    for name in _storage_names(provider_name):
+        hit = creds.get(name, {}).get(profile_name, "")
+        if hit:
+            return hit
+    return ""
 
 
 #: Sibling lock file for ``credentials.json`` (issue #17). ``fcntl.flock`` is
@@ -336,6 +386,16 @@ def rename_profile(
 ) -> None:
     """Rename one provider profile without exposing or losing its token.
 
+    ``old_name`` is looked up across every name in :func:`_storage_names`
+    (``provider_name`` plus its retired predecessor, if any) — not just
+    ``provider_name`` itself — because :func:`profile_names` (which is what a
+    caller lists ``old_name`` from in the first place) already includes
+    profiles still parked under a RETIRED provider name. Without this, a
+    profile visible only because of that legacy fallback would silently fail
+    to rename: the write always lands under the CURRENT name regardless of
+    which name the old entry was found under, so a stale legacy entry gets
+    migrated forward by the rename itself rather than left behind.
+
     Serialized against other writers in this module via :func:`_locked_update`
     (issue #17).
     """
@@ -343,14 +403,27 @@ def rename_profile(
         return
     with _locked_update(paths):
         data = load_credentials(paths)
-        profiles = data.get(provider_name)
-        if not profiles or old_name not in profiles:
+        source_name = next(
+            (
+                name
+                for name in _storage_names(provider_name)
+                if old_name in data.get(name, {})
+            ),
+            None,
+        )
+        if source_name is None:
             return
-        if new_name in profiles:
+        profiles = data[source_name]
+        target_profiles = data.setdefault(provider_name, {})
+        if new_name in target_profiles or (
+            source_name != provider_name and new_name in profiles
+        ):
             raise CodeHelperError(
                 f"profile {new_name!r} already exists for provider {provider_name}"
             )
-        profiles[new_name] = profiles.pop(old_name)
+        target_profiles[new_name] = profiles.pop(old_name)
+        if source_name != provider_name and not profiles:
+            del data[source_name]
         try:
             atomic_write(
                 paths.credentials_file(),
@@ -385,6 +458,13 @@ def invalidate_cached_credential(
     env value is not meant to be cached at all, so simply removing the stale
     entry is enough — the next env-free run falls through to a fresh prompt.
 
+    Also drops the same profile cached under ``provider_name``'s RETIRED
+    predecessor name, if any (see :func:`_storage_names`) — :func:`credential_for`
+    falls back to that legacy key when the current name has no entry, so
+    dropping only the current name here would leave a stale/revoked token
+    cached under the old key fully reachable again on the very next
+    ``credential_for`` call, defeating the whole point of invalidating it.
+
     Like :func:`cache_freshly_typed_token`, this runs AFTER the wrapper
     install already succeeded, so a write failure here (full disk,
     unwritable ``config_dir``, permission error) must not surface as an
@@ -394,7 +474,8 @@ def invalidate_cached_credential(
     via :func:`_locked_update` (issue #17).
     """
     with _locked_update(paths):
-        _invalidate_locked(paths, provider_name, profile_name)
+        for name in _storage_names(provider_name):
+            _invalidate_locked(paths, name, profile_name)
 
 
 def _invalidate_locked(paths: Paths, provider_name: str, profile_name: str) -> None:

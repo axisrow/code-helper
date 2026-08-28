@@ -38,7 +38,9 @@ def _secret(alias: str = "w"):
 
 
 def _literal(alias: str = "w", model: str = "qwen3"):
-    return build_spec(agent="claude", provider="ollama", model=model, alias=alias)
+    return build_spec(
+        agent="claude", provider="ollama-direct", model=model, alias=alias
+    )
 
 
 def _secret_openai_toml(alias: str = "w"):

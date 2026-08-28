@@ -267,7 +267,7 @@ PRESETS: tuple[Preset, ...] = (
     Preset(
         alias="deepseek-ollama",
         agent="claude",
-        provider="ollama",
+        provider="ollama-direct",
         shape=ConfigShape.ANTHROPIC_ENV,
         model=_DEEPSEEK_MODEL,
         tier_models=TierModels.uniform(_DEEPSEEK_MODEL),
@@ -287,7 +287,7 @@ PRESETS: tuple[Preset, ...] = (
     Preset(
         alias="glm-ollama",
         agent="claude",
-        provider="ollama",
+        provider="ollama-direct",
         shape=ConfigShape.OLLAMA_LAUNCH,
         model="glm-5.2:cloud",
         description="Claude Code → glm-5.2:cloud via `ollama launch claude`",

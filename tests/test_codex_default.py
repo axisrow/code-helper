@@ -28,13 +28,13 @@ from codehelper.services.paths import Paths
 
 CODEX = get_agent("codex")
 CLAUDE = get_agent("claude")
-OLLAMA = get_provider("ollama")
+OLLAMA = get_provider("ollama-direct")
 
 
 def _patch(**overrides) -> DefaultPatch:
     base = dict(
         model="glm-5.2:cloud",
-        provider_table="ollama",
+        provider_table="ollama-direct",
         display_name="local Ollama daemon",
         base_url="http://127.0.0.1:11434/v1/",
         wire_api="responses",
@@ -55,10 +55,10 @@ def _patch(**overrides) -> DefaultPatch:
 def test_patch_from_scratch_when_file_absent():
     result = patch_config_toml("", _patch())
     assert 'model = "glm-5.2:cloud"' in result
-    assert 'model_provider = "ollama"' in result
+    assert 'model_provider = "ollama-direct"' in result
     assert "model_catalog_json" not in result
     assert "model_context_window = 1000000" in result
-    assert "[model_providers.ollama]" in result
+    assert "[model_providers.ollama-direct]" in result
     assert 'name = "local Ollama daemon"' in result
     assert 'base_url = "http://127.0.0.1:11434/v1/"' in result
     assert 'wire_api = "responses"' in result
@@ -83,10 +83,10 @@ def test_patch_scrubs_a_stale_model_catalog_json_line():
     """
     original = (
         'model = "old-model"\n'
-        'model_provider = "ollama"\n'
+        'model_provider = "ollama-direct"\n'
         'model_catalog_json = "/home/user/.codex/model.json"\n'
         "\n"
-        "[model_providers.ollama]\n"
+        "[model_providers.ollama-direct]\n"
         'name = "old"\n'
         'base_url = "http://old/v1/"\n'
         'wire_api = "chat"\n'
@@ -124,7 +124,7 @@ def test_patch_leaves_a_manual_context_window_alone_when_model_is_unknown():
         'model = "my-custom-model"\n'
         "model_context_window = 32000\n"
         "\n"
-        "[model_providers.ollama]\n"
+        "[model_providers.ollama-direct]\n"
         'name = "custom"\n'
     )
     result = patch_config_toml(
@@ -167,13 +167,13 @@ def test_patch_replaces_existing_top_level_keys_in_place_not_duplicated():
 @pytest.mark.unit
 def test_patch_replaces_existing_model_providers_table_wholesale():
     original = (
-        "[model_providers.ollama]\n"
+        "[model_providers.ollama-direct]\n"
         'name = "Old Name"\n'
         'base_url = "http://old:1234/v1/"\n'
         'wire_api = "chat"\n'
     )
     result = patch_config_toml(original, _patch())
-    assert result.count("[model_providers.ollama]") == 1
+    assert result.count("[model_providers.ollama-direct]") == 1
     assert "Old Name" not in result
     assert 'name = "local Ollama daemon"' in result
 
@@ -186,7 +186,7 @@ def test_patch_does_not_touch_sibling_model_providers_table():
         'base_url = "http://other/v1/"\n'
         'wire_api = "chat"\n'
         "\n"
-        "[model_providers.ollama]\n"
+        "[model_providers.ollama-direct]\n"
         'name = "Old Name"\n'
         'base_url = "http://old:1234/v1/"\n'
         'wire_api = "chat"\n'
@@ -200,7 +200,7 @@ def test_patch_does_not_touch_sibling_model_providers_table():
 @pytest.mark.unit
 def test_patch_does_not_swallow_network_table_placed_right_after():
     original = (
-        "[model_providers.ollama]\n"
+        "[model_providers.ollama-direct]\n"
         'name = "Old Name"\n'
         'base_url = "http://old:1234/v1/"\n'
         'wire_api = "chat"\n'
@@ -276,7 +276,7 @@ def test_patch_appends_table_with_exactly_one_blank_line_regardless_of_trailing_
         result = _patch_model_providers_table(original, _patch())
         expected_sep = "\n\n" if trailing else ""
         prefix = f"some_other_key = 1{expected_sep}" if trailing else ""
-        assert result.startswith(prefix + "[model_providers.ollama]"), (
+        assert result.startswith(prefix + "[model_providers.ollama-direct]"), (
             trailing,
             result,
         )
@@ -350,7 +350,7 @@ def test_resolve_default_patch_rejects_launch_only_agent():
 @pytest.mark.unit
 def test_resolve_default_patch_rejects_missing_wire_api():
     bad_provider = Provider(
-        name="ollama",
+        name="local-daemon",
         shapes=frozenset({ConfigShape.OPENAI_TOML}),
         base_url="http://127.0.0.1:11434",
         wire_api="",  # invalid — bypasses model._validate_registries since
@@ -361,10 +361,26 @@ def test_resolve_default_patch_rejects_missing_wire_api():
 
 
 @pytest.mark.unit
+def test_resolve_default_patch_rejects_a_codex_reserved_provider_id():
+    """Defense-in-depth: even if PROVIDERS ever regains a name Codex CLI
+    itself reserves (see CODEX_RESERVED_PROVIDER_IDS — "ollama" is exactly
+    what happened before the ollama -> ollama-direct rename), set-default
+    must refuse rather than write a config.toml Codex cannot load."""
+    reserved_provider = Provider(
+        name="ollama",
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        base_url="http://127.0.0.1:11434",
+        wire_api="responses",
+    )
+    with pytest.raises(CodeHelperError, match="reserved by Codex CLI"):
+        resolve_default_patch(CODEX, reserved_provider, "glm-5.2:cloud")
+
+
+@pytest.mark.unit
 def test_resolve_default_patch_ok_for_codex_ollama():
     result = resolve_default_patch(CODEX, OLLAMA, "glm-5.2:cloud")
     assert result.model == "glm-5.2:cloud"
-    assert result.provider_table == "ollama"
+    assert result.provider_table == "ollama-direct"
     assert result.base_url == "http://127.0.0.1:11434/v1/"
     assert result.wire_api == "responses"
     assert result.context_window == 1_000_000
@@ -720,7 +736,7 @@ def test_slot_without_restore_is_rejected(tmp_path, monkeypatch, capsys):
                 "--agent",
                 "codex",
                 "--provider",
-                "ollama",
+                "ollama-direct",
                 "--model",
                 "glm-5.2:cloud",
                 "--slot",
@@ -767,6 +783,21 @@ def test_resolve_default_patch_uses_the_substituted_provider():
 
 @pytest.mark.unit
 def test_current_default_reads_the_applied_provider(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        'model = "x"\nmodel_provider = "ollama-direct"\n', encoding="utf-8"
+    )
+    assert current_default(paths) == "ollama-direct"
+
+
+@pytest.mark.unit
+def test_current_default_recognizes_a_retired_provider_name(tmp_path):
+    """A config.toml an OLDER codehelper wrote before the ollama ->
+    ollama-direct rename still names ``model_provider = "ollama"`` — still
+    recognized (not None) so callers can resolve it via
+    model.get_provider_for_legacy_read rather than treating it as foreign."""
     paths = Paths.from_home(tmp_path)
     config = paths.codex_main_config()
     config.parent.mkdir(parents=True, exist_ok=True)
@@ -842,6 +873,11 @@ trust_level = "trusted"
 
 @pytest.mark.unit
 def test_clear_default_removes_only_the_managed_region(tmp_path):
+    """Also doubles as the legacy-migration case: _FOREIGN_CONFIG's
+    model_provider/[model_providers.ollama] use the RETIRED name on purpose
+    — current_default() still recognizes it (see
+    test_current_default_recognizes_a_retired_provider_name) and
+    clear_default() removes it exactly like any other recognized region."""
     paths = Paths.from_home(tmp_path)
     config = paths.codex_main_config()
     config.parent.mkdir(parents=True, exist_ok=True)
@@ -958,11 +994,62 @@ def test_clear_default_is_the_inverse_of_apply_set_default(tmp_path):
     apply_set_default(
         paths, agent=CODEX, provider=OLLAMA, model="glm-5.2:cloud", force=True
     )
-    assert current_default(paths) == "ollama"
+    assert current_default(paths) == "ollama-direct"
 
     clear_default(paths, force=True)
     assert current_default(paths) is None
     result = config.read_text(encoding="utf-8")
     assert 'approval_policy = "on-request"' in result
-    assert "[model_providers.ollama]" not in result
+    assert "[model_providers.ollama-direct]" not in result
     assert "model_provider =" not in result
+
+
+@pytest.mark.unit
+def test_apply_set_default_self_heals_a_stale_reserved_ollama_table(tmp_path):
+    """A config.toml an OLDER codehelper left behind — [model_providers.ollama]
+    / model_provider = "ollama" — is now REJECTED BY CODEX ITSELF at load
+    time (v0.150.1+ reserves "ollama" as a built-in provider ID), so the
+    user's `codex` cannot even start to fix it. The next set-default for
+    ANY provider must self-heal by stripping that stale reserved table,
+    regardless of what is being patched this time."""
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(_FOREIGN_CONFIG, encoding="utf-8")
+
+    apply_set_default(
+        paths, agent=CODEX, provider=OLLAMA, model="glm-5.2:cloud", force=True
+    )
+
+    result = config.read_text(encoding="utf-8")
+    assert "[model_providers.ollama]" not in result
+    assert "[model_providers.ollama-direct]" in result
+    # Untouched sibling content survives the migration.
+    assert "[model_providers.mine]" in result
+    assert 'name = "hand written"' in result
+    assert "# a comment the user wrote" in result
+
+
+# ---------------------------------------------------------------------------
+# Reserved Codex provider IDs — pinning test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_no_provider_name_collides_with_codex_reserved_ids():
+    """CODEX_RESERVED_PROVIDER_IDS names Codex's own built-in provider IDs —
+    disjoint from every name in PROVIDERS is a standing invariant this
+    project must never violate again after the `ollama` collision (Codex
+    v0.150.1 reserved it out from under us, see the ollama -> ollama-direct
+    rename). A future provider added to PROVIDERS that happens to match a
+    currently- or newly-reserved Codex ID would reproduce the exact bug this
+    test exists to prevent."""
+    from codehelper.services.codex_default import CODEX_RESERVED_PROVIDER_IDS
+    from codehelper.services.model import PROVIDERS
+
+    collisions = {p.name for p in PROVIDERS} & CODEX_RESERVED_PROVIDER_IDS
+    assert not collisions, (
+        f"provider name(s) {collisions} collide with Codex's own reserved "
+        f"built-in provider IDs — rename in PROVIDERS (see codex_default.py "
+        f"CODEX_RESERVED_PROVIDER_IDS for the reserved list and why)"
+    )

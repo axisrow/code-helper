@@ -63,6 +63,8 @@ __all__ = [
     "PROVIDERS",
     "get_agent",
     "get_provider",
+    "get_provider_for_legacy_read",
+    "RETIRED_PROVIDER_NAMES",
     "validate_agent_binary",
     "resolve_shape",
     "compatible_providers",
@@ -407,14 +409,21 @@ AGENTS: tuple[Agent, ...] = (
 
 PROVIDERS: tuple[Provider, ...] = (
     Provider(
-        name="ollama",
+        # NOT "ollama": Codex CLI itself reserves that exact string as a
+        # built-in provider ID as of v0.150.1 (its own error: "model_providers
+        # contains reserved built-in provider IDs: `ollama`"), so a
+        # `[model_providers.ollama]` table written by `set-default` makes
+        # Codex refuse to load config.toml at all. See
+        # codex_default.CODEX_RESERVED_PROVIDER_IDS, which guards against this
+        # class of collision happening again for any future provider.
+        name="ollama-direct",
         # Three shapes: the daemon serves the Anthropic protocol directly (so
         # `claude` can point straight at it — this is the `deepseek-ollama`
         # preset),
         # `ollama launch` can configure an agent for us (the `glm-ollama`
         # preset), and an OpenAI-compatible `/v1` endpoint feeds Codex's own
-        # TOML profile (codex × ollama via OPENAI_TOML — no launcher binary
-        # needed). Same provider, three connection mechanisms.
+        # TOML profile (codex × ollama-direct via OPENAI_TOML — no launcher
+        # binary needed). Same provider, three connection mechanisms.
         shapes=frozenset(
             {
                 ConfigShape.ANTHROPIC_ENV,
@@ -754,6 +763,39 @@ def get_provider(name: str) -> Provider:
             return provider
     known = ", ".join(p.name for p in PROVIDERS)
     raise CodeHelperError(f"unknown provider: {name} (known: {known})")
+
+
+#: Provider names THIS PROJECT has itself retired, mapped to their current
+#: name — not a general alias mechanism, just enough to keep pre-existing
+#: on-disk records (wrapper ownership markers, credentials.json, state.json,
+#: an already-written config.toml) resolvable after a rename. Consulted ONLY
+#: by :func:`get_provider_for_legacy_read` and read paths built on it — never
+#: by :func:`get_provider` itself, which must keep rejecting a retired name so
+#: no NEW record can be written under it again.
+#:
+#: "ollama" → "ollama-direct": renamed because Codex CLI v0.150.1 reserves
+#: "ollama" as a built-in provider ID (see
+#: codex_default.CODEX_RESERVED_PROVIDER_IDS) — a `[model_providers.ollama]`
+#: table written by an older codehelper made Codex refuse to load
+#: config.toml at all.
+RETIRED_PROVIDER_NAMES: dict[str, str] = {"ollama": "ollama-direct"}
+
+
+def get_provider_for_legacy_read(name: str) -> Provider:
+    """Like :func:`get_provider`, but also resolves a name this project has
+    since retired (:data:`RETIRED_PROVIDER_NAMES`).
+
+    For read paths reconstructing state from something already persisted to
+    disk BEFORE a provider rename (a wrapper's ownership marker, a saved
+    credential, an active-selection pointer, an existing config.toml) — never
+    for the CLI's own ``--provider`` argument, which must keep going through
+    plain :func:`get_provider` so a retired name stays rejected for new input.
+
+    Raises:
+        CodeHelperError: unknown name, even after retirement lookup (lists
+            the known ones — same as :func:`get_provider`).
+    """
+    return get_provider(RETIRED_PROVIDER_NAMES.get(name, name))
 
 
 def resolve_shape(

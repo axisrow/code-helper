@@ -41,7 +41,7 @@ from codehelper.services.model import (
     BaseUrlPolicy,
     ConfigShape,
     Provider,
-    get_provider,
+    get_provider_for_legacy_read,
     with_base_url,
 )
 from codehelper.services.naming import is_valid_alias_shape
@@ -202,7 +202,7 @@ def _ownership_marker_provider_is_secret(paths: Paths, name: str) -> bool:
     if not provider_name:
         return False
     try:
-        return get_provider(provider_name).auth == "secret"
+        return get_provider_for_legacy_read(provider_name).auth == "secret"
     except CodeHelperError:
         return False
 
@@ -320,7 +320,7 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     tiers = _tiers_from_body(body)
 
     try:
-        provider_obj = get_provider(fields["provider"])
+        provider_obj = get_provider_for_legacy_read(fields["provider"])
     except CodeHelperError:
         return None
 

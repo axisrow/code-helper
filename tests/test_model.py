@@ -93,7 +93,7 @@ def test_openai_toml_is_codex_only():
 @pytest.mark.unit
 def test_registry_has_builtin_providers():
     assert {p.name for p in PROVIDERS} == {
-        "ollama",
+        "ollama-direct",
         "zai",
         "litellm",
         "gemini",
@@ -188,7 +188,7 @@ def test_ollama_declares_three_shapes():
     """One provider, three connection mechanisms: direct HTTP (deepseek-ollama),
     `ollama launch` (glm-ollama), and a Codex TOML profile (codex × ollama) —
     plus ANTHROPIC_SETTINGS, so a live claude session can `switch` to it too."""
-    ollama = get_provider("ollama")
+    ollama = get_provider("ollama-direct")
     assert ollama.shapes == {
         ConfigShape.ANTHROPIC_ENV,
         ConfigShape.OLLAMA_LAUNCH,
@@ -225,7 +225,7 @@ def test_get_provider_unknown_raises():
 @pytest.mark.unit
 def test_claude_ollama_prefers_direct_http():
     # Both shapes are possible; priority picks the one needing no extra binary.
-    shape = resolve_shape(get_agent("claude"), get_provider("ollama"))
+    shape = resolve_shape(get_agent("claude"), get_provider("ollama-direct"))
     assert shape is ConfigShape.ANTHROPIC_ENV
 
 
@@ -233,7 +233,7 @@ def test_claude_ollama_prefers_direct_http():
 def test_codex_ollama_uses_toml():
     # Two shapes are possible now; priority picks the TOML profile (no extra
     # binary on PATH). The launcher is still reachable via --shape ollama-launch.
-    shape = resolve_shape(get_agent("codex"), get_provider("ollama"))
+    shape = resolve_shape(get_agent("codex"), get_provider("ollama-direct"))
     assert shape is ConfigShape.OPENAI_TOML
 
 
@@ -241,7 +241,9 @@ def test_codex_ollama_uses_toml():
 def test_codex_ollama_launcher_shape_is_reachable():
     """--shape ollama-launch overrides priority — the launcher path stays open."""
     shape = resolve_shape(
-        get_agent("codex"), get_provider("ollama"), preferred=ConfigShape.OLLAMA_LAUNCH
+        get_agent("codex"),
+        get_provider("ollama-direct"),
+        preferred=ConfigShape.OLLAMA_LAUNCH,
     )
     assert shape is ConfigShape.OLLAMA_LAUNCH
 
@@ -294,7 +296,7 @@ def test_openai_only_provider_is_incompatible_with_claude():
 
 @pytest.mark.unit
 def test_incompatibility_error_suggests_working_providers():
-    with pytest.raises(CodeHelperError, match="works with: ollama, zai"):
+    with pytest.raises(CodeHelperError, match="works with: ollama-direct, zai"):
         resolve_shape(get_agent("claude"), _OPENAI_ONLY)
 
 
@@ -313,7 +315,7 @@ def test_codex_with_openai_only_provider_resolves_to_toml():
 def test_preferred_shape_overrides_priority():
     shape = resolve_shape(
         get_agent("claude"),
-        get_provider("ollama"),
+        get_provider("ollama-direct"),
         preferred=ConfigShape.OLLAMA_LAUNCH,
     )
     assert shape is ConfigShape.OLLAMA_LAUNCH
@@ -333,7 +335,7 @@ def test_preferred_shape_not_shared_raises():
 def test_resolve_shape_is_pure(tmp_path):
     """Safe to call from a menu: no filesystem effects."""
     before = set(tmp_path.iterdir())
-    resolve_shape(get_agent("claude"), get_provider("ollama"))
+    resolve_shape(get_agent("claude"), get_provider("ollama-direct"))
     assert set(tmp_path.iterdir()) == before
 
 
@@ -345,7 +347,7 @@ def test_resolve_shape_is_pure(tmp_path):
 @pytest.mark.unit
 def test_compatible_providers_for_claude():
     assert {p.name for p in compatible_providers(get_agent("claude"))} == {
-        "ollama",
+        "ollama-direct",
         "zai",
         "litellm",
         "deepseek",
@@ -356,7 +358,7 @@ def test_compatible_providers_for_claude():
 def test_compatible_providers_for_codex_excludes_zai():
     """z.ai is Anthropic-only, and codex cannot speak that protocol."""
     assert {p.name for p in compatible_providers(get_agent("codex"))} == {
-        "ollama",
+        "ollama-direct",
         "litellm",
         "gemini",
         "deepseek-openai",
@@ -431,13 +433,13 @@ _RUNTIME_OVERRIDABLE = Provider(
 
 @pytest.mark.unit
 def test_fixed_provider_passes_through_with_no_url():
-    ollama = get_provider("ollama")
+    ollama = get_provider("ollama-direct")
     assert with_base_url(ollama, None) is ollama
 
 
 @pytest.mark.unit
 def test_fixed_provider_refuses_an_override():
-    ollama = get_provider("ollama")
+    ollama = get_provider("ollama-direct")
     with pytest.raises(CodeHelperError, match="fixed base URL"):
         with_base_url(ollama, "http://x/v1")
 
@@ -499,9 +501,11 @@ def test_fixed_refusal_message_lists_runtime_providers_from_the_registry(
     """The error text is DERIVED from PROVIDERS, not a hard-coded name list."""
     import codehelper.services.model as m
 
-    monkeypatch.setattr(m, "PROVIDERS", (get_provider("ollama"), _RUNTIME_REQUIRED))
+    monkeypatch.setattr(
+        m, "PROVIDERS", (get_provider("ollama-direct"), _RUNTIME_REQUIRED)
+    )
     with pytest.raises(CodeHelperError, match="runtime-required"):
-        with_base_url(get_provider("ollama"), "http://x/v1")
+        with_base_url(get_provider("ollama-direct"), "http://x/v1")
 
 
 # --------------------------------------------------------------------------- #
@@ -675,7 +679,7 @@ def test_ollama_declares_overridable_auth_with_a_token_env_var():
     present so with_auth has something to substitute in — pins the fix for
     the (incorrect) assumption that a local daemon can never sit behind auth
     (a reverse proxy, or Ollama Cloud, both routinely do)."""
-    ollama = get_provider("ollama")
+    ollama = get_provider("ollama-direct")
     assert ollama.auth_policy is AuthPolicy.OVERRIDABLE
     assert ollama.auth == "literal"
     assert ollama.token_env_var
@@ -746,9 +750,9 @@ def test_anthropic_settings_shape_on_no_agent():
     ("agent_name", "provider_name", "expected"),
     [
         ("claude", "zai", ConfigShape.ANTHROPIC_ENV),
-        ("claude", "ollama", ConfigShape.ANTHROPIC_ENV),
+        ("claude", "ollama-direct", ConfigShape.ANTHROPIC_ENV),
         ("claude", "litellm", ConfigShape.ANTHROPIC_ENV),
-        ("codex", "ollama", ConfigShape.OPENAI_TOML),
+        ("codex", "ollama-direct", ConfigShape.OPENAI_TOML),
         ("codex", "litellm", ConfigShape.OPENAI_TOML),
         ("codex", "gemini", ConfigShape.OPENAI_TOML),
     ],
@@ -776,7 +780,7 @@ def test_switchable_providers_includes_native_and_the_settings_providers():
     from codehelper.services.model import switchable_providers
 
     assert {p.name for p in switchable_providers()} == {
-        "ollama",
+        "ollama-direct",
         "zai",
         "litellm",
         "deepseek",

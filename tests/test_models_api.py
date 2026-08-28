@@ -16,7 +16,7 @@ from codehelper.services.model import ModelListAPI, Provider, get_provider
 from codehelper.services.models_api import list_models
 
 _OLLAMA = Provider(
-    name="ollama",
+    name="ollama-direct",
     shapes=frozenset(),
     base_url="http://127.0.0.1:11434",
     auth="literal",
@@ -168,7 +168,7 @@ def test_daemon_unreachable_reports_error():
     fetch = _fetch_raising(urllib.error.URLError(ConnectionRefusedError(61)))
     result = list_models(_OLLAMA, fetch=fetch)
     assert not result.ok
-    assert "could not reach ollama" in result.error
+    assert "could not reach ollama-direct" in result.error
     assert "manually" in result.error  # tells the user the way forward
     assert result.models == ()
 

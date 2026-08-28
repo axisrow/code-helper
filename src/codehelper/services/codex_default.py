@@ -59,6 +59,7 @@ from codehelper.services.render import (
 
 __all__ = [
     "DefaultPatch",
+    "CODEX_RESERVED_PROVIDER_IDS",
     "resolve_default_patch",
     "patch_config_toml",
     "diff_preview",
@@ -87,6 +88,18 @@ class DefaultPatch:
     #: same conditional-emission rule ``render.openai_toml_body`` and
     #: ``_render_anthropic_env`` use.
     context_window: int | None
+
+
+#: Provider IDs Codex CLI itself treats as built-in and refuses to see
+#: overridden in ``[model_providers.<id>]`` — NOT this project's own
+#: reservation (contrast :data:`codehelper.services.naming.RESERVED_ALIASES`,
+#: which reserves *wrapper* names in this tool's own ``~/.local/bin``
+#: namespace). This list is Codex's, sourced from its own error message
+#: ("model_providers contains reserved built-in provider IDs"); kept in sync
+#: by hand since Codex does not expose it as a queryable API. Confirmed
+#: reserved as of Codex CLI v0.150.1: "openai", "ollama" — the latter is why
+#: this project's own ``ollama`` provider was renamed to ``ollama-direct``.
+CODEX_RESERVED_PROVIDER_IDS = frozenset({"openai", "ollama"})
 
 
 def resolve_default_patch(agent: Agent, provider: Provider, model: str) -> DefaultPatch:
@@ -132,6 +145,15 @@ def resolve_default_patch(agent: Agent, provider: Provider, model: str) -> Defau
         raise CodeHelperError(
             f"provider {provider.name!r} declares openai-toml but has invalid "
             f"wire_api {provider.wire_api!r} (must be 'responses' or 'chat')"
+        )
+
+    if provider.name in CODEX_RESERVED_PROVIDER_IDS:
+        raise CodeHelperError(
+            f"provider {provider.name!r} is reserved by Codex CLI itself as a "
+            f"built-in provider ID and cannot be used in "
+            f"[model_providers.{provider.name}] — Codex will refuse to load "
+            f"config.toml entirely. Rename this provider in codehelper's own "
+            f"registry (services/model.py PROVIDERS)."
         )
 
     return DefaultPatch(
@@ -393,18 +415,73 @@ def _patch_model_providers_table(original: str, patch: DefaultPatch) -> str:
     return original[: header_match.start()] + rendered + original[body_end:]
 
 
+def _remove_model_providers_table(text: str, table_name: str) -> str:
+    """Remove ``[model_providers.<table_name>]`` (header through the next
+    table header, or EOF) if present; a no-op otherwise. Pure, no IO.
+
+    The one place this header/next-table-boundary removal is implemented —
+    shared by :func:`clear_config_toml` (removing the table ``set-default``
+    itself owns) and :func:`_strip_reserved_ollama_table` (removing a
+    DIFFERENT, stale table left behind by an older codehelper), so the two
+    unrelated reasons to drop a ``[model_providers.*]`` table can never drift
+    on how a table's boundary is found.
+    """
+    header_re = re.compile(
+        rf"^\[model_providers\.{re.escape(table_name)}\]\s*$", re.MULTILINE
+    )
+    match = header_re.search(text)
+    if match is None:
+        return text
+    next_header = _ANY_TABLE_HEADER_RE.search(text, match.end())
+    return (
+        text[: match.start()]
+        + text[next_header.start() if next_header else len(text) :]
+    )
+
+
+#: The literal table name of ONE retired provider ID this project itself
+#: used to write into config.toml before Codex CLI v0.150.1 reserved it as
+#: its own built-in provider ID (see :data:`CODEX_RESERVED_PROVIDER_IDS`).
+#: A one-off compatibility shim, not a general mechanism — deliberately a
+#: literal string, not derived from ``model.RETIRED_PROVIDER_NAMES``,
+#: because THIS specific table is the one that makes Codex refuse to load
+#: the file at all, which is a stronger claim than "renamed in our
+#: registry." Safe to delete once the affected population has run a
+#: ``set-default``/``clear-default`` at least once after upgrading.
+_STALE_RESERVED_PROVIDER_TABLE = "ollama"
+
+
+def _strip_reserved_ollama_table(original: str) -> str:
+    """Remove a stale ``[model_providers.ollama]`` table, if present.
+
+    Self-healing one-time migration: a config.toml written by an older
+    codehelper (before the ``ollama`` -> ``ollama-direct`` rename) may still
+    carry this table, which Codex CLI v0.150.1+ refuses to load AT ALL
+    (reserved built-in provider ID) — Codex itself never gets far enough to
+    run again and fix this, so the fix has to happen the next time
+    codehelper itself touches the file, regardless of which provider this
+    particular call is patching. A no-op when the table is absent (already
+    migrated, or never present).
+    """
+    return _remove_model_providers_table(original, _STALE_RESERVED_PROVIDER_TABLE)
+
+
 def patch_config_toml(original: str, patch: DefaultPatch) -> str:
     """Return ``original`` with ``patch`` applied. Pure, no IO.
 
-    Two independent steps — top-level scalar keys, then the
-    ``[model_providers.X]`` table — each anchored/regex-based, never a
-    round-trip TOML parse. Idempotent by construction: applying the same
-    ``patch`` twice in a row yields byte-identical output both times, because
-    both steps always ask "is the target already here?" before deciding
-    replace-in-place vs. append/insert, and both render their inserted value
+    Three steps — strip a stale reserved-name table left behind by an older
+    codehelper (:func:`_strip_reserved_ollama_table`, a one-time
+    self-healing migration, independent of what ``patch`` itself targets),
+    then the top-level scalar keys, then the ``[model_providers.X]`` table —
+    each anchored/regex-based, never a round-trip TOML parse. Idempotent by
+    construction: applying the same ``patch`` twice in a row yields
+    byte-identical output both times, because every step always asks "is the
+    target already here?" before deciding replace-in-place vs.
+    append/insert, and both key/table steps render their inserted value
     through the exact same encoder used for a replacement.
     """
-    with_keys = _patch_top_level(original, patch)
+    stripped = _strip_reserved_ollama_table(original)
+    with_keys = _patch_top_level(stripped, patch)
     return _patch_model_providers_table(with_keys, patch)
 
 
@@ -475,15 +552,29 @@ def _verify_toml_or_refuse(text: str, *, context: str) -> None:
         ) from None
 
 
-def _without_managed_region(data: dict, patch: DefaultPatch) -> dict:
+def _without_managed_region(
+    data: dict, patch: DefaultPatch, *, also_exclude: str | None = None
+) -> dict:
     """``data`` (an already-parsed TOML dict) with every key this patcher
     manages removed, so what's left is exactly the content that must survive
     a patch untouched.
+
+    ``also_exclude``, when given, drops one more ``[model_providers.*]``
+    table from the comparison alongside ``patch.provider_table`` — for
+    :func:`_verify_patch_applied` ONLY, whose :func:`patch_config_toml` may
+    have stripped :data:`_STALE_RESERVED_PROVIDER_TABLE` regardless of what
+    ``patch`` itself targets. :func:`_verify_cleared` never passes this:
+    ``clear_config_toml`` never calls the stale-table strip, so there is
+    nothing extra to exclude there — keeping that one-time migration concern
+    out of this function's own, unconditional comparison logic.
     """
     out = {k: v for k, v in data.items() if k not in _TOP_LEVEL_KEYS}
     providers = out.get("model_providers")
-    if isinstance(providers, dict) and patch.provider_table in providers:
-        providers = {k: v for k, v in providers.items() if k != patch.provider_table}
+    excluded_tables = {patch.provider_table} | (
+        {also_exclude} if also_exclude else set()
+    )
+    if isinstance(providers, dict):
+        providers = {k: v for k, v in providers.items() if k not in excluded_tables}
         if providers:
             out["model_providers"] = providers
         else:
@@ -559,9 +650,13 @@ def _verify_patch_applied(original: str, patched: str, patch: DefaultPatch) -> N
     # an empty original (fresh install) has nothing to preserve.
     if original.strip():
         original_data = tomllib.loads(original)
-        if _without_managed_region(original_data, patch) != _without_managed_region(
-            data, patch
-        ):
+        before = _without_managed_region(
+            original_data, patch, also_exclude=_STALE_RESERVED_PROVIDER_TABLE
+        )
+        after = _without_managed_region(
+            data, patch, also_exclude=_STALE_RESERVED_PROVIDER_TABLE
+        )
+        if before != after:
             raise CodeHelperError(
                 "internal error: patching config.toml appears to have altered "
                 "content outside the managed keys/table — refusing to write; "
@@ -614,16 +709,7 @@ def clear_config_toml(original: str, provider_table: str | None) -> str:
         # Consume the trailing newline with the line so removal does not
         # leave a blank gap where the key used to be.
         text = re.sub(rf"^{re.escape(key)}\s*=.*(?:\n|$)", "", text, flags=re.MULTILINE)
-    if provider_table:
-        header = re.compile(
-            rf"^\[model_providers\.{re.escape(provider_table)}\]\s*$", re.MULTILINE
-        )
-        match = header.search(text)
-        if match:
-            # The table body runs to the next table header, or to EOF.
-            nxt = _ANY_TABLE_HEADER_RE.search(text, match.end())
-            text = text[: match.start()] + text[nxt.start() if nxt else len(text) :]
-    return text
+    return _remove_model_providers_table(text, provider_table)
 
 
 def _verify_cleared(original: str, cleared: str, provider_table: str | None) -> None:
@@ -764,15 +850,19 @@ def current_default(paths: Paths) -> str | None:
     ``model_provider = "<provider.name>"`` verbatim, so the file already
     carries the provider's identity and no address-matching heuristic is
     needed. A name that matches no registry entry (hand-written, or from a
-    provider since removed) reads as ``None`` rather than being echoed back,
-    so every non-``None`` return is a real ``PROVIDERS`` name.
+    provider since removed) reads as ``None`` rather than being echoed back
+    — EXCEPT a RETIRED provider name (``model.RETIRED_PROVIDER_NAMES``, e.g.
+    ``"ollama"`` before it was renamed to ``"ollama-direct"``), which is
+    still echoed back as-is: it names a config.toml this project itself
+    wrote before the rename, and callers resolve it via
+    ``model.get_provider_for_legacy_read`` rather than plain ``get_provider``.
 
     Uses ``tomllib`` directly rather than ``_require_tomllib``: that helper
     refuses loudly because ``set-default`` is about to WRITE, and a missing
     verifier there would mean writing unverified. This function only reads,
     and its whole contract is to degrade to ``None`` instead of raising.
     """
-    from codehelper.services.model import PROVIDERS
+    from codehelper.services.model import get_provider_for_legacy_read
 
     text = read_text_or_none(paths.codex_main_config())
     if not text:
@@ -788,7 +878,11 @@ def current_default(paths: Paths) -> str | None:
     name = data.get("model_provider")
     if not isinstance(name, str):
         return None
-    return name if any(p.name == name for p in PROVIDERS) else None
+    try:
+        get_provider_for_legacy_read(name)
+    except CodeHelperError:
+        return None
+    return name
 
 
 def apply_set_default(

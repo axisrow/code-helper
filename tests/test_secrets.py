@@ -99,6 +99,33 @@ def test_credential_for_missing_provider_is_empty_string(tmp_path):
     assert credential_for(_paths(tmp_path), "litellm") == ""
 
 
+@pytest.mark.unit
+def test_credential_for_finds_a_token_saved_under_a_retired_provider_name(tmp_path):
+    """A token cached under "ollama" (before the ollama -> ollama-direct
+    rename) must stay reachable when queried under the CURRENT name — the
+    old credentials.json entry is not migrated in place, just still found."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "ollama", "sk-legacy")
+    assert credential_for(paths, "ollama-direct") == "sk-legacy"
+
+
+@pytest.mark.unit
+def test_credential_for_prefers_the_current_name_over_the_retired_one(tmp_path):
+    paths = _paths(tmp_path)
+    save_credential(paths, "ollama", "sk-legacy")
+    save_credential(paths, "ollama-direct", "sk-current")
+    assert credential_for(paths, "ollama-direct") == "sk-current"
+
+
+@pytest.mark.unit
+def test_profile_names_includes_profiles_saved_under_a_retired_provider_name(
+    tmp_path,
+):
+    paths = _paths(tmp_path)
+    save_credential(paths, "ollama", "sk-legacy", profile_name="proxy")
+    assert "proxy" in profile_names(paths, "ollama-direct")
+
+
 # --------------------------------------------------------------------------- #
 # save_credential
 # --------------------------------------------------------------------------- #
@@ -193,6 +220,26 @@ def test_rename_profile_preserves_the_token(tmp_path):
 
 
 @pytest.mark.unit
+def test_rename_profile_finds_a_profile_stored_under_a_retired_provider_name(
+    tmp_path,
+):
+    """A profile visible via profile_names(paths, "ollama-direct") only
+    because it lives under the retired "ollama" key (see
+    test_profile_names_includes_profiles_saved_under_a_retired_provider_name)
+    must actually be renamable through the current name — not silently
+    no-op just because rename_profile only ever looked at the CURRENT
+    name's own dict entry."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "ollama", "sk-legacy", profile_name="work")
+    assert "work" in profile_names(paths, "ollama-direct")
+
+    rename_profile(paths, "ollama-direct", "work", "personal")
+
+    assert credential_for(paths, "ollama-direct", "personal") == "sk-legacy"
+    assert "work" not in profile_names(paths, "ollama-direct")
+
+
+@pytest.mark.unit
 def test_save_credential_empty_token_is_a_noop(tmp_path):
     paths = _paths(tmp_path)
     save_credential(paths, "litellm", "")
@@ -248,6 +295,41 @@ def test_invalidate_cached_credential_missing_file_is_a_noop(tmp_path):
     paths = _paths(tmp_path)
     invalidate_cached_credential(paths, "zai")  # no file at all yet
     assert not paths.credentials_file().exists()
+
+
+@pytest.mark.unit
+def test_invalidate_cached_credential_also_drops_the_retired_name_entry(tmp_path):
+    """A token cached under a RETIRED provider name (e.g. "ollama" before the
+    ollama -> ollama-direct rename) must not survive invalidating the CURRENT
+    name — credential_for falls back to the retired name (see
+    test_credential_for_finds_a_token_saved_under_a_retired_provider_name), so
+    if invalidation only dropped the current name's entry, a revoked/rotated
+    token cached under the old key would resurface on the very next
+    credential_for("ollama-direct") call, silently reinstalling it into a
+    freshly generated wrapper."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "ollama", "sk-old-revoked")
+    assert credential_for(paths, "ollama-direct") == "sk-old-revoked"
+
+    invalidate_cached_credential(paths, "ollama-direct")
+
+    assert credential_for(paths, "ollama-direct") == ""
+
+
+@pytest.mark.unit
+def test_invalidate_cached_credential_retired_name_drop_preserves_other_profiles(
+    tmp_path,
+):
+    """Dropping the retired-name entry during invalidation must only remove
+    the targeted profile, not every profile cached under the retired name."""
+    paths = _paths(tmp_path)
+    save_credential(paths, "ollama", "sk-old-default")
+    save_credential(paths, "ollama", "sk-old-proxy", profile_name="proxy")
+
+    invalidate_cached_credential(paths, "ollama-direct")
+
+    assert credential_for(paths, "ollama-direct") == ""
+    assert credential_for(paths, "ollama-direct", "proxy") == "sk-old-proxy"
 
 
 @pytest.mark.unit
@@ -812,8 +894,8 @@ def test_token_for_discovery_still_uses_cache_for_a_fixed_provider(tmp_path):
 def test_token_for_discovery_empty_for_non_secret_provider(tmp_path):
     """A literal/none provider never needs a token — don't even read the cache."""
     paths = _paths(tmp_path)
-    save_credential(paths, "ollama", "should-not-be-returned")
-    provider = _Provider(auth="literal", token_env_var="DUMMY", name="ollama")
+    save_credential(paths, "dummy", "should-not-be-returned")
+    provider = _Provider(auth="literal", token_env_var="DUMMY", name="dummy")
     result = token_for_discovery(paths, provider, environ={"DUMMY": "sk-ignored"})
     assert result == ""
 
