@@ -134,10 +134,16 @@ class _AgentBackend:
             launch) is real and must be visible, not implied.
         chip_is_applied: Method name taking ``(agent_name, chip)`` — whether a
             backend chip is the one currently applied. Defaults to matching by
-            provider name; claude overrides it with an exact-env match and
-            codex with a provider+model match, each because its readback is
-            richer than a provider name alone (see
+            provider name; claude overrides it with an exact-env match plus
+            the chip's own token and codex with a provider+model match, each
+            because its readback is richer than a provider name alone (see
             :meth:`_chip_is_applied_switch`, :meth:`_chip_is_applied_codex`).
+        chip_switch_token: Method name taking ``(chip)`` — the token Enter on
+            ``chip`` would apply, or ``None`` when it cannot resolve one.
+            Feeds :meth:`_chip_is_applied_switch`: two accounts on one
+            backend differ in nothing but the token, so a readback that
+            ignores it marks every chip on that backend applied. Optional —
+            only agents whose readback is token-exact carry it.
     """
 
     read_applied: Callable[[Paths], str | None]
@@ -146,6 +152,7 @@ class _AgentBackend:
     lifecycle: str
     chip_is_applied: str
     read_applied_model: Callable[[Paths], str | None] | None = None
+    chip_switch_token: str | None = None
 
 
 def _hint(
@@ -273,6 +280,7 @@ class TuiSession:
         "_proxy",
         "_chips",
         "_chip_index",
+        "_chip_switch_tokens",
     )
 
     def __init__(self, args: argparse.Namespace) -> None:
@@ -302,6 +310,11 @@ class TuiSession:
         #: would create a second source of truth about what is selected,
         #: competing with the config files that actually decide.
         self._chip_index: dict[str, int] = {}
+        #: agent name -> {chip name -> the token Enter on that chip would
+        #: apply, or None}. Only an agent whose `_AgentBackend` carries
+        #: `chip_switch_token` appears here. Filled once per iteration; the
+        #: chip_is_applied predicate reads ONLY this on a redraw frame.
+        self._chip_switch_tokens: dict[str, dict[str, str | None]] = {}
 
     # --- UI primitives ---------------------------------------------------
 
@@ -1414,6 +1427,21 @@ class TuiSession:
         # re-evaluates that on every redraw frame, cursor movement included.
         self._proxy = proxy_status(paths)
         self._chips = {name: self._chips_for(name, paths) for name in _AGENT_BACKENDS}
+        # Token readback for the agents whose chip_is_applied is token-exact.
+        # Same I/O class as the reads above — once per iteration, never per
+        # redraw frame — and resolved through the apply-path resolvers so the
+        # ✓ cannot drift from what a chip press actually writes.
+        self._chip_switch_tokens = {
+            name: {
+                self._chip_name(chip): getattr(self, backend.chip_switch_token)(
+                    chip, paths
+                )
+                for chip in chips
+            }
+            for name, backend in _AGENT_BACKENDS.items()
+            if backend.chip_switch_token is not None
+            for chips in (self._chips[name],)
+        }
         # A wrapper can be removed (`d`) or added (`a`) between iterations, so
         # a chip cursor parked past the end of a now-shorter strip is normal,
         # not a bug — clamp rather than reset, so an unaffected row keeps its
@@ -1464,8 +1492,8 @@ class TuiSession:
         precisely the two can be matched is per-agent and lives in
         ``_AgentBackend.chip_is_applied``, resolved here by method name —
         never an ``if agent.name == ...`` branch. Each agent matches as
-        exactly as its config allows: claude by exact env
-        (:meth:`_chip_is_applied_switch`), codex by provider AND model
+        exactly as its config allows: claude by exact env plus the chip's own
+        token (:meth:`_chip_is_applied_switch`), codex by provider AND model
         (:meth:`_chip_is_applied_codex`). ``_chip_is_applied_provider`` — the
         provider-name-only default — is the weakest of the three and marks
         EVERY chip sharing that provider, not merely the first: the predicate
@@ -1509,16 +1537,72 @@ class TuiSession:
         model = self._applied_model.get(agent_name)
         return model is None or chip.model == model
 
-    def _chip_is_applied_switch(self, agent_name: str, chip) -> bool:
-        """claude readback: exact-env match against the managed snapshot.
+    def _chip_switch_token(self, chip, paths) -> str | None:
+        """The token Enter on ``chip`` would apply, or ``None`` when it has none.
 
-        ``_claude_active_env`` is refreshed once per main-loop iteration by
-        ``_refresh_active_label``, so this reads only the cache — never the
+        Asked through the SAME resolvers the apply path uses —
+        ``_switch_axes_from_preset`` for a preset chip,
+        ``_switch_axes_from_wrapper`` for an installed one — so the readback
+        and the write can never disagree about which account a chip names. A
+        resolver raising is the apply path failing cleanly (no non-interactive
+        token available, unreadable wrapper), which is NOT a no-op: ``None``,
+        never a guess.
+        """
+        from codehelper.cli.parser import (
+            _switch_axes_from_preset,
+            _switch_axes_from_wrapper,
+        )
+        from codehelper.errors import CodeHelperError
+        from codehelper.services.spec import preset_names
+
+        if isinstance(chip, str):  # native / + add — not backends
+            return None
+        try:
+            if chip.name in preset_names():
+                _, _, token, _ = _switch_axes_from_preset(
+                    self._switch_request(from_preset=chip.name), paths
+                )
+            else:
+                _, _, token, _ = _switch_axes_from_wrapper(
+                    self._switch_request(from_wrapper=chip.name), paths
+                )
+        except CodeHelperError:
+            return None
+        return token or None
+
+    def _chip_is_applied_switch(self, agent_name: str, chip) -> bool:
+        """claude readback: the managed env equals exactly what Enter writes.
+
+        ``matches_switch_spec`` checks the axes (provider, tier models,
+        subagent) against the managed snapshot — but it builds the expected
+        env with the LIVE token substituted in, which used to leave every
+        chip on one backend indistinguishable: two accounts on the same
+        provider with the same tier models differ in NOTHING but the token,
+        and all of them rendered ``✓`` at once (three zai chips shipped
+        doing exactly that). So the token comes from the CHIP instead, via
+        the same resolver a chip press uses (:meth:`_chip_switch_token`):
+        applied now means Enter would be a no-op, which is also exactly when
+        the ``_apply_chip`` guard is allowed to swallow the press.
+
+        Both inputs are refreshed once per main-loop iteration by
+        ``_refresh_active_label`` — this reads only caches, never the
         filesystem on a redraw frame.
         """
         from codehelper.services.claude_settings import matches_switch_spec
 
-        return matches_switch_spec(self._claude_active_env, chip)
+        env = self._claude_active_env
+        if not matches_switch_spec(env, chip):
+            return False
+        if chip.auth != "secret":
+            # Nothing is resolved at apply time, so the axes comparison IS
+            # the full env comparison — no token to narrow by.
+            return True
+        chip_token = self._chip_switch_tokens.get(agent_name, {}).get(
+            self._chip_name(chip)
+        )
+        return chip_token is not None and chip_token == (env or {}).get(
+            "ANTHROPIC_AUTH_TOKEN", ""
+        )
 
     def _chip_row(self, agent_name: str) -> Callable[..., str]:
         """A label callable rendering one agent's chip strip.
@@ -1925,6 +2009,7 @@ def _register_agent_backends() -> None:
                 apply_native="_apply_switch_native",
                 lifecycle="live",
                 chip_is_applied="_chip_is_applied_switch",
+                chip_switch_token="_chip_switch_token",
             ),
             "codex": _AgentBackend(
                 read_applied=current_default,
@@ -1944,7 +2029,10 @@ def _register_agent_backends() -> None:
             backend.apply_wrapper,
             backend.apply_native,
             backend.chip_is_applied,
+            backend.chip_switch_token,
         ):
+            if hook is None:
+                continue
             if not callable(getattr(TuiSession, hook, None)):
                 raise AttributeError(f"TuiSession has no hook {hook!r}")
 
