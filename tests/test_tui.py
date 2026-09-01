@@ -2440,3 +2440,198 @@ def test_codex_chip_readback_distinguishes_two_models_on_one_provider():
 
     assert session._chip_is_applied("codex", applied) is True
     assert session._chip_is_applied("codex", other) is False
+
+
+def _install_zai_pair(alias_a: str, token_a: str, alias_b: str, token_b: str):
+    """Two zai claude wrappers with identical axes and DIFFERENT tokens."""
+    from codehelper.services.spec import build_spec
+    from codehelper.services.wrappers import install_wrapper
+
+    first = build_spec(agent="claude", provider="zai", model="glm-5.3", alias=alias_a)
+    second = build_spec(agent="claude", provider="zai", model="glm-5.3", alias=alias_b)
+    install_wrapper(Paths.default(), first, token=token_a)
+    install_wrapper(Paths.default(), second, token=token_b)
+    return first, second
+
+
+def _apply_live(spec, token: str) -> None:
+    """Make ``spec`` the genuinely live backend, the way Enter on its chip
+    does (``switch --from-wrapper`` = live_axes_for_spec + the file token)."""
+    from codehelper.services.claude_settings import apply_switch, live_axes_for_spec
+
+    provider, tiers, subagent = live_axes_for_spec(spec)
+    apply_switch(
+        Paths.default(),
+        provider=provider,
+        tier_models=tiers,
+        token=token,
+        subagent_model=subagent,
+        force=True,
+    )
+
+
+def _claude_session():
+    from codehelper.cli.tui import TuiSession
+
+    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session._refresh_active_label()
+    return session
+
+
+def _chip_named(session, name: str):
+    return next(
+        chip for chip in session._chips["claude"] if getattr(chip, "name", None) == name
+    )
+
+
+@pytest.mark.integration
+def test_claude_chip_readback_distinguishes_tokens_on_one_backend(
+    monkeypatch,
+):
+    """Two claude wrappers sharing provider AND tier models but carrying
+    DIFFERENT tokens must not both read as applied.
+
+    `matches_switch_spec` compares the managed env exactly, but builds the
+    expected env with the LIVE token substituted in — so the token, the only
+    field distinguishing two accounts on one backend, never took part in the
+    comparison. Three zai chips (a preset and two wrappers, glm-5.3 uniform
+    each) then rendered `✓` at once, and — worse — Enter on the two that
+    weren't live was swallowed by the no-op guard. The chip's apply path
+    takes its token from the installed file, so the readback can be exact.
+    """
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    first, second = _install_zai_pair(
+        "glm-acc1", "token-aaaa", "glm-acc2", "token-bbbb"
+    )
+    _apply_live(first, "token-aaaa")
+
+    session = _claude_session()
+
+    assert session._chip_is_applied("claude", first) is True
+    assert session._chip_is_applied("claude", second) is False
+    # The zai glm PRESET chip resolves its token non-interactively; with no
+    # ZAI_API_KEY and no cached default profile it has no token to claim —
+    # and a chip press would fail cleanly, which is not a no-op.
+    assert session._chip_is_applied("claude", _chip_named(session, "glm")) is False
+
+
+@pytest.mark.integration
+def test_claude_chip_row_shows_no_checkmark_when_live_token_matches_no_chip(
+    monkeypatch,
+):
+    """A backend switched to a token no chip carries (an env or prompt
+    switch) marks no chip applied — and native must not claim it either,
+    since a managed env IS live. A row with no `✓` is the honest "none of
+    these chips": a chip's ✓ names the ACCOUNT it would apply, not merely
+    the endpoint."""
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    _install_zai_pair("glm-acc1", "token-aaaa", "glm-acc2", "token-bbbb")
+    from codehelper.services.spec import build_spec
+
+    probe = build_spec(agent="claude", provider="zai", model="glm-5.3")
+    _apply_live(probe, "token-nobody-carries")
+
+    session = _claude_session()
+
+    assert "✓" not in session._chip_row("claude")(selected=False, ansi=False)
+
+
+@pytest.mark.integration
+def test_preset_chip_readback_uses_the_non_interactive_token(monkeypatch):
+    """The preset chip reads applied only when its NON-INTERACTIVE token
+    resolution — env, then the default cached profile, exactly what a chip
+    press resolves — equals the live token. A wrapper on the same axes under
+    a different account must not ride along."""
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    from codehelper.services.secrets import seed_default_profile
+
+    seed_default_profile(Paths.default(), "zai", "preset-token")
+    first, _second = _install_zai_pair(
+        "glm-acc1", "token-aaaa", "glm-acc2", "token-bbbb"
+    )
+    _apply_live(first, "preset-token")
+
+    session = _claude_session()
+
+    assert session._chip_is_applied("claude", _chip_named(session, "glm")) is True
+    assert session._chip_is_applied("claude", first) is False
+
+
+@pytest.mark.integration
+def test_enter_applies_a_chip_whose_token_differs_on_the_same_backend(monkeypatch):
+    """The ✓ doubles as the no-op guard (`_apply_chip` skips a chip that
+    reads applied): with the token part of the readback, Enter on the SECOND
+    account must reach the apply path instead of being silently swallowed."""
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    import codehelper.cli.tui as tui
+
+    first, _second = _install_zai_pair(
+        "glm-acc1", "token-aaaa", "glm-acc2", "token-bbbb"
+    )
+    _apply_live(first, "token-aaaa")
+
+    seen = []
+    monkeypatch.setattr(
+        tui.TuiSession,
+        "_apply_switch_wrapper",
+        lambda self, spec: seen.append(spec.name),
+    )
+    index = next(
+        i
+        for i, chip in enumerate(_claude_session()._chips["claude"])
+        if getattr(chip, "name", None) == "glm-acc2"
+    )
+    _real_menu_keys(monkeypatch, ["RIGHT"] * index + ["ENTER", "CANCEL"])
+    assert main(["tui"]) == 0
+
+    assert seen == ["glm-acc2"]
+
+
+@pytest.mark.integration
+def test_literal_chips_not_applied_when_a_secret_wrapper_is_live(monkeypatch):
+    """A secret wrapper on an OVERRIDABLE provider (ollama-direct) shares
+    provider AND tier models with the literal `deepseek-ollama` preset — the
+    token is the only difference, and a literal chip DOES resolve one at
+    apply time (its `auth_value`, through the same resolvers), so the
+    readback compares it for EVERY chip, not just `auth="secret"` ones.
+
+    With the secret wrapper live, neither chip reads applied: pressing
+    either would write the literal credential — not a no-op — and the row
+    honestly shows no checkmark at all. (That the wrapper's own embedded
+    secret is not what its chip would write is the marker's pre-existing
+    gap, not this predicate's: the ✓ answers what Enter writes, and it
+    answers truthfully.)
+    """
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    from codehelper.services.model import get_provider, with_auth
+    from codehelper.services.spec import build_spec, get_preset, spec_from_preset
+    from codehelper.services.wrappers import install_wrapper
+
+    preset_spec = spec_from_preset(get_preset("deepseek-ollama"))
+    secret = build_spec(
+        agent="claude",
+        provider=with_auth(get_provider("ollama-direct"), want_secret=True),
+        model=preset_spec.model,
+        alias="ollama-secret",
+        tier_models=preset_spec.tier_models,
+        subagent_model=preset_spec.subagent_model,
+    )
+    install_wrapper(Paths.default(), secret, token="sk-ollama-secret")
+    _apply_live(secret, "sk-ollama-secret")
+
+    session = _claude_session()
+
+    # The chips the UI actually renders are RECONSTRUCTED from the installed
+    # file — the marker carries no auth override, so the secret wrapper reads
+    # back literal like the preset. Assert on those, not on the spec object
+    # built above (whose auth="secret" would take a different code path than
+    # the real row ever sees).
+    assert (
+        session._chip_is_applied("claude", _chip_named(session, "ollama-secret"))
+        is False
+    )
+    assert (
+        session._chip_is_applied("claude", _chip_named(session, "deepseek-ollama"))
+        is False
+    )
+    assert "✓" not in session._chip_row("claude")(selected=False, ansi=False)
