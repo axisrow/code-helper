@@ -2454,7 +2454,7 @@ def _install_zai_pair(alias_a: str, token_a: str, alias_b: str, token_b: str):
     return first, second
 
 
-def _apply_zai_live(spec, token: str) -> None:
+def _apply_live(spec, token: str) -> None:
     """Make ``spec`` the genuinely live backend, the way Enter on its chip
     does (``switch --from-wrapper`` = live_axes_for_spec + the file token)."""
     from codehelper.services.claude_settings import apply_switch, live_axes_for_spec
@@ -2503,7 +2503,7 @@ def test_claude_chip_readback_distinguishes_tokens_on_one_backend(
     first, second = _install_zai_pair(
         "glm-acc1", "token-aaaa", "glm-acc2", "token-bbbb"
     )
-    _apply_zai_live(first, "token-aaaa")
+    _apply_live(first, "token-aaaa")
 
     session = _claude_session()
 
@@ -2529,7 +2529,7 @@ def test_claude_chip_row_shows_no_checkmark_when_live_token_matches_no_chip(
     from codehelper.services.spec import build_spec
 
     probe = build_spec(agent="claude", provider="zai", model="glm-5.3")
-    _apply_zai_live(probe, "token-nobody-carries")
+    _apply_live(probe, "token-nobody-carries")
 
     session = _claude_session()
 
@@ -2549,7 +2549,7 @@ def test_preset_chip_readback_uses_the_non_interactive_token(monkeypatch):
     first, _second = _install_zai_pair(
         "glm-acc1", "token-aaaa", "glm-acc2", "token-bbbb"
     )
-    _apply_zai_live(first, "preset-token")
+    _apply_live(first, "preset-token")
 
     session = _claude_session()
 
@@ -2568,7 +2568,7 @@ def test_enter_applies_a_chip_whose_token_differs_on_the_same_backend(monkeypatc
     first, _second = _install_zai_pair(
         "glm-acc1", "token-aaaa", "glm-acc2", "token-bbbb"
     )
-    _apply_zai_live(first, "token-aaaa")
+    _apply_live(first, "token-aaaa")
 
     seen = []
     monkeypatch.setattr(
@@ -2585,3 +2585,53 @@ def test_enter_applies_a_chip_whose_token_differs_on_the_same_backend(monkeypatc
     assert main(["tui"]) == 0
 
     assert seen == ["glm-acc2"]
+
+
+@pytest.mark.integration
+def test_literal_chips_not_applied_when_a_secret_wrapper_is_live(monkeypatch):
+    """A secret wrapper on an OVERRIDABLE provider (ollama-direct) shares
+    provider AND tier models with the literal `deepseek-ollama` preset — the
+    token is the only difference, and a literal chip DOES resolve one at
+    apply time (its `auth_value`, through the same resolvers), so the
+    readback compares it for EVERY chip, not just `auth="secret"` ones.
+
+    With the secret wrapper live, neither chip reads applied: pressing
+    either would write the literal credential — not a no-op — and the row
+    honestly shows no checkmark at all. (That the wrapper's own embedded
+    secret is not what its chip would write is the marker's pre-existing
+    gap, not this predicate's: the ✓ answers what Enter writes, and it
+    answers truthfully.)
+    """
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    from codehelper.services.model import get_provider, with_auth
+    from codehelper.services.spec import build_spec, get_preset, spec_from_preset
+    from codehelper.services.wrappers import install_wrapper
+
+    preset_spec = spec_from_preset(get_preset("deepseek-ollama"))
+    secret = build_spec(
+        agent="claude",
+        provider=with_auth(get_provider("ollama-direct"), want_secret=True),
+        model=preset_spec.model,
+        alias="ollama-secret",
+        tier_models=preset_spec.tier_models,
+        subagent_model=preset_spec.subagent_model,
+    )
+    install_wrapper(Paths.default(), secret, token="sk-ollama-secret")
+    _apply_live(secret, "sk-ollama-secret")
+
+    session = _claude_session()
+
+    # The chips the UI actually renders are RECONSTRUCTED from the installed
+    # file — the marker carries no auth override, so the secret wrapper reads
+    # back literal like the preset. Assert on those, not on the spec object
+    # built above (whose auth="secret" would take a different code path than
+    # the real row ever sees).
+    assert (
+        session._chip_is_applied("claude", _chip_named(session, "ollama-secret"))
+        is False
+    )
+    assert (
+        session._chip_is_applied("claude", _chip_named(session, "deepseek-ollama"))
+        is False
+    )
+    assert "✓" not in session._chip_row("claude")(selected=False, ansi=False)

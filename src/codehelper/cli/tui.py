@@ -1584,6 +1584,15 @@ class TuiSession:
         applied now means Enter would be a no-op, which is also exactly when
         the ``_apply_chip`` guard is allowed to swallow the press.
 
+        The comparison is uniform across auth modes. A literal chip also
+        resolves a token at apply time — its ``auth_value``, through the very
+        same resolvers — so an early ``True`` for non-secret chips claimed a
+        no-op Enter never was: on an OVERRIDABLE provider (ollama-direct) a
+        secret wrapper and the literal preset share provider AND tier models,
+        and only the token says whose credential Enter would write. This
+        shipped as exactly that shortcut and marked every such chip applied
+        at once.
+
         Both inputs are refreshed once per main-loop iteration by
         ``_refresh_active_label`` — this reads only caches, never the
         filesystem on a redraw frame.
@@ -1593,10 +1602,6 @@ class TuiSession:
         env = self._claude_active_env
         if not matches_switch_spec(env, chip):
             return False
-        if chip.auth != "secret":
-            # Nothing is resolved at apply time, so the axes comparison IS
-            # the full env comparison — no token to narrow by.
-            return True
         chip_token = self._chip_switch_tokens.get(agent_name, {}).get(
             self._chip_name(chip)
         )
