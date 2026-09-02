@@ -132,6 +132,7 @@ def resolve_switch_patch(
     tier_models: TierModels | None,
     token: str,
     subagent_model: str | None = None,
+    context_window: int | None = None,
     current_env: dict[str, str] | None = None,
 ) -> SettingsPatch:
     """Resolve the patch from the axes. Pure, no IO.
@@ -139,17 +140,17 @@ def resolve_switch_patch(
     The single place ``provider.env_reset`` is consulted. For a reset
     provider the result explicitly blanks every MANAGED_ENV_KEYS key that is
     already present in ``current_env`` — never a key that was never set —
-    and ``tier_models``/``token`` are ignored entirely — the CLI layer is
-    expected to collect neither for ``switch native`` (see
-    ``cli/parser.py``'s ``_handle_switch``), but even if it did, nothing here
-    would leak them into the patch. ``current_env=None`` (the default, used
-    by callers with no live snapshot to hand, e.g. a bare CLI invocation with
-    no existing settings.json) blanks every managed key, matching the prior
-    unconditional behaviour. Blanking a key that was never set would turn
-    ``switch native`` on an already-native file into a write that ADDS keys
-    nobody set — the opposite of "native means clear the override" — since a
-    key with no prior value has no stale already-applied process value to
-    reset.
+    and ``tier_models``/``token``/``context_window`` are ignored entirely —
+    the CLI layer is expected to collect none of them for ``switch native``
+    (see ``cli/parser.py``'s ``_handle_switch``), but even if it did, nothing
+    here would leak them into the patch. ``current_env=None`` (the default,
+    used by callers with no live snapshot to hand, e.g. a bare CLI invocation
+    with no existing settings.json) blanks every managed key, matching the
+    prior unconditional behaviour. Blanking a key that was never set would
+    turn ``switch native`` on an already-native file into a write that ADDS
+    keys nobody set — the opposite of "native means clear the override" —
+    since a key with no prior value has no stale already-applied process
+    value to reset.
 
     ``ANTHROPIC_BASE_URL`` is derived via :func:`render.anthropic_base_url` —
     the SAME function the wrapper renderer uses — so a ``switch`` to a
@@ -158,7 +159,10 @@ def resolve_switch_patch(
     shared-derivation rule via :func:`render.uniform_context_window`: both
     mechanisms declare a third-party model's real context window (Claude
     Code would otherwise assume its 200k fallback and auto-compact there) or
-    neither does.
+    neither does. An EXPLICIT ``context_window`` (issue #83 — a recorded
+    answer, e.g. read back from a wrapper marker) wins over the catalog
+    derivation: ``> 0`` is declared even though the catalog is silent,
+    ``0`` declares nothing. Without one the catalog stands, unchanged.
 
     Raises:
         CodeHelperError: ``provider`` does not declare
@@ -208,12 +212,17 @@ def resolve_switch_patch(
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = subagent_model
     # Same derivation the wrapper renderer uses — a switch and a wrapper for
     # the same model must agree on whether the window is declared at all.
-    # Conditional for the same reason it is there: no declaration beats a
+    # An explicit recorded answer wins (issue #83); without one the catalog
+    # derivation stands. Conditional either way: no declaration beats a
     # guessed window (an oversized claim overflows the real one mid-session).
     models = [tier_models.haiku, tier_models.sonnet, tier_models.opus]
     if subagent_model is not None:
         models.append(subagent_model)
-    if (window := uniform_context_window(models)) is not None:
+    if context_window is not None:
+        window = context_window or None  # 0 = explicit no-declaration
+    else:
+        window = uniform_context_window(models)
+    if window is not None:
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
     return SettingsPatch(provider_name=provider.name, env=env)
 
@@ -551,6 +560,11 @@ def matches_switch_spec(active_env: dict[str, str] | None, spec) -> bool:
             tier_models=tiers,
             token=active_env.get("ANTHROPIC_AUTH_TOKEN", ""),
             subagent_model=subagent,
+            # Chip honesty (the #80/#81 class): a wrapper whose marker
+            # records an explicit window must match ITSELF — deriving from
+            # the catalog here would leave every ctx-carrying chip's own ✓
+            # unset (or a wrong one set).
+            context_window=getattr(spec, "context_window", None),
         )
     except CodeHelperError:
         return False
@@ -564,6 +578,7 @@ def apply_switch(
     tier_models: TierModels | None = None,
     token: str = "",
     subagent_model: str | None = None,
+    context_window: int | None = None,
     dry_run: bool = False,
     force: bool = False,
     confirm=None,
@@ -606,6 +621,7 @@ def apply_switch(
         tier_models=tier_models,
         token=token,
         subagent_model=subagent_model,
+        context_window=context_window,
         current_env=original_env if isinstance(original_env, dict) else {},
     )
 
