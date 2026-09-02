@@ -109,9 +109,13 @@ def test_tokens_shows_set_and_unset_env_vars(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.integration
-def test_tokens_env_row_printed_once_for_shared_env_vars(tmp_path, capsys):
+def test_tokens_env_row_printed_once_for_shared_env_vars(tmp_path, monkeypatch, capsys):
     """deepseek and deepseek-openai share DEEPSEEK_API_KEY — the row is about
-    the VARIABLE, so it prints once, not once per provider."""
+    the VARIABLE, so it prints once, not once per provider. The env var is
+    SET here: with neither a cache nor any env var the command exits early
+    via "no saved tokens" and prints no env section at all (CI has none)."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-shared")
+
     assert main(["tokens"]) == 0
 
     out = capsys.readouterr().out

@@ -2442,9 +2442,7 @@ def test_tokens_screen_reveals_never_survive_a_screen_exit(monkeypatch):
             # = visit 2), then back out for good.
             return "tokens" if len(frames) < 3 else "__back__"
         if str(prompt).startswith("Stored tokens"):
-            frames.append(
-                {"items": list(_items), "on_key": kwargs.get("on_key") or {}}
-            )
+            frames.append({"items": list(_items), "on_key": kwargs.get("on_key") or {}})
             return next(answers, "__back__")
         return "settings" if not frames else "quit"
 
