@@ -362,3 +362,27 @@ def test_set_context_window_preserves_unrelated_keys(tmp_path):
     assert state["default_wrapper"] == {"claude": "glm"}
     assert state["future_field"] == "keep-me"
     assert state["context_windows"] == {"mystery-3b": 2_000_000}
+
+
+@pytest.mark.unit
+def test_context_window_out_of_range_reads_as_unrecorded(tmp_path):
+    """A hand-edited negative or oversized value would ride an explicit
+    answer straight into a wrapper marker or the live settings — read it
+    as unrecorded instead (review round 2, PR #84)."""
+    paths = _paths(tmp_path)
+    _write_state_file(paths, json.dumps({"context_windows": {"m": -5}}))
+    assert context_window(paths, "m") is None
+    _write_state_file(paths, json.dumps({"context_windows": {"m": 99_999_999}}))
+    assert context_window(paths, "m") is None
+
+
+@pytest.mark.unit
+def test_set_context_window_refuses_an_out_of_range_value(tmp_path):
+    """The writer enforces the same range the reader accepts, so a record
+    written here can always be read back."""
+    paths = _paths(tmp_path)
+    with pytest.raises(Exception, match="unusable context window"):
+        set_context_window(paths, "m", -1)
+    with pytest.raises(Exception, match="unusable context window"):
+        set_context_window(paths, "m", 20_000_000)
+    assert context_window(paths, "m") is None  # nothing recorded

@@ -21,9 +21,10 @@ Resolution precedence (first hit wins):
    Disagreeing answers are an honest ``None`` — one variable declares one
    window for the whole session, and an ANSWERED model is never re-asked.
 3. **ask** — some model is unknown AND unrecorded: the menu decides, the
-   answer is persisted for ``target_model``. ``0`` is a real answer
-   ("no declaration"), never normalized away. Non-interactive callers get
-   ``None`` — the status quo, not a guess.
+   answer is persisted under that model, and the FULL set is checked for
+   agreement before anything may declare (review round 2, PR #84). ``0``
+   is a real answer ("no declaration"), never normalized away.
+   Non-interactive callers get ``None`` — the status quo, not a guess.
 """
 
 from __future__ import annotations
@@ -95,7 +96,11 @@ def resolve_context_window(
     if uniform_context_window(model_list) is not None:
         return None
 
-    # 2. Every model resolves (catalog first, state second) to one value.
+    # 2. Every model resolves (catalog first, state second, ask third) and
+    # the results must AGREE — a fresh answer for one unknown model is
+    # recorded for THAT model but still checked against the rest before it
+    # may declare a session-wide window (review round 2, PR #84: answering
+    # one tier must not over-declare a mix of windows).
     values: set[int] = set()
     for model in model_list:
         value = MODEL_CONTEXT_WINDOWS.get(model)
@@ -107,23 +112,23 @@ def resolve_context_window(
                 # actually names — never under a spec-level fallback, or a
                 # split-tier spec would re-ask and mis-key the answer
                 # (review round 1, PR #84).
-                return _ask_or_none(
+                value = _ask_or_none(
                     paths,
                     model,
                     interactive=interactive,
                     select_fn=select_fn,
                     read_line_fn=read_line_fn,
                 )
+                if value is None:  # non-interactive: honest no-declaration
+                    return None
         values.add(value)
     if len(values) == 1:
+        # Reaching here with a single value implies at least one state
+        # answer participated (a pure-catalog tie returned at step 1), so
+        # it is EXPLICIT: the renderer's catalog-only derivation cannot see
+        # it — it must ride the spec.
         (value,) = values
-        # A tie that involves a recorded answer can't be re-derived by the
-        # renderer (it reads the catalog only) — it must ride the spec.
-        return (
-            None
-            if all(MODEL_CONTEXT_WINDOWS.get(m) == value for m in model_list)
-            else value
-        )
+        return value
     return None
 
 

@@ -339,7 +339,11 @@ def context_window(paths: Paths, model: str) -> int | None:
     to ``None``: the sentinel is what keeps an answered model from being
     asked again on the next add/switch. A malformed slot (non-dict map, a
     string, a float, ``True``) reads as unrecorded — a corrupt value asks
-    again rather than lying.
+    again rather than lying. An out-of-range int (a hand-edited ``-5`` or a
+    typo'd gigavalue) is unrecorded for the same reason: it would otherwise
+    ride an explicit answer straight into a wrapper marker or the live
+    settings (review round 2, PR #84) — the marker path range-checks via
+    ``build_spec``, but switch never builds one.
     """
     state = load_state(paths)
     windows = state.get("context_windows")
@@ -347,6 +351,8 @@ def context_window(paths: Paths, model: str) -> int | None:
         return None
     value = windows.get(model)
     if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if not 0 <= value <= 10_000_000:
         return None
     return value
 
@@ -358,7 +364,19 @@ def set_context_window(paths: Paths, model: str, value: int) -> None:
     so a lost write is harmless (the model is simply asked again). ``0``
     records an explicit "no declaration". Sets only the ``model`` slot,
     leaving other models' slots and every other top-level key untouched.
+
+    Raises:
+        CodeHelperError: ``value`` is outside 0..10_000_000 — the same range
+            the reader accepts, so a record written here can always be read
+            back.
     """
+    from codehelper.errors import CodeHelperError
+
+    if not 0 <= value <= 10_000_000:
+        raise CodeHelperError(
+            f"unusable context window {value}: expected 0 (no declaration) "
+            f"or a token count in 1..10_000_000"
+        )
     with _locked_update(paths):
         state = load_state(paths)
         windows = state.get("context_windows")

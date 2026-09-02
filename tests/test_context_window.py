@@ -271,3 +271,59 @@ def test_split_tier_answer_records_under_the_unknown_model(tmp_path):
     )
     assert context_window(paths, "mystery-haiku") == 2_000_000
     assert context_window(paths, GLM) is None
+
+
+@pytest.mark.unit
+def test_fresh_answer_is_checked_against_the_remaining_models(tmp_path):
+    """A just-given answer may NOT over-declare a mixed set: [unknown,
+    catalog-1M] records the answer for the unknown model but yields
+    no declaration — the catalog's 1M disagrees, and one variable
+    declares one window (review round 2, PR #84)."""
+    paths = _paths(tmp_path)
+    value = resolve_context_window(
+        paths,
+        ["mystery-haiku", GLM],
+        interactive=True,
+        select_fn=_select("2"),  # user answers 2M for the unknown tier
+    )
+    assert value is None  # disagreement: no session-wide declaration
+    assert context_window(paths, "mystery-haiku") == 2_000_000  # not lost
+
+
+@pytest.mark.unit
+def test_two_unknown_models_are_each_asked_once(tmp_path):
+    """Both unknown models get their own question; agreeing answers declare,
+    disagreeing ones do not — and both records persist either way."""
+    paths = _paths(tmp_path)
+    answers = iter(["1000000", "1000000"])
+
+    def _select(_items, *, prompt="", **_kwargs):
+        return next(answers)
+
+    assert (
+        resolve_context_window(
+            paths,
+            ["model-a", "model-b"],
+            interactive=True,
+            select_fn=_select,
+        )
+        == 1_000_000
+    )
+    assert context_window(paths, "model-a") == 1_000_000
+    assert context_window(paths, "model-b") == 1_000_000
+
+    # Disagreement: recorded, asked-never-again, but no declaration.
+    # (A FRESH home — tmp_path is shared across the whole test.)
+    paths2 = Paths.from_home(tmp_path / "second-home")
+    answers2 = iter(["1000000", "0"])
+    assert (
+        resolve_context_window(
+            paths2,
+            ["model-a", "model-b"],
+            interactive=True,
+            select_fn=lambda _items, **_kw: next(answers2),
+        )
+        is None
+    )
+    assert context_window(paths2, "model-a") == 1_000_000
+    assert context_window(paths2, "model-b") == 0

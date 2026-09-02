@@ -689,9 +689,9 @@ def test_switch_split_tier_question_names_and_records_the_unknown_model(
     from codehelper.services.state import context_window
 
     paths = Paths.from_home(tmp_path)
+    # The answer records for the asked model and is NOT lost — but it does
+    # NOT declare a session-wide window: the catalog's 1M on the other tiers
+    # disagrees, and one variable may not claim a mix (review round 2).
     assert context_window(paths, "mystery-haiku") == 2_000_000
     assert context_window(paths, "glm-5.3") is None  # catalog tier: untouched
-    # The just-recorded answer rides the spec as EXPLICIT — precedence rule 1
-    # (the user was asked and decided), so the session declares it even
-    # though the catalog's 1M disagrees.
-    assert _settings(tmp_path)["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "2000000"
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in _settings(tmp_path)["env"]
