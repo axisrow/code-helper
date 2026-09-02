@@ -23,9 +23,11 @@ import pytest
 from codehelper.services.paths import Paths
 from codehelper.services.state import (
     active_selection,
+    context_window,
     default_wrapper,
     load_state,
     set_active_selection,
+    set_context_window,
     set_default_wrapper,
 )
 
@@ -296,3 +298,67 @@ def test_set_default_wrapper_preserves_unrelated_keys(tmp_path):
     assert state["active"] == {"provider": "litellm", "profile": "work"}
     assert state["future_field"] == "keep-me"
     assert state["default_wrapper"] == {"claude": "glm"}
+
+
+@pytest.mark.unit
+def test_context_window_round_trips_including_zero_sentinel(tmp_path):
+    """The recorded answer for a model round-trips; ``0`` is a REAL answer
+    ("no declaration"), never normalized to ``None`` — the sentinel is what
+    keeps an answered model from being asked again."""
+    paths = _paths(tmp_path)
+    assert context_window(paths, "mystery-3b") is None  # unrecorded
+
+    set_context_window(paths, "mystery-3b", 1_000_000)
+    assert context_window(paths, "mystery-3b") == 1_000_000
+
+    set_context_window(paths, "mystery-3b", 0)  # explicit "no declaration"
+    assert context_window(paths, "mystery-3b") == 0
+
+
+@pytest.mark.unit
+def test_context_window_independent_per_model(tmp_path):
+    """Slots are keyed by model name and don't interfere."""
+    paths = _paths(tmp_path)
+    set_context_window(paths, "mystery-3b", 1_000_000)
+    set_context_window(paths, "other-model", 0)
+    assert context_window(paths, "mystery-3b") == 1_000_000
+    assert context_window(paths, "other-model") == 0
+    assert context_window(paths, "unheard-of") is None
+
+
+@pytest.mark.unit
+def test_context_window_ignores_a_malformed_value(tmp_path):
+    """Non-dict maps and non-int (bool included) slot values read as
+    unrecorded — a corrupt slot asks again rather than lying."""
+    paths = _paths(tmp_path)
+    _write_state_file(paths, json.dumps({"context_windows": "oops"}))
+    assert context_window(paths, "mystery-3b") is None
+
+    _write_state_file(paths, json.dumps({"context_windows": {"mystery-3b": "1M"}}))
+    assert context_window(paths, "mystery-3b") is None
+
+    _write_state_file(paths, json.dumps({"context_windows": {"mystery-3b": True}}))
+    assert context_window(paths, "mystery-3b") is None
+
+    _write_state_file(paths, json.dumps({"context_windows": {"mystery-3b": 1.5}}))
+    assert context_window(paths, "mystery-3b") is None
+
+
+@pytest.mark.unit
+def test_set_context_window_preserves_unrelated_keys(tmp_path):
+    """A read-modify-write must keep every other top-level key intact."""
+    paths = _paths(tmp_path)
+    _write_state_file(
+        paths,
+        json.dumps(
+            {
+                "default_wrapper": {"claude": "glm"},
+                "future_field": "keep-me",
+            }
+        ),
+    )
+    set_context_window(paths, "mystery-3b", 2_000_000)
+    state = load_state(paths)
+    assert state["default_wrapper"] == {"claude": "glm"}
+    assert state["future_field"] == "keep-me"
+    assert state["context_windows"] == {"mystery-3b": 2_000_000}
