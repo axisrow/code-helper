@@ -142,6 +142,23 @@ def test_incompatible_pairing_is_refused(tmp_path, capsys):
 
 
 @pytest.mark.integration
+def test_suspended_gemini_refused_as_unknown_axes_not_a_broken_wrapper(
+    tmp_path, capsys
+):
+    """Issue #74: `codex × gemini` used to install a profile carrying
+    `wire_api="chat"`, which current Codex hard-rejects at config load. The
+    provider is now suspended, so the pairing must refuse through the NORMAL
+    incompatibility path — the provider is known (not "unknown provider"),
+    the mechanism is not (no common configuration)."""
+    assert (
+        main(["add", "--agent", "codex", "--provider", "gemini", "--model", "x"]) == 1
+    )
+    err = capsys.readouterr().err
+    assert "unknown provider" not in err
+    assert "no common configuration" in err
+
+
+@pytest.mark.integration
 def test_launch_only_agent_incompatible_with_zai(tmp_path, capsys):
     """A launch-only agent has no shape in common with a non-ollama provider,
     and the error's hint names `ollama` as what it DOES work with."""
@@ -700,6 +717,17 @@ def test_list_providers(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "ollama-direct" in out and "zai" in out and "litellm" in out
     assert "deepseek" in out and "deepseek-openai" in out
+
+
+@pytest.mark.integration
+def test_list_providers_marks_the_suspended_entry(tmp_path, capsys):
+    """gemini stays registered and visible (issue #74) but pairs with nothing
+    BY DECISION — without the `(suspended)` tag its all-blank matrix column
+    reads as a bug."""
+    assert main(["list", "providers"]) == 0
+    out = capsys.readouterr().out
+    gemini_line = next(line for line in out.splitlines() if line.startswith("gemini"))
+    assert "(suspended)" in gemini_line
 
 
 @pytest.mark.integration

@@ -361,6 +361,23 @@ def test_resolve_default_patch_rejects_missing_wire_api():
 
 
 @pytest.mark.unit
+def test_resolve_default_patch_rejects_the_dead_chat_wire_api():
+    """Issue #74: current Codex hard-rejects `wire_api="chat"` at config
+    deserialization (openai/codex#7782), so set-default must refuse rather
+    than patch config.toml into a state Codex refuses to load — the same
+    invariant model._validate_provider enforces, carried by this module's
+    own gate."""
+    bad_provider = Provider(
+        name="chat-provider",
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        base_url="https://api.chat.invalid/v1",
+        wire_api="chat",
+    )
+    with pytest.raises(CodeHelperError, match="openai/codex#7782"):
+        resolve_default_patch(CODEX, bad_provider, "glm-5.2:cloud")
+
+
+@pytest.mark.unit
 def test_resolve_default_patch_rejects_a_codex_reserved_provider_id():
     """Defense-in-depth: even if PROVIDERS ever regains a name Codex CLI
     itself reserves (see CODEX_RESERVED_PROVIDER_IDS — "ollama" is exactly

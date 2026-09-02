@@ -140,6 +140,12 @@ def _handle_list_axes(what: str) -> int:
                 if provider.shapes == {ConfigShape.ANTHROPIC_SETTINGS}
                 else ""
             )
+            # A suspended provider (#74) pairs with nothing BY DECISION —
+            # without this label the all-blank matrix column reads as a bug.
+            # Declared data off provider.suspended, like the switch-only tag
+            # off provider.shapes.
+            if provider.suspended:
+                tag += " (suspended)"
             print(f"{provider.name:10} {provider.description:24} [{shapes}]{tag}")
         return 0
 

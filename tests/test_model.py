@@ -104,9 +104,19 @@ def test_registry_has_builtin_providers():
 
 
 @pytest.mark.unit
-def test_gemini_is_openai_only_and_uses_documented_conventions():
+def test_gemini_is_suspended_and_pairs_with_nothing():
+    """gemini is registered but deliberately unusable (issue #74): Google's
+    OpenAI-compat surface is chat-completions only — `/responses` 404s — while
+    Codex hard-rejects `wire_api="chat"`, and no Anthropic-compatible surface
+    exists at all. Empty shapes (legal ONLY under `suspended=True`) make every
+    pairing resolve to the honest "no common configuration mechanism" instead
+    of installing a wrapper that cannot work."""
     gemini = get_provider("gemini")
-    assert gemini.shapes == {ConfigShape.OPENAI_TOML}
+    assert gemini.shapes == frozenset()
+    assert gemini.suspended is True
+    # The endpoint/credential fields are kept exactly as the unsuspended
+    # entry will need them — unsuspending is one commit (see the registry
+    # comment): restore OPENAI_TOML, drop the flag.
     assert gemini.base_url == (
         "https://generativelanguage.googleapis.com/v1beta/openai/"
     )
@@ -118,7 +128,8 @@ def test_gemini_is_openai_only_and_uses_documented_conventions():
     assert gemini.auth == "secret"
     assert gemini.token_env_var == "GEMINI_API_KEY"
     assert gemini.model_list_api is ModelListAPI.OPENAI_V1
-    assert gemini.wire_api == "chat"
+    # The value the restored profile will carry — never "chat" again.
+    assert gemini.wire_api == "responses"
 
 
 @pytest.mark.unit
@@ -181,6 +192,16 @@ def test_deepseek_pairing_matrix():
 def test_claude_gemini_has_no_common_configuration_mechanism():
     with pytest.raises(CodeHelperError, match="no common configuration"):
         resolve_shape(get_agent("claude"), get_provider("gemini"))
+
+
+@pytest.mark.unit
+def test_codex_gemini_is_suspended_not_silently_broken():
+    """Issue #74: codex x gemini used to install a profile carrying
+    `wire_api="chat"`, which current Codex hard-rejects at config load —
+    a wrapper that dies before any request. The pairing must now resolve to
+    the honest "no common configuration mechanism" instead."""
+    with pytest.raises(CodeHelperError, match="no common configuration"):
+        resolve_shape(get_agent("codex"), get_provider("gemini"))
 
 
 @pytest.mark.unit
@@ -355,12 +376,12 @@ def test_compatible_providers_for_claude():
 
 
 @pytest.mark.unit
-def test_compatible_providers_for_codex_excludes_zai():
-    """z.ai is Anthropic-only, and codex cannot speak that protocol."""
+def test_compatible_providers_for_codex_excludes_zai_and_suspended():
+    """z.ai is Anthropic-only, and codex cannot speak that protocol; gemini
+    is suspended (#74) and pairs with no agent at all."""
     assert {p.name for p in compatible_providers(get_agent("codex"))} == {
         "ollama-direct",
         "litellm",
-        "gemini",
         "deepseek-openai",
     }
 
@@ -594,6 +615,64 @@ def test_secret_provider_with_no_token_env_var_is_rejected():
         m._validate_provider(bad)
 
 
+@pytest.mark.unit
+def test_chat_wire_api_is_rejected_for_openai_toml_providers():
+    """Issue #74: current Codex hard-rejects `wire_api="chat"` at config
+    deserialization (its WireApi enum has a single Responses variant,
+    openai/codex#7782), so a chat-carrying profile is a wrapper that dies
+    before any request. The value must fail at IMPORT time, not at `codex`
+    runtime — "responses" is the only wire_api a profile can carry."""
+    import codehelper.services.model as m
+
+    bad = Provider(
+        name="bad-chat",
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        base_url="https://api.bad.invalid/v1",
+        auth="literal",
+        auth_value="x",
+        model_list_api=ModelListAPI.OPENAI_V1,
+        wire_api="chat",
+    )
+    with pytest.raises(CodeHelperError, match="openai/codex#7782"):
+        m._validate_provider(bad)
+
+    # And no SHIPPED provider carries it — the registry itself is clean
+    # (gemini, the one carrier, is suspended shapeless and now declares
+    # "responses" for its eventual return).
+    for provider in PROVIDERS:
+        if ConfigShape.OPENAI_TOML in provider.shapes:
+            assert provider.wire_api == "responses", provider.name
+
+
+@pytest.mark.unit
+def test_shapeless_provider_requires_the_suspended_flag():
+    """Empty shapes pair with nothing, so they are an authoring mistake —
+    UNLESS declared suspended (issue #74): a documented endpoint whose real
+    surfaces match no shape stays registered and honestly inert. The flag is
+    what separates a deliberate suspension from a typo'd entry."""
+    import codehelper.services.model as m
+
+    shapeless = Provider(name="shapeless", shapes=frozenset(), base_url="http://x")
+    with pytest.raises(CodeHelperError, match="suspended=True is required"):
+        m._validate_provider(shapeless)
+
+    suspended = Provider(
+        name="suspended",
+        shapes=frozenset(),
+        suspended=True,
+        base_url="https://documented.invalid/surface/",
+        auth="secret",
+        token_env_var="SUSPENDED_API_KEY",
+        model_list_api=ModelListAPI.OPENAI_V1,
+    )
+    m._validate_provider(suspended)  # must not raise
+
+    # And the registry's one suspended entry really is shapeless + flagged.
+    gemini = get_provider("gemini")
+    assert gemini.suspended is True
+    assert gemini.shapes == frozenset()
+
+
 # --------------------------------------------------------------------------- #
 # AuthPolicy / with_auth — runtime auth override
 # --------------------------------------------------------------------------- #
@@ -754,7 +833,8 @@ def test_anthropic_settings_shape_on_no_agent():
         ("claude", "litellm", ConfigShape.ANTHROPIC_ENV),
         ("codex", "ollama-direct", ConfigShape.OPENAI_TOML),
         ("codex", "litellm", ConfigShape.OPENAI_TOML),
-        ("codex", "gemini", ConfigShape.OPENAI_TOML),
+        # ("codex", "gemini", ...) removed with #74: the pairing is suspended,
+        # resolve_shape raises instead of handing back OPENAI_TOML.
     ],
 )
 def test_resolve_shape_unchanged_for_existing_pairs(
