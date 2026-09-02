@@ -16,7 +16,13 @@ from codehelper.services.paths import Paths
 def _menu_sequence(monkeypatch, answers):
     iterator = iter(answers)
 
-    def _select(_items, **_kwargs):
+    def _select(_items, **kwargs):
+        # The context-window question (issue #83) fires inside _handle_add for
+        # an unknown model; tests that don't care about the window get the
+        # scripted "no declaration" answer — the pre-#83 behaviour — without
+        # consuming a step of the scripted sequence.
+        if str(kwargs.get("prompt", "")).startswith("Context window for"):
+            return "0"
         return next(iterator)
 
     monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
@@ -88,6 +94,8 @@ def test_add_order_is_agent_provider_model_alias(monkeypatch):
     answers = iter(["add", "wrapper", "codex", "ollama-direct", "model-x", "quit"])
 
     def _select(_items, *, prompt, **_kwargs):
+        if str(prompt).startswith("Context window for"):
+            return "0"  # scripted "no declaration" — tests here don't care
         # The main-menu header is a callable (live active-profile display).
         seen.append(prompt() if callable(prompt) else prompt)
         return next(answers)
@@ -206,6 +214,8 @@ def test_literal_provider_skips_profile_screen(monkeypatch):
     answers = iter(["add", "wrapper", "claude", "ollama-direct", "model-x", "quit"])
 
     def _select(_items, *, prompt, **_kwargs):
+        if str(prompt).startswith("Context window for"):
+            return "0"  # scripted "no declaration" — tests here don't care
         # The main-menu header is a callable (live active-profile display).
         seen.append(prompt() if callable(prompt) else prompt)
         return next(answers)
@@ -245,7 +255,9 @@ def test_escape_from_alias_reprompts_the_model_when_agent_is_prescoped(monkeypat
         ]
     )
 
-    def _select(_items, **_kwargs):
+    def _select(_items, *, prompt="", **_kwargs):
+        if str(prompt).startswith("Context window for"):
+            return "0"  # scripted "no declaration" — tests here don't care
         return next(answers)
 
     text = iter(["model-x", "__escape__", "model-x", "final-wrapper"])
@@ -293,6 +305,8 @@ def test_model_step_falls_back_to_known_models_when_discovery_is_unavailable(
     def _select(items, *, prompt="", **_kwargs):
         text = prompt() if callable(prompt) else prompt
         seen_prompts.append(text)
+        if str(text).startswith("Context window for"):
+            return "0"  # scripted "no declaration" — tests here don't care
         if "Select a model for zai" in text:
             return "glm-5-turbo"
         return next(answers)
@@ -1208,7 +1222,9 @@ def test_tui_add_ollama_with_token_installs_a_secret_wrapper(monkeypatch):
         ["add", "wrapper", "claude", "ollama-direct:secret", "model-x", "quit"]
     )
 
-    def _select(_items, **_kwargs):
+    def _select(_items, *, prompt="", **_kwargs):
+        if str(prompt).startswith("Context window for"):
+            return "0"  # scripted "no declaration" — tests here don't care
         return next(answers)
 
     monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
@@ -2456,7 +2472,8 @@ def _install_zai_pair(alias_a: str, token_a: str, alias_b: str, token_b: str):
 
 def _apply_live(spec, token: str) -> None:
     """Make ``spec`` the genuinely live backend, the way Enter on its chip
-    does (``switch --from-wrapper`` = live_axes_for_spec + the file token)."""
+    does (``switch --from-wrapper`` = live_axes_for_spec + the file token +
+    the spec's recorded context window, issue #83)."""
     from codehelper.services.claude_settings import apply_switch, live_axes_for_spec
 
     provider, tiers, subagent = live_axes_for_spec(spec)
@@ -2466,6 +2483,7 @@ def _apply_live(spec, token: str) -> None:
         tier_models=tiers,
         token=token,
         subagent_model=subagent,
+        context_window=getattr(spec, "context_window", None),
         force=True,
     )
 
@@ -2641,3 +2659,49 @@ def test_literal_chips_not_applied_when_a_secret_wrapper_is_live(monkeypatch):
     assert "✓ deepseek-ollama" not in session._chip_row("claude")(
         selected=False, ansi=False
     )
+
+
+@pytest.mark.integration
+def test_ctx_wrapper_chip_matches_only_itself(monkeypatch):
+    """CHIP HONESTY for the recorded window (issue #83, the #80/#81 class):
+    a wrapper whose marker records ctx=1000000 shares provider AND tier
+    models with a same-model catalog wrapper — the recorded window is the
+    only difference. The reconstructed chip must match ITSELF (its
+    matches_switch_spec passes the marker's ctx through) and no other.
+
+    Before the threading, the expected env was catalog-derived while the
+    live env carried the key — the wrapper's own chip never read applied.
+    """
+    from codehelper.services.model import get_provider
+    from codehelper.services.spec import build_spec
+    from codehelper.services.wrappers import install_wrapper
+
+    catalog = build_spec(
+        agent="claude",
+        provider=get_provider("zai"),
+        model="mystery-3b",
+        alias="mystery",
+    )
+    recorded = build_spec(
+        agent="claude",
+        provider=get_provider("zai"),
+        model="mystery-3b",
+        alias="mystery-1m",
+        context_window=1_000_000,
+    )
+    install_wrapper(Paths.default(), catalog, token="sk-mystery")
+    install_wrapper(Paths.default(), recorded, token="sk-mystery")
+    _apply_live(recorded, "sk-mystery")
+
+    session = _claude_session()
+
+    # Assert on the RECONSTRUCTED chips (the rows the UI actually renders),
+    # not on the spec objects built above. Exactly the ctx-carrying chip
+    # carries the ✓ — the same-axes catalog chip does not (pressing it
+    # would drop the window declaration from the live env).
+    assert (
+        session._chip_is_applied("claude", _chip_named(session, "mystery-1m")) is True
+    )
+    assert session._chip_is_applied("claude", _chip_named(session, "mystery")) is False
+    assert "✓ mystery-1m" in session._chip_row("claude")(selected=False, ansi=False)
+    assert "✓ mystery " not in session._chip_row("claude")(selected=False, ansi=False)

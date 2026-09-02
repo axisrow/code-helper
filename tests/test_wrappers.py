@@ -859,7 +859,19 @@ def test_cli_add_glm_reads_token_from_env(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_cli_add_with_model_override(tmp_path):
-    assert main(["add", "deepseek-ollama", "--model", "custom-model:tag"]) == 0
+    assert (
+        main(
+            [
+                "add",
+                "deepseek-ollama",
+                "--model",
+                "custom-model:tag",
+                "--context-window",
+                "none",
+            ]
+        )
+        == 0
+    )
 
     paths = Paths.from_home(tmp_path)
     body = paths.script_for("deepseek-ollama").read_text(encoding="utf-8")

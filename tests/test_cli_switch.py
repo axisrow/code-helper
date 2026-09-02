@@ -20,6 +20,8 @@ from codehelper.cli.requests import SwitchRequest
 from codehelper.services.claude_settings import MANAGED_ENV_KEYS
 from codehelper.services.paths import Paths
 from codehelper.services.secrets import save_credential
+from codehelper.services.spec import build_spec
+from codehelper.services.wrappers import install_wrapper
 
 
 def _settings(tmp_path) -> dict:
@@ -389,6 +391,8 @@ def test_switch_from_wrapper_rejects_a_non_claude_wrapper(tmp_path, monkeypatch)
                 "ollama-direct",
                 "--model",
                 "x",
+                "--context-window",
+                "none",
                 "--alias",
                 "codex-ollama",
             ]
@@ -434,6 +438,8 @@ def test_switch_from_wrapper_applies_a_secret_override_wrappers_own_token(
                 "secret",
                 "--model",
                 "glm-5:cloud",
+                "--context-window",
+                "none",
                 "--alias",
                 "ollama-secure",
             ]
@@ -464,3 +470,86 @@ def test_list_providers_tags_native_as_switch_only(capsys):
     assert "(switch-only)" not in lines["zai"]
     assert "(switch-only)" not in lines["ollama-direct"]
     assert "(switch-only)" not in lines["litellm"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #83: the explicit context_window axis on switch.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_switch_flags_context_window_applies(tmp_path):
+    """`switch --provider P --model M --context-window N` declares N even
+    though the catalog is silent."""
+    paths = Paths.from_home(tmp_path)
+    assert (
+        main(
+            [
+                "switch",
+                "--provider",
+                "zai",
+                "--model",
+                "mystery-3b",
+                "--context-window",
+                "750000",
+                "--force",
+            ]
+        )
+        == 0
+    )
+    from codehelper.services.claude_settings import read_settings
+
+    _, settings = read_settings(paths)
+    assert settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "750000"
+
+
+@pytest.mark.integration
+def test_switch_from_wrapper_uses_the_markers_ctx_and_never_prompts(tmp_path):
+    """--from-wrapper lifts the recorded ctx out of the marker — zero prompts,
+    same answer the wrapper's own script carries."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude",
+            provider="zai",
+            model="mystery-3b",
+            alias="mystery",
+            context_window=750_000,
+        ),
+        token="sk-mystery",
+    )
+
+    def _fail(_items, **_kwargs):
+        raise AssertionError("--from-wrapper showed the window menu")
+
+    import unittest.mock as mock
+
+    with mock.patch("codehelper.cli.menu.select_from_menu", _fail):
+        assert main(["switch", "--from-wrapper", "mystery", "--force"]) == 0
+
+    from codehelper.services.claude_settings import read_settings
+
+    _, settings = read_settings(paths)
+    assert settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "750000"
+
+
+@pytest.mark.integration
+def test_switch_rejects_context_window_with_from_wrapper(tmp_path):
+    """One source per axis: a wrapper carries its own recorded ctx — an
+    explicit --context-window next to it is a contradiction, refused."""
+    assert main(["switch", "--from-wrapper", "nope", "--context-window", "1000"]) == 1
+
+
+@pytest.mark.integration
+def test_chip_preset_apply_never_prompts_for_the_window(tmp_path):
+    """The chip hot-apply path (from_preset, non-interactive token) never
+    reaches the window menu either."""
+
+    def _fail(_items, **_kwargs):
+        raise AssertionError("chip apply showed the window menu")
+
+    import unittest.mock as mock
+
+    with mock.patch("codehelper.cli.menu.select_from_menu", _fail):
+        assert _handle_switch(_preset_request("glm")) == 0

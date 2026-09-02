@@ -51,7 +51,15 @@ from codehelper.cli.requests import (
 from codehelper.errors import CodeHelperError
 
 # Modules, not names — see this module's docstring on late binding.
-from codehelper.services import claude_settings, codex_default, models_api, secrets
+from codehelper.services import (
+    claude_settings,
+    codex_default,
+    models_api,
+    secrets,
+)
+from codehelper.services import (
+    context_window as context_window_service,
+)
 from codehelper.services.agents import all_agents, load_user_agents_strict
 from codehelper.services.agents import get_agent as get_any_agent
 from codehelper.services.claude_settings import current_switch
@@ -282,6 +290,70 @@ def _parse_shape(raw: str | None):
     except ValueError:
         valid = ", ".join(s.value for s in ConfigShape)
         raise CodeHelperError(f"unknown shape: {raw} (valid: {valid})") from None
+
+
+def _parse_context_window(raw: str | int | None) -> int | None:
+    """``--context-window`` string -> ``int``, or None when not given.
+
+    ``none`` maps to 0 — an explicit "no declaration" that suppresses even a
+    catalog hit (issue #83). Kept out of the argparse layer (no ``type=int``)
+    for the same reason ``--shape`` is: the error must read like every other
+    domain error this CLI raises, and ``type=int`` cannot express ``none``.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, int):  # the TUI passes the parsed value straight through
+        return raw
+    text = raw.strip()
+    if text.lower() == "none":
+        return 0
+    try:
+        value = int(text)
+    except ValueError:
+        raise CodeHelperError(
+            f"invalid --context-window: {raw!r} (expected a token count or 'none')"
+        ) from None
+    if value <= 0:
+        # 0 arrives only via the 'none' spelling — a literal 0 is almost
+        # certainly a typo for it, and a negative is always garbage.
+        raise CodeHelperError(
+            f"invalid --context-window: {raw!r} (use 'none' for no declaration)"
+        )
+    return value
+
+
+def _add_resolve_context_window(spec, req, paths, explicit_window: int | None):
+    """Attach the explicit context window to the spec (issue #83).
+
+    An explicit ``--context-window`` is complete in itself: no prompt, no
+    state write — scripted use already said what it means (``none`` maps to
+    0, an explicit suppression). Otherwise the service resolver decides:
+    a catalog-known model derives silently, a recorded answer is reused,
+    an unknown model is asked once and remembered — unless ``--dry-run``
+    is in effect, which never prompts (and therefore never records).
+
+    ``MenuCancelled`` (Esc at the window menu) propagates — ``main`` prints
+    "cancelled" and exits; nothing is recorded, so the model is asked again
+    next time. Continuing silently would install a wrapper whose window the
+    user just declined to choose.
+    """
+    if explicit_window is not None:
+        return replace(spec, context_window=explicit_window)
+    tiers = spec.tier_models
+    if tiers is None:
+        return spec  # no tier models → no window to declare
+    models = [tiers.haiku, tiers.sonnet, tiers.opus]
+    if spec.subagent_model is not None:
+        models.append(spec.subagent_model)
+    value = context_window_service.resolve_context_window(
+        paths,
+        models,
+        target_model=spec.model,
+        interactive=not req.dry_run,
+    )
+    if value is None:
+        return spec
+    return replace(spec, context_window=value)
 
 
 def _add_resolve_provider(req, paths):
@@ -549,6 +621,10 @@ def _handle_add(args: argparse.Namespace | AddRequest) -> int:
             "(--agent/--provider) — a preset carries its own provider"
         )
 
+    # Parsed up front with the other flag validations: a garbage value must
+    # fail like every other domain error, before anything interactive.
+    explicit_window = _parse_context_window(req.context_window)
+
     if using_axes:
         agent, provider = _add_resolve_provider(req, paths)
         early = _add_list_models_or_none(req, paths, agent, provider, profile_name)
@@ -574,6 +650,12 @@ def _handle_add(args: argparse.Namespace | AddRequest) -> int:
             f"{spec.alias!r} is a reserved name — a wrapper named after a "
             f"user-defined agent's binary would shadow the real one on PATH"
         )
+
+    # The explicit window rides the spec from here on (issue #83): resolved
+    # AFTER compatibility/alias validation — a bad pairing must never reach
+    # any prompt — and BEFORE the token prompt, keeping the documented
+    # "validate everything, then go interactive" ordering.
+    spec = _add_resolve_context_window(spec, req, paths, explicit_window)
 
     token, resolved = _add_resolve_token(spec, req, paths, profile_name)
     wrote = _add_install_and_cache(spec, req, paths, token, resolved, profile_name)
@@ -973,13 +1055,16 @@ def _switch_resolve_token(
 
 
 def _switch_axes_from_wrapper(req: SwitchRequest, paths):
-    """Resolve ``(provider, tier_models, token, subagent_model)`` from an
-    already-installed wrapper — the ``--from-wrapper`` fast path.
+    """Resolve ``(provider, tier_models, token, subagent_model, context_window)``
+    from an already-installed wrapper — the ``--from-wrapper`` fast path.
 
     Guaranteed to reach the SAME backend that wrapper's own script would:
     ``tier_models``/``base_url`` are recovered from the rendered body
     (``wrappers.spec_from_installed``) and the token from the same file
     (``wrappers.token_from_installed``) — zero prompts, zero re-derivation.
+    The recorded ``ctx`` (issue #83) rides the reconstructed spec the same
+    way — a wrapper's chip and its ``--from-wrapper`` switch can never
+    disagree about the declared window.
 
     An ``ollama-launch`` claude wrapper is converted to Ollama's
     Anthropic-compatible live-settings target, just like its preset chip.
@@ -1014,7 +1099,7 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
             )
     elif spec.auth == "literal":
         token = spec.auth_value
-    return provider, tier_models, token, subagent_model
+    return provider, tier_models, token, subagent_model, spec.context_window
 
 
 def _switch_axes_from_preset(req: SwitchRequest, paths):
@@ -1042,12 +1127,13 @@ def _switch_axes_from_preset(req: SwitchRequest, paths):
         tier_models,
         _switch_resolve_token(provider, req, paths, non_interactive=True),
         subagent_model,
+        spec.context_window,  # None for every preset — catalog-derived
     )
 
 
 def _switch_axes_from_flags(req: SwitchRequest, paths):
-    """Resolve ``(provider, tier_models, token, subagent_model)`` from the
-    explicit ``--provider``/``--model``/``--haiku``/... flags."""
+    """Resolve ``(provider, tier_models, token, subagent_model, context_window)``
+    from the explicit ``--provider``/``--model``/``--haiku``/... flags."""
     from codehelper.services.spec import TierModels
 
     provider_name = req.provider
@@ -1061,7 +1147,7 @@ def _switch_axes_from_flags(req: SwitchRequest, paths):
     )
 
     if provider.env_reset:
-        return provider, None, "", None
+        return provider, None, "", None, None
 
     if req.haiku or req.sonnet or req.opus:
         if not (req.haiku and req.sonnet and req.opus):
@@ -1078,8 +1164,27 @@ def _switch_axes_from_flags(req: SwitchRequest, paths):
             "or --from-wrapper"
         )
 
+    # The explicit flag is complete in itself (no prompt, no state write —
+    # scripted use already said what it means); otherwise ask once for an
+    # unknown model and remember, exactly like `add` does. `switch native`
+    # never reaches this line (the env_reset return above).
+    if req.context_window is not None:
+        context_window = req.context_window
+    else:
+        context_window = context_window_service.resolve_context_window(
+            paths,
+            [
+                tier_models.haiku,
+                tier_models.sonnet,
+                tier_models.opus,
+                *([req.subagent_model] if req.subagent_model else []),
+            ],
+            target_model=req.model or tier_models.sonnet,
+            interactive=not req.dry_run,
+        )
+
     token = _switch_resolve_token(provider, req, paths)
-    return provider, tier_models, token, req.subagent_model
+    return provider, tier_models, token, req.subagent_model, context_window
 
 
 def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
@@ -1121,6 +1226,7 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         or req.base_url
         or req.auth
         or req.profile
+        or req.context_window is not None
     ):
         raise CodeHelperError(
             "--restore cannot be combined with a provider or model flags"
@@ -1132,6 +1238,15 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
     )
     if switch_sources > 1:
         raise CodeHelperError("give exactly one switch source")
+    # One source per axis (issue #83): --from-wrapper/--from-preset carry
+    # their own recorded ctx — an explicit --context-window next to them
+    # could contradict the record, so it is rejected outright.
+    if req.context_window is not None and (req.from_wrapper or req.from_preset):
+        raise CodeHelperError(
+            "--context-window applies to the explicit-axes form only "
+            "(--provider/--model) — a wrapper or preset carries its own "
+            "recorded window"
+        )
 
     if req.restore:
         slot = req.slot or 1
@@ -1147,16 +1262,16 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         return 0
 
     if req.from_preset:
-        provider, tier_models, token, subagent_model = _switch_axes_from_preset(
-            req, paths
+        provider, tier_models, token, subagent_model, context_window = (
+            _switch_axes_from_preset(req, paths)
         )
     elif req.from_wrapper:
-        provider, tier_models, token, subagent_model = _switch_axes_from_wrapper(
-            req, paths
+        provider, tier_models, token, subagent_model, context_window = (
+            _switch_axes_from_wrapper(req, paths)
         )
     else:
-        provider, tier_models, token, subagent_model = _switch_axes_from_flags(
-            req, paths
+        provider, tier_models, token, subagent_model, context_window = (
+            _switch_axes_from_flags(req, paths)
         )
 
     wrote = claude_settings.apply_switch(
@@ -1165,6 +1280,7 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         tier_models=tier_models,
         token=token,
         subagent_model=subagent_model,
+        context_window=context_window,
         dry_run=req.dry_run,
         # A provider switch is an explicitly requested hot-apply operation.
         # A chip press (the TUI) opts in via force=True and skips the prompt;
@@ -1356,6 +1472,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="token profile to use (e.g. work or personal)",
     )
     p_add.add_argument(
+        "--context-window",
+        default=None,
+        help="context window in tokens to declare for this model (e.g. "
+        "1000000), or 'none' for no declaration; omit to derive from the "
+        "catalog, or to be asked once for an unknown model",
+    )
+    p_add.add_argument(
         "--force",
         action="store_true",
         default=False,
@@ -1509,6 +1632,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--subagent-model",
         default=None,
         help="CLAUDE_CODE_SUBAGENT_MODEL override (omit to leave it unset)",
+    )
+    p_switch.add_argument(
+        "--context-window",
+        default=None,
+        help="context window in tokens to declare for this model (e.g. "
+        "1000000), or 'none' for no declaration; omit to derive from the "
+        "catalog, or to be asked once for an unknown model; explicit-axes "
+        "form only (--from-wrapper/--from-preset carry their own)",
     )
     p_switch.add_argument(
         "--base-url",
