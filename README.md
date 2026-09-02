@@ -142,6 +142,15 @@ model_list:
       api_key: os.environ/GEMINI_API_KEY
 ```
 
+**Trust boundary, stated plainly:** the preset embeds a concrete proxy address,
+so `add gemini-litellm` resolves `LITELLM_API_KEY` and bakes it into a wrapper
+that sends every prompt to that address — press Enter on its chip and an
+already-running session is retargeted there too. If you serve several LiteLLM
+instances, note that token profiles are keyed by provider name (`litellm`),
+not by host: a profile cached for one instance will be offered for the other.
+Point the wrapper at a different instance with `--base-url`, and check `list`
+or the script itself for the `ANTHROPIC_BASE_URL` line whenever in doubt.
+
 Direct `codex × gemini` (and `claude × gemini` without a proxy) is
 impossible, not merely unbuilt: the `gemini` provider entry is **suspended**
 — `codehelper list providers` marks it, and `add` refuses the pairing with

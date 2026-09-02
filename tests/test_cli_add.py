@@ -274,6 +274,17 @@ def test_add_preset_with_fixed_provider_still_rejects_base_url(tmp_path, capsys)
 
 
 @pytest.mark.integration
+def test_add_base_url_with_an_unknown_preset_name_fails_clean(tmp_path, capsys):
+    """The override exception's lookup is defensive: a name that is not a
+    preset at all must fail with a domain error (either the flag message or
+    the unknown-wrapper hint) — never a crash, never a silent accept."""
+    code = main(["add", "nope", "--base-url", "http://x"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "applies to the constructor form only" in err or "unknown wrapper" in err
+
+
+@pytest.mark.integration
 def test_add_warns_when_env_token_differs_from_cached(tmp_path, monkeypatch, capsys):
     """Issue #71 on the add path: the env token still wins and lands in the
     wrapper (documented precedence), but the disagreement is named on stderr
