@@ -37,6 +37,7 @@ from codehelper.services.model import (
     get_agent,
     get_provider,
     resolve_shape,
+    with_base_url,
 )
 from codehelper.services.naming import validate_alias
 
@@ -300,9 +301,24 @@ class Preset:
     tier_models: TierModels | None = None
     subagent_model: str | None = None
     description: str = ""
+    #: The default endpoint for a provider whose address is REQUIRED (the
+    #: user's own server): a preset curated against one concrete instance
+    #: ships that instance's address, mirror of how ``deepseek-ollama`` ships
+    #: ollama's local default. ``--base-url`` overrides it; a preset for a
+    #: FIXED/registry-address provider must leave this empty — ``with_base_url``
+    #: refuses a URL for FIXED, and the CLI rejects ``--base-url`` there with
+    #: the same teaching message as before this field existed.
+    base_url: str = ""
 
 
 _DEEPSEEK_MODEL = "deepseek-v4-flash:0731-cloud"
+
+# The current Gemini flash, as served by the LiteLLM proxy the
+# gemini-litellm preset is curated against (model_name in the proxy's
+# config.yaml → litellm_params.model: gemini/gemini-3.7-flash).
+_GEMINI_MODEL = "gemini-3.7-flash"
+
+_LITELLM_PROXY_URL = "https://litellm.78.47.183.125.sslip.io"
 
 
 PRESETS: tuple[Preset, ...] = (
@@ -334,6 +350,22 @@ PRESETS: tuple[Preset, ...] = (
         model="glm-5.2:cloud",
         description="Claude Code → glm-5.2:cloud via `ollama launch claude`",
     ),
+    Preset(
+        alias="gemini-litellm",
+        agent="claude",
+        provider="litellm",
+        shape=ConfigShape.ANTHROPIC_ENV,
+        model=_GEMINI_MODEL,
+        tier_models=TierModels.uniform(_GEMINI_MODEL),
+        # Google serves no Anthropic-compatible endpoint (#74), so Gemini
+        # reaches Claude Code only through a translating proxy — this preset
+        # is curated against the user's own LiteLLM instance, whose address
+        # rides in base_url below (--base-url points it at a different one).
+        # The proxy also carries the /v1/responses codex needs, so the codex
+        # pairing is `add --agent codex --provider litellm --base-url …`.
+        base_url=_LITELLM_PROXY_URL,
+        description=f"Claude Code → {_GEMINI_MODEL} via the LiteLLM proxy",
+    ),
 )
 
 
@@ -361,11 +393,15 @@ def spec_from_preset(
     model_override: str | None = None,
     alias_override: str | None = None,
     profile_name: str | None = None,
+    base_url_override: str | None = None,
 ) -> WrapperSpec:
     """Expand a preset into a spec, applying ``--model`` if given.
 
     ``model_override`` replaces every tier AND the subagent model, matching the
-    pre-refactor behaviour of ``--model`` exactly.
+    pre-refactor behaviour of ``--model`` exactly. ``base_url_override`` (the
+    CLI's ``--base-url``) replaces the preset's own ``base_url`` — either is
+    substituted onto the provider here, the single point every downstream
+    reader of the address reads from.
     """
     tier_models = preset.tier_models
     subagent = preset.subagent_model
@@ -378,9 +414,16 @@ def spec_from_preset(
         if subagent is not None:
             subagent = model_override
 
+    provider: Provider | str = preset.provider
+    url = base_url_override or preset.base_url
+    if url:
+        # Raises for a FIXED provider — a preset for one must not carry a
+        # base_url at all (see Preset.base_url).
+        provider = with_base_url(get_provider(preset.provider), url)
+
     return build_spec(
         agent=preset.agent,
-        provider=preset.provider,
+        provider=provider,
         model=model,
         alias=alias_override or preset.alias,
         shape=preset.shape,

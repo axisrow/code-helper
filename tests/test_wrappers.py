@@ -77,8 +77,35 @@ _SECRET_TOKEN = "00000000000000000000000000000000.aaaaaaaaaaaaaaaa"
 
 
 @pytest.mark.unit
-def test_registry_has_deepseek_ollama_glm_and_glm_ollama():
-    assert {w.name for w in WRAPPERS} == {"deepseek-ollama", "glm", "glm-ollama"}
+def test_registry_has_deepseek_ollama_glm_glm_ollama_and_gemini_litellm():
+    assert {w.name for w in WRAPPERS} == {
+        "deepseek-ollama",
+        "glm",
+        "glm-ollama",
+        "gemini-litellm",
+    }
+
+
+@pytest.mark.unit
+def test_gemini_litellm_preset_targets_the_proxy_with_its_default_url():
+    """Issue #86: Google serves no Anthropic-compatible endpoint, so the
+    preset points claude at a LiteLLM instance — whose address is REQUIRED
+    by the provider and therefore ships IN the preset (mirror of
+    deepseek-ollama's local ollama default). --base-url overrides it; the
+    wrapper itself stays a self-contained ANTHROPIC_ENV script."""
+    from codehelper.services.spec import spec_from_preset
+
+    spec = spec_from_preset(get_preset("gemini-litellm"))
+    assert spec.shape is ConfigShape.ANTHROPIC_ENV
+    assert spec.model == "gemini-3.7-flash"
+    assert spec.provider.base_url == "https://litellm.78.47.183.125.sslip.io"
+    assert spec.provider.base_url_policy == BaseUrlPolicy.REQUIRED
+
+    # The override wins over the preset's curated address.
+    overridden = spec_from_preset(
+        get_preset("gemini-litellm"), base_url_override="https://mine.invalid"
+    )
+    assert overridden.provider.base_url == "https://mine.invalid"
 
 
 @pytest.mark.unit

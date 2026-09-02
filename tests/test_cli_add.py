@@ -227,6 +227,52 @@ def test_add_litellm_claude_with_base_url(tmp_path, monkeypatch):
     assert "export ANTHROPIC_AUTH_TOKEN='sk-test'" in body
 
 
+# --------------------------------------------------------------------------- #
+# gemini-litellm — the preset that carries its provider's REQUIRED base_url
+# (issue #86): Google serves no Anthropic-compatible endpoint, so the preset
+# ships its curated LiteLLM instance's address and --base-url retargets it.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_add_gemini_litellm_uses_the_preset_url(tmp_path, monkeypatch):
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
+    assert main(["add", "gemini-litellm", "--context-window", "none"]) == 0
+    body = _body(tmp_path, "gemini-litellm")
+    assert "export ANTHROPIC_BASE_URL='https://litellm.78.47.183.125.sslip.io'" in body
+    assert "gemini-3.7-flash" in body
+
+
+@pytest.mark.integration
+def test_add_gemini_litellm_base_url_overrides_the_preset(tmp_path, monkeypatch):
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
+    assert (
+        main(
+            [
+                "add",
+                "gemini-litellm",
+                "--base-url",
+                "https://mine.example.com",
+                "--context-window",
+                "none",
+            ]
+        )
+        == 0
+    )
+    assert "export ANTHROPIC_BASE_URL='https://mine.example.com'" in _body(
+        tmp_path, "gemini-litellm"
+    )
+
+
+@pytest.mark.integration
+def test_add_preset_with_fixed_provider_still_rejects_base_url(tmp_path, capsys):
+    """The one-preset-override exception (issue #86) must not generalize:
+    a preset whose provider carries its own registry address still rejects
+    --base-url with the teaching message."""
+    assert main(["add", "glm", "--base-url", "http://x"]) == 1
+    assert "applies to the constructor form only" in capsys.readouterr().err
+
+
 @pytest.mark.integration
 def test_add_warns_when_env_token_differs_from_cached(tmp_path, monkeypatch, capsys):
     """Issue #71 on the add path: the env token still wins and lands in the

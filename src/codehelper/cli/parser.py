@@ -66,6 +66,7 @@ from codehelper.services.claude_settings import current_switch
 from codehelper.services.codex_default import restore_default
 from codehelper.services.model import (
     PROVIDERS,
+    BaseUrlPolicy,
     ConfigShape,
     get_agent,
     get_provider,
@@ -472,6 +473,7 @@ def _add_spec_from_preset(req, paths, profile_name):
         model_override=req.model,
         alias_override=req.alias,
         profile_name=profile_name,
+        base_url_override=req.base_url,
     )
 
 
@@ -620,12 +622,26 @@ def _handle_add(args: argparse.Namespace | AddRequest) -> int:
             "give either a preset name or --agent/--provider, not both"
         )
     if not using_axes and req.base_url:
-        # Checked before get_preset so the message is about the flag, not
-        # about an unrecognised preset name.
-        raise CodeHelperError(
-            "--base-url applies to the constructor form only "
-            "(--agent/--provider) — a preset carries its own provider"
-        )
+        # Checked before the preset branch so the message stays about the
+        # flag, not about an unrecognised preset name. One exception
+        # (issue #86): a preset curated against a REQUIRED-provider instance
+        # (gemini-litellm) carries that instance's address as a DEFAULT —
+        # --base-url may retarget it, exactly the override the constructor
+        # form takes.
+        preset_takes_url = False
+        if req.name:
+            try:
+                preset_takes_url = (
+                    get_provider(get_preset(req.name).provider).base_url_policy
+                    is BaseUrlPolicy.REQUIRED
+                )
+            except CodeHelperError:
+                preset_takes_url = False
+        if not preset_takes_url:
+            raise CodeHelperError(
+                "--base-url applies to the constructor form only "
+                "(--agent/--provider) — a preset carries its own provider"
+            )
     if not using_axes and req.auth:
         raise CodeHelperError(
             "--auth applies to the constructor form only "
