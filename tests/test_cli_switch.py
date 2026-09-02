@@ -535,10 +535,33 @@ def test_switch_from_wrapper_uses_the_markers_ctx_and_never_prompts(tmp_path):
 
 
 @pytest.mark.integration
-def test_switch_rejects_context_window_with_from_wrapper(tmp_path):
+def test_switch_rejects_context_window_with_from_wrapper(tmp_path, capsys):
     """One source per axis: a wrapper carries its own recorded ctx — an
-    explicit --context-window next to it is a contradiction, refused."""
-    assert main(["switch", "--from-wrapper", "nope", "--context-window", "1000"]) == 1
+    explicit --context-window next to it is a contradiction, refused. The
+    wrapper EXISTS here, so exit 1 can only come from the conflict check —
+    not from a missing-wrapper error masking it (the mutation trap this
+    test originally fell into)."""
+    install_wrapper(
+        paths=Paths.from_home(tmp_path),
+        spec=build_spec(
+            agent="claude", provider="zai", model="mystery-3b", alias="mystery"
+        ),
+        token="sk-mystery",
+    )
+    assert (
+        main(
+            [
+                "switch",
+                "--from-wrapper",
+                "mystery",
+                "--context-window",
+                "1000",
+                "--force",
+            ]
+        )
+        == 1
+    )
+    assert "explicit-axes form" in capsys.readouterr().err
 
 
 @pytest.mark.integration
