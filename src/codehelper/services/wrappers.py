@@ -381,6 +381,13 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
             tier_models=tiers,
             subagent_model=_env_value(body, "CLAUDE_CODE_SUBAGENT_MODEL"),
             profile_name=unquote(fields["profile"]) if fields.get("profile") else None,
+            # The RECORDED window, honoured the way the recorded shape/auth
+            # are (issue #83): a garbage value (``ctx=abc`` → ValueError,
+            # ``ctx=-5``/oversized → build_spec's range check) fails closed
+            # to None below, like any other unrecognised marker value. A
+            # marker WITHOUT the field predates the recording — the catalog
+            # derivation stands, the pre-#83 migration fallback.
+            context_window=int(fields["ctx"]) if fields.get("ctx") else None,
         )
     except (CodeHelperError, ValueError):
         # A marker naming an agent/provider/shape this build no longer knows,
@@ -760,6 +767,12 @@ def _respec_from_body(spec: WrapperSpec, body: str) -> WrapperSpec | None:
     Only the models are taken from the body — agent, provider, and shape stay
     the caller's, so this can widen *which model* counts as ours but never
     which agent or provider does.
+
+    The explicit context window is deliberately NOT taken from anywhere: this
+    feeds only the markerless legacy byte-compare in ``_ownership_full_match``,
+    and a pre-marker body can never carry an explicit ``ctx=`` decision — its
+    window line is catalog-derived and re-derives identically. Do not "fix"
+    that reflexively.
     """
     tiers = _tiers_from_body(body)
     model = _model_from_body(body)

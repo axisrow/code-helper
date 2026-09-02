@@ -2619,3 +2619,120 @@ def test_openai_toml_body_honors_explicit_context_window():
         context_window=0,
     )
     assert "model_context_window" not in openai_toml_body(suppressed)
+
+
+# --------------------------------------------------------------------------- #
+# spec_from_installed — the recorded context window (issue #83)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_spec_from_installed_honors_a_recorded_ctx(tmp_path):
+    """A wrapper whose marker records ctx= must come back with that explicit
+    window — not a re-derivation: switch --from-wrapper, the chipset, and
+    edit-token all consume this reconstruction."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery",
+        context_window=750_000,
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+
+    recovered = spec_from_installed(paths, "mystery")
+    assert recovered is not None
+    assert recovered.context_window == 750_000
+
+
+@pytest.mark.integration
+def test_reinstalling_a_recovered_ctx_spec_is_byte_identical(tmp_path):
+    """The round-trip rule: install → reconstruct → re-render must reproduce
+    the same bytes (ctx= included) — reinstall's `no changes` SKIP path
+    depends on it."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery",
+        context_window=750_000,
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+    before = script_text(paths, "mystery")
+
+    recovered = spec_from_installed(paths, "mystery")
+    assert recovered is not None
+    assert render_script(recovered, _LITERAL_TOKEN) == before
+
+
+@pytest.mark.integration
+def test_spec_from_installed_keeps_no_ctx_when_the_marker_has_none(tmp_path):
+    """MIGRATION: a marker written before the ctx field existed reconstructs
+    with context_window=None — the catalog derivation stands, exactly the
+    pre-#83 behaviour. Emulated by stripping the field from a freshly
+    rendered marker."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery",
+        context_window=750_000,
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+    script = paths.script_for("mystery")
+    body = script.read_text(encoding="utf-8")
+    legacy_body = body.replace(", ctx=750000", "")
+    assert legacy_body != body  # sanity: the field was actually there
+    script.write_text(legacy_body, encoding="utf-8")
+
+    recovered = spec_from_installed(paths, "mystery")
+    assert recovered is not None
+    assert recovered.context_window is None
+
+
+@pytest.mark.integration
+def test_spec_from_installed_returns_none_on_garbage_ctx(tmp_path):
+    """`ctx=abc` (unparseable) fails CLOSED — None, the same answer as any
+    other unrecognised marker value, never a silently-windowless spec that
+    looks healthy."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery",
+        context_window=750_000,
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+    script = paths.script_for("mystery")
+    script.write_text(
+        script.read_text(encoding="utf-8").replace("ctx=750000", "ctx=abc"),
+        encoding="utf-8",
+    )
+
+    assert spec_from_installed(paths, "mystery") is None
+
+
+@pytest.mark.integration
+def test_spec_from_installed_returns_none_on_a_negative_ctx(tmp_path):
+    """`ctx=-5` parses as an int but fails build_spec's range check — the
+    same fail-closed None."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery",
+        context_window=750_000,
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+    script = paths.script_for("mystery")
+    script.write_text(
+        script.read_text(encoding="utf-8").replace("ctx=750000", "ctx=-5"),
+        encoding="utf-8",
+    )
+
+    assert spec_from_installed(paths, "mystery") is None
