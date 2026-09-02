@@ -478,9 +478,10 @@ def test_list_providers_tags_native_as_switch_only(capsys):
 
 
 @pytest.mark.integration
-def test_switch_flags_context_window_applies(tmp_path):
+def test_switch_flags_context_window_applies(tmp_path, monkeypatch):
     """`switch --provider P --model M --context-window N` declares N even
     though the catalog is silent."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")  # CI has no ambient token
     paths = Paths.from_home(tmp_path)
     assert (
         main(
@@ -565,9 +566,10 @@ def test_switch_rejects_context_window_with_from_wrapper(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_chip_preset_apply_never_prompts_for_the_window(tmp_path):
+def test_chip_preset_apply_never_prompts_for_the_window(tmp_path, monkeypatch):
     """The chip hot-apply path (from_preset, non-interactive token) never
     reaches the window menu either."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")  # CI has no ambient token
 
     def _fail(_items, **_kwargs):
         raise AssertionError("chip apply showed the window menu")
@@ -587,9 +589,10 @@ def test_chip_preset_apply_never_prompts_for_the_window(tmp_path):
 
 @pytest.mark.integration
 @pytest.mark.parametrize("raw", ["abc", "-5", "0", "99999999999"])
-def test_switch_context_window_rejects_garbage(tmp_path, capsys, raw):
+def test_switch_context_window_rejects_garbage(tmp_path, capsys, monkeypatch, raw):
     """A malformed --context-window is a clean domain error (exit 1) and the
     live env keeps the PREVIOUS window — never the raw text or nonsense."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")  # CI has no ambient token
     assert (
         main(
             [
@@ -628,9 +631,10 @@ def test_switch_context_window_rejects_garbage(tmp_path, capsys, raw):
 
 
 @pytest.mark.integration
-def test_switch_context_window_none_suppresses_the_catalog(tmp_path):
+def test_switch_context_window_none_suppresses_the_catalog(tmp_path, monkeypatch):
     """`--context-window none` is the scripted explicit suppression: even a
     catalog-known model gets no declaration."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")  # CI has no ambient token
     assert (
         main(
             [
