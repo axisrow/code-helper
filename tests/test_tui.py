@@ -2595,12 +2595,14 @@ def test_literal_chips_not_applied_when_a_secret_wrapper_is_live(monkeypatch):
     apply time (its `auth_value`, through the same resolvers), so the
     readback compares it for EVERY chip, not just `auth="secret"` ones.
 
-    With the secret wrapper live, neither chip reads applied: pressing
-    either would write the literal credential — not a no-op — and the row
-    honestly shows no checkmark at all. (That the wrapper's own embedded
-    secret is not what its chip would write is the marker's pre-existing
-    gap, not this predicate's: the ✓ answers what Enter writes, and it
-    answers truthfully.)
+    With the secret wrapper's own account live, exactly ITS chip reads
+    applied: since #81 the marker records the auth override, so the
+    reconstructed wrapper chip resolves the embedded account token and Enter
+    on it is a genuine no-op — while the literal preset chip does NOT
+    (pressing it would write 'ollama', a different credential). Before #81
+    the reconstruction read the wrapper back literal, so its chip resolved
+    the wrong token and the ✓ the row owed the live account was missing —
+    the #80 degradation this fix narrows.
     """
     monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
     from codehelper.services.model import get_provider, with_auth
@@ -2622,16 +2624,20 @@ def test_literal_chips_not_applied_when_a_secret_wrapper_is_live(monkeypatch):
     session = _claude_session()
 
     # The chips the UI actually renders are RECONSTRUCTED from the installed
-    # file — the marker carries no auth override, so the secret wrapper reads
-    # back literal like the preset. Assert on those, not on the spec object
-    # built above (whose auth="secret" would take a different code path than
-    # the real row ever sees).
+    # file — since #81 its marker carries the auth override, so the secret
+    # wrapper reads back secret and its chip resolves the ACCOUNT token.
+    # Assert on those, not on the spec object built above (whose auth=
+    # "secret" would take a different code path than the real row ever
+    # sees). Exactly the live chip carries the ✓.
     assert (
         session._chip_is_applied("claude", _chip_named(session, "ollama-secret"))
-        is False
+        is True
     )
     assert (
         session._chip_is_applied("claude", _chip_named(session, "deepseek-ollama"))
         is False
     )
-    assert "✓" not in session._chip_row("claude")(selected=False, ansi=False)
+    assert "✓ ollama-secret" in session._chip_row("claude")(selected=False, ansi=False)
+    assert "✓ deepseek-ollama" not in session._chip_row("claude")(
+        selected=False, ansi=False
+    )

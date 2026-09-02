@@ -413,6 +413,42 @@ def test_switch_from_wrapper_and_provider_conflict(tmp_path, monkeypatch):
     assert code != 0
 
 
+@pytest.mark.integration
+def test_switch_from_wrapper_applies_a_secret_override_wrappers_own_token(
+    tmp_path, monkeypatch
+):
+    """issue #81: a wrapper installed with `--auth secret` on ollama-direct
+    embeds the ACCOUNT token — switching from it must apply that token, not
+    the registry's literal 'ollama' credential the un-fixed reconstruction
+    falls back to."""
+    monkeypatch.setenv("OLLAMA_API_KEY", "sk-account-token")
+    assert (
+        main(
+            [
+                "add",
+                "--agent",
+                "claude",
+                "--provider",
+                "ollama-direct",
+                "--auth",
+                "secret",
+                "--model",
+                "glm-5:cloud",
+                "--alias",
+                "ollama-secure",
+            ]
+        )
+        == 0
+    )
+
+    code = main(["switch", "--from-wrapper", "ollama-secure", "--force"])
+
+    assert code == 0
+    env = _settings(tmp_path)["env"]
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-account-token"
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:11434"
+
+
 # --------------------------------------------------------------------------- #
 # list providers — switch-only tag
 # --------------------------------------------------------------------------- #

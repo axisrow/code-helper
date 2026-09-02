@@ -65,12 +65,28 @@ def _shell_single_quote(value: str) -> str:
 
 
 def _marker(spec: WrapperSpec) -> str:
+    """The ownership line, and the record ``spec_from_installed`` rebuilds from.
+
+    ``auth`` is written ONLY for a secret wrapper (issue #81): it is the one
+    axis reconstruction cannot re-derive — a marker naming an OVERRIDABLE
+    provider (ollama-direct) reads back the registry's literal default, and
+    every consumer of the reconstruction (``switch --from-wrapper``, the TUI
+    chipset, ``edit-token``) then applies or edits the literal credential
+    instead of the account token embedded in the wrapper's own body. For a
+    literal wrapper the field is omitted, so the marker stays byte-identical
+    to the pre-#81 form and every already-installed literal wrapper keeps
+    matching ``_decide``'s SKIP path; for a registry-secret provider (zai)
+    the field is redundant with the registry — and honoured as a no-op — but
+    writing it keeps the marker self-sufficient should that registry default
+    ever move.
+    """
+    auth = ", auth=secret" if spec.auth == "secret" else ""
     profile = (
         f", profile={quote(spec.profile_name, safe='._-')}" if spec.profile_name else ""
     )
     return (
         f"{MARKER_PREFIX} (agent={spec.agent.name}, "
-        f"provider={spec.provider.name}, shape={spec.shape.value}{profile})"
+        f"provider={spec.provider.name}, shape={spec.shape.value}{auth}{profile})"
     )
 
 
