@@ -1024,3 +1024,86 @@ def test_diff_preview_shows_a_real_change():
     preview = diff_preview('{"a": 1}\n', '{"a": 2}\n')
     assert "-{" not in preview or "settings.json" in preview
     assert preview != ""
+
+
+# --------------------------------------------------------------------------- #
+# The explicit context_window axis (issue #83) — switch mechanism + chip honesty
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_resolve_switch_patch_explicit_context_window_wins_over_the_catalog():
+    """A recorded answer declares even though the catalog is silent — this is
+    what `switch --from-wrapper` on a ctx-carrying wrapper rides."""
+    patch = resolve_switch_patch(
+        ZAI,
+        tier_models=TierModels.uniform("mystery-3b"),
+        token="sk-test",
+        context_window=750_000,
+    )
+    assert patch.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "750000"
+
+    # ...and overrides the catalog when they disagree.
+    overridden = resolve_switch_patch(
+        ZAI,
+        tier_models=TierModels.uniform("glm-5.3"),
+        token="sk-test",
+        context_window=500_000,
+    )
+    assert overridden.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "500000"
+
+
+@pytest.mark.unit
+def test_resolve_switch_patch_ctx_zero_declares_nothing():
+    """``0`` is an explicit "no declaration" — it suppresses the catalog's
+    1M instead of declaring it."""
+    patch = resolve_switch_patch(
+        ZAI,
+        tier_models=TierModels.uniform("glm-5.3"),
+        token="sk-test",
+        context_window=0,
+    )
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in patch.env
+
+
+@pytest.mark.unit
+def test_matches_switch_spec_honors_a_recorded_ctx():
+    """CHIP HONESTY (the #80/#81 class): a live env carrying an explicit
+    window matches the ctx-recording spec and ONLY it — deriving from the
+    catalog here would leave the wrapper's own chip unset."""
+    from codehelper.services.spec import build_spec
+
+    spec = build_spec(
+        agent="claude",
+        provider=ZAI,
+        model="mystery-3b",
+        context_window=750_000,
+    )
+    patch = resolve_switch_patch(
+        ZAI,
+        tier_models=TierModels.uniform("mystery-3b"),
+        token="sk-live",
+        context_window=750_000,
+    )
+    assert matches_switch_spec(patch.env, spec) is True
+
+    # A catalog-derived env (no window) must NOT match it.
+    assert matches_switch_spec({"ANTHROPIC_AUTH_TOKEN": "sk-live"}, spec) is False
+
+
+@pytest.mark.unit
+def test_apply_switch_threads_context_window(tmp_path):
+    from codehelper.services.paths import Paths
+    from codehelper.services.spec import TierModels as TM
+
+    paths = Paths.from_home(tmp_path)
+    apply_switch(
+        paths,
+        provider=ZAI,
+        tier_models=TM.uniform("mystery-3b"),
+        token="sk-test",
+        context_window=750_000,
+        force=True,
+    )
+    _, settings = read_settings(paths)
+    assert settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "750000"

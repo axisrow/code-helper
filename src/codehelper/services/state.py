@@ -86,6 +86,8 @@ __all__ = [
     "clear_default_wrapper",
     "saved_proxy",
     "set_saved_proxy",
+    "context_window",
+    "set_context_window",
 ]
 
 
@@ -327,4 +329,59 @@ def set_default_wrapper(paths: Paths, agent_name: str, alias: str) -> None:
             wrappers = {}
         wrappers[agent_name] = alias
         state["default_wrapper"] = wrappers
+        _write_state(paths, state)
+
+
+def context_window(paths: Paths, model: str) -> int | None:
+    """The recorded context-window answer for ``model``, or ``None``.
+
+    ``0`` is a REAL answer ("no declaration" — issue #83), never normalized
+    to ``None``: the sentinel is what keeps an answered model from being
+    asked again on the next add/switch. A malformed slot (non-dict map, a
+    string, a float, ``True``) reads as unrecorded — a corrupt value asks
+    again rather than lying. An out-of-range int (a hand-edited ``-5`` or a
+    typo'd gigavalue) is unrecorded for the same reason: it would otherwise
+    ride an explicit answer straight into a wrapper marker or the live
+    settings (review round 2, PR #84) — the marker path range-checks via
+    ``build_spec``, but switch never builds one.
+    """
+    state = load_state(paths)
+    windows = state.get("context_windows")
+    if not isinstance(windows, dict):
+        return None
+    value = windows.get(model)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if not 0 <= value <= 10_000_000:
+        return None
+    return value
+
+
+def set_context_window(paths: Paths, model: str, value: int) -> None:
+    """Record ``value`` as the context-window answer for ``model``.
+
+    Same posture as :func:`set_default_wrapper`: a re-pickable pre-selection,
+    so a lost write is harmless (the model is simply asked again). ``0``
+    records an explicit "no declaration". Sets only the ``model`` slot,
+    leaving other models' slots and every other top-level key untouched.
+
+    Raises:
+        CodeHelperError: ``value`` is outside 0..10_000_000 — the same range
+            the reader accepts, so a record written here can always be read
+            back.
+    """
+    from codehelper.errors import CodeHelperError
+
+    if not 0 <= value <= 10_000_000:
+        raise CodeHelperError(
+            f"unusable context window {value}: expected 0 (no declaration) "
+            f"or a token count in 1..10_000_000"
+        )
+    with _locked_update(paths):
+        state = load_state(paths)
+        windows = state.get("context_windows")
+        if not isinstance(windows, dict):
+            windows = {}
+        windows[model] = value
+        state["context_windows"] = windows
         _write_state(paths, state)

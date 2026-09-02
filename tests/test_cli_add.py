@@ -41,6 +41,8 @@ def test_add_agent_provider_model_creates_wrapper(tmp_path):
             "ollama-direct",
             "--model",
             "glm-5:cloud",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 0
@@ -67,6 +69,8 @@ def test_add_codex_ollama_with_explicit_launcher_shape(tmp_path):
             "ollama-direct",
             "--model",
             "glm-5:cloud",
+            "--context-window",
+            "none",
             "--shape",
             "ollama-launch",
         ]
@@ -91,6 +95,8 @@ def test_add_explicit_alias_wins(tmp_path):
             "ollama-direct",
             "--model",
             "glm-5:cloud",
+            "--context-window",
+            "none",
             "--alias",
             "mycodex",
         ]
@@ -190,6 +196,8 @@ def test_add_litellm_claude_with_base_url(tmp_path, monkeypatch):
             "http://localhost:4000/v1",
             "--model",
             "gpt-4o",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 0
@@ -234,6 +242,8 @@ def test_add_litellm_codex_writes_env_key_and_export(tmp_path, monkeypatch):
             "http://localhost:4000/v1",
             "--model",
             "gpt-4o",
+            "--context-window",
+            "none",
             "--alias",
             "lm-codex",
         ]
@@ -261,6 +271,8 @@ def test_add_base_url_on_a_fixed_provider_is_refused(tmp_path, capsys):
             "http://x/v1",
             "--model",
             "m",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 1
@@ -287,6 +299,8 @@ def test_add_rejects_an_invalid_base_url_scheme(tmp_path, capsys):
             "ftp://x",
             "--model",
             "m",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 1
@@ -306,6 +320,8 @@ def test_add_rejects_an_empty_base_url(tmp_path, capsys):
             "",
             "--model",
             "m",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 1
@@ -336,6 +352,8 @@ def test_add_ollama_with_auth_secret_writes_a_secret_mode_wrapper(
             "secret",
             "--model",
             "glm-5:cloud",
+            "--context-window",
+            "none",
             "--alias",
             "ollama-secure",
         ]
@@ -362,6 +380,8 @@ def test_add_ollama_without_auth_flag_keeps_the_literal_default(tmp_path):
             "ollama-direct",
             "--model",
             "glm-5:cloud",
+            "--context-window",
+            "none",
             "--alias",
             "ollama-default",
         ]
@@ -398,6 +418,8 @@ def test_add_auth_secret_on_an_already_secret_provider_is_a_no_op(
             "secret",
             "--model",
             "glm-5",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 0
@@ -427,6 +449,8 @@ def test_add_auth_rejects_an_unknown_value(tmp_path, capsys):
                 "bogus",
                 "--model",
                 "m",
+                "--context-window",
+                "none",
             ]
         )
     assert exc_info.value.code == 2
@@ -452,6 +476,8 @@ def test_bad_base_url_never_prompts_for_a_token(tmp_path, monkeypatch):
             "ftp://x",
             "--model",
             "m",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 1
@@ -503,6 +529,8 @@ def test_bad_alias_is_rejected(tmp_path, capsys):
                 "ollama-direct",
                 "--model",
                 "m",
+                "--context-window",
+                "none",
                 "--alias",
                 "../../etc/passwd",
             ]
@@ -525,6 +553,8 @@ def test_alias_may_not_shadow_an_agent_binary(tmp_path, capsys):
                 "ollama-direct",
                 "--model",
                 "m",
+                "--context-window",
+                "none",
                 "--alias",
                 "claude",
             ]
@@ -546,6 +576,8 @@ def test_dry_run_in_constructor_mode_writes_nothing(tmp_path):
             "ollama-direct",
             "--model",
             "glm-5:cloud",
+            "--context-window",
+            "none",
         ]
     )
     assert not Paths.from_home(tmp_path).bin_dir.exists()
@@ -569,6 +601,8 @@ def test_two_agents_on_one_model_coexist(tmp_path):
             "ollama-direct",
             "--model",
             "glm-5:cloud",
+            "--context-window",
+            "none",
             "--shape",
             "ollama-launch",
         ]
@@ -582,6 +616,8 @@ def test_two_agents_on_one_model_coexist(tmp_path):
             "ollama-direct",
             "--model",
             "glm-5:cloud",
+            "--context-window",
+            "none",
             "--shape",
             "ollama-launch",
         ]
@@ -729,6 +765,8 @@ def test_list_shows_ad_hoc_wrappers(tmp_path, capsys):
             "ollama-direct",
             "--model",
             "qwen3.5:9b",
+            "--context-window",
+            "none",
         ]
     )
     capsys.readouterr()
@@ -781,6 +819,8 @@ def test_add_caches_a_prompt_typed_token(tmp_path, monkeypatch):
             "http://localhost:4000/v1",
             "--model",
             "gpt-4o",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 0
@@ -839,6 +879,8 @@ def test_profile_selects_the_default_alias_and_is_visible_in_list(
                 "zai",
                 "--model",
                 "glm-5",
+                "--context-window",
+                "none",
                 "--profile",
                 "axisrow",
             ]
@@ -889,6 +931,8 @@ def test_add_does_not_cache_an_env_resolved_token(tmp_path, monkeypatch):
             "http://localhost:4000/v1",
             "--model",
             "gpt-4o",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 0
@@ -1031,6 +1075,8 @@ def test_add_does_not_cache_a_prompt_typed_token_when_the_install_is_refused(
             "http://localhost:4000/v1",
             "--model",
             "gpt-4o",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 1
@@ -1061,6 +1107,8 @@ def test_add_caches_a_prompt_typed_token_on_a_byte_identical_noop_reinstall(
         "http://localhost:4000/v1",
         "--model",
         "gpt-4o",
+        "--context-window",
+        "none",
     ]
 
     def _fake_resolve_token(**kwargs):
@@ -1098,6 +1146,8 @@ def test_add_dry_run_never_writes_the_credentials_file(tmp_path, monkeypatch):
             "http://localhost:4000/v1",
             "--model",
             "gpt-4o",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 0
@@ -1129,6 +1179,8 @@ def test_add_warns_when_bin_dir_is_not_on_path(tmp_path, monkeypatch, capsys):
             "http://localhost:4000/v1",
             "--model",
             "gpt-4o",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 0
@@ -1162,6 +1214,8 @@ def test_add_dry_run_does_not_print_a_path_warning(tmp_path, monkeypatch, capsys
             "http://localhost:4000/v1",
             "--model",
             "gpt-4o",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 0
@@ -1192,6 +1246,8 @@ def test_add_reuses_a_cached_token_without_prompting(tmp_path, monkeypatch):
             "zai",
             "--model",
             "glm-5",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 0
@@ -1231,6 +1287,8 @@ def test_add_ignores_a_cached_token_for_a_runtime_address_provider_on_install(
             "http://host-b:4000/v1",
             "--model",
             "gpt-4o",
+            "--context-window",
+            "none",
         ]
     )
     assert code == 0
@@ -1278,6 +1336,8 @@ def test_add_reuses_a_named_profile_across_two_different_base_urls(
             "http://host-a:4000/v1",
             "--model",
             "gpt-4o",
+            "--context-window",
+            "none",
             "--alias",
             "lite-a",
             "--profile",
@@ -1295,6 +1355,8 @@ def test_add_reuses_a_named_profile_across_two_different_base_urls(
             "http://host-b:4000/v1",
             "--model",
             "gpt-4o",
+            "--context-window",
+            "none",
             "--alias",
             "lite-b",
             "--profile",
@@ -1517,6 +1579,8 @@ def test_add_without_profile_picks_up_the_active_profile(tmp_path, monkeypatch):
             "zai",
             "--model",
             "glm-5",
+            "--context-window",
+            "none",
             "--alias",
             "lite-active",
         ]
@@ -1558,6 +1622,8 @@ def test_add_explicit_profile_wins_over_the_active_profile(tmp_path, monkeypatch
             "http://host:4000/v1",
             "--model",
             "gpt-4o",
+            "--context-window",
+            "none",
             "--alias",
             "lite-explicit",
             "--profile",
@@ -1593,3 +1659,250 @@ def test_list_shows_the_active_profile_header(tmp_path, capsys):
 def test_list_omits_the_active_profile_header_when_unset(tmp_path, capsys):
     assert main(["list"]) == 0
     assert "Active profile:" not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# Issue #83: the context-window question — asked once for an unknown model,
+# remembered per model, never for --dry-run, overridable by the flag.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_add_unknown_model_prompts_once_and_records(tmp_path):
+    """The window menu fires for a model the catalog doesn't know; the answer
+    is remembered, so the SECOND identical add never prompts again."""
+    paths = Paths.from_home(tmp_path)
+    answers = iter(["1000000"])
+
+    def _select(_items, *, prompt="", **_kwargs):
+        assert str(prompt).startswith("Context window for mystery-3b")
+        return next(answers)
+
+    monkey_target = "codehelper.cli.menu.select_from_menu"
+
+    # First add: the menu answers 1M.
+    import unittest.mock as mock
+
+    with mock.patch(monkey_target, _select):
+        assert (
+            main(
+                [
+                    "add",
+                    "--agent",
+                    "claude",
+                    "--provider",
+                    "ollama-direct",
+                    "--model",
+                    "mystery-3b",
+                    "--alias",
+                    "mystery",
+                    "--force",
+                ]
+            )
+            == 0
+        )
+    from codehelper.services.state import context_window
+
+    assert context_window(paths, "mystery-3b") == 1_000_000
+    body = paths.script_for("mystery").read_text(encoding="utf-8")
+    assert "ctx=1000000" in body
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'" in body
+
+    # Second add: no menu reachable — a recorded model is never re-asked.
+    called = {"menu": False}
+
+    def _fail(_items, **_kwargs):
+        called["menu"] = True
+        return "0"
+
+    with mock.patch(monkey_target, _fail):
+        assert (
+            main(
+                [
+                    "add",
+                    "--agent",
+                    "claude",
+                    "--provider",
+                    "ollama-direct",
+                    "--model",
+                    "mystery-3b",
+                    "--alias",
+                    "mystery",
+                    "--force",
+                ]
+            )
+            == 0
+        )
+    assert called["menu"] is False
+
+
+@pytest.mark.integration
+def test_add_known_model_never_prompts_for_the_window(tmp_path):
+    """A catalog-known model is derived silently — no menu is reachable."""
+    import unittest.mock as mock
+
+    def _fail(_items, **_kwargs):
+        raise AssertionError("menu shown for a catalog-known model")
+
+    with mock.patch("codehelper.cli.menu.select_from_menu", _fail):
+        assert main(["add", "deepseek-ollama", "--force"]) == 0
+
+
+@pytest.mark.integration
+def test_add_dry_run_never_prompts_for_the_window(tmp_path, capsys):
+    """--dry-run never prompts NOR writes state — the model stays unrecorded."""
+    paths = Paths.from_home(tmp_path)
+
+    def _fail(_items, **_kwargs):
+        raise AssertionError("dry run showed the window menu")
+
+    import unittest.mock as mock
+
+    with mock.patch("codehelper.cli.menu.select_from_menu", _fail):
+        assert (
+            main(
+                [
+                    "--dry-run",
+                    "add",
+                    "--agent",
+                    "claude",
+                    "--provider",
+                    "ollama-direct",
+                    "--model",
+                    "mystery-3b",
+                    "--alias",
+                    "mystery",
+                ]
+            )
+            == 0
+        )
+    from codehelper.services.state import context_window
+
+    assert context_window(paths, "mystery-3b") is None
+    assert "would write" in capsys.readouterr().out.lower()
+
+
+@pytest.mark.integration
+def test_context_window_flag_parses_int_and_none(tmp_path, capsys):
+    """The flag takes a token count; 'none' is the explicit suppression;
+    garbage is a clean domain error (exit 1), not a traceback."""
+    assert (
+        main(
+            [
+                "add",
+                "--agent",
+                "claude",
+                "--provider",
+                "ollama-direct",
+                "--model",
+                "mystery-3b",
+                "--alias",
+                "mystery",
+                "--context-window",
+                "750000",
+            ]
+        )
+        == 0
+    )
+    body = paths_body(tmp_path, "mystery")
+    assert "ctx=750000" in body
+
+    assert (
+        main(
+            [
+                "add",
+                "--agent",
+                "claude",
+                "--provider",
+                "ollama-direct",
+                "--model",
+                "mystery-3b",
+                "--alias",
+                "mystery2",
+                "--context-window",
+                "none",
+            ]
+        )
+        == 0
+    )
+    assert "ctx=0" in paths_body(tmp_path, "mystery2")
+
+    assert (
+        main(
+            [
+                "add",
+                "--agent",
+                "claude",
+                "--provider",
+                "ollama-direct",
+                "--model",
+                "mystery-3b",
+                "--alias",
+                "mystery3",
+                "--context-window",
+                "bogus",
+            ]
+        )
+        == 1
+    )
+    assert "--context-window" in capsys.readouterr().err
+
+
+def paths_body(tmp_path, name: str) -> str:
+    return Paths.from_home(tmp_path).script_for(name).read_text(encoding="utf-8")
+
+
+@pytest.mark.integration
+def test_context_window_none_flag_suppresses_a_catalog_declaration(tmp_path):
+    """`--context-window none` on a KNOWN model pins the suppression — the
+    catalog's 1M must not leak into the wrapper."""
+    assert (
+        main(
+            [
+                "add",
+                "--agent",
+                "claude",
+                "--provider",
+                "ollama-direct",
+                "--model",
+                "glm-5.3",
+                "--alias",
+                "glm-none",
+                "--context-window",
+                "none",
+            ]
+        )
+        == 0
+    )
+    body = paths_body(tmp_path, "glm-none")
+    assert "ctx=0" in body
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in body
+
+
+@pytest.mark.integration
+def test_window_prompt_comes_after_spec_validation(tmp_path, capsys):
+    """A bad alias must error BEFORE any window menu — the ordering
+    invariant: validate everything, then go interactive."""
+    import unittest.mock as mock
+
+    def _fail(_items, **_kwargs):
+        raise AssertionError("menu shown before validation completed")
+
+    with mock.patch("codehelper.cli.menu.select_from_menu", _fail):
+        assert (
+            main(
+                [
+                    "add",
+                    "--agent",
+                    "claude",
+                    "--provider",
+                    "ollama-direct",
+                    "--model",
+                    "mystery-3b",
+                    "--alias",
+                    "bad alias!",
+                ]
+            )
+            == 1
+        )
+    assert "alias" in capsys.readouterr().err.lower()

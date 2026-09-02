@@ -1559,11 +1559,11 @@ class TuiSession:
             return None
         try:
             if chip.name in preset_names():
-                _, _, token, _ = _switch_axes_from_preset(
+                _, _, token, _, _ = _switch_axes_from_preset(
                     self._switch_request(from_preset=chip.name), paths
                 )
             else:
-                _, _, token, _ = _switch_axes_from_wrapper(
+                _, _, token, _, _ = _switch_axes_from_wrapper(
                     self._switch_request(from_wrapper=chip.name), paths
                 )
         except CodeHelperError:

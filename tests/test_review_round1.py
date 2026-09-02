@@ -127,6 +127,8 @@ def test_bogus_shape_is_a_clean_error_not_a_traceback(capsys):
             "ollama-direct",
             "--model",
             "m",
+            "--context-window",
+            "none",
             "--shape",
             "bogus",
         ]
@@ -261,6 +263,8 @@ def test_edit_token_reaches_an_axes_built_wrapper(tmp_path, monkeypatch):
                 "zai",
                 "--model",
                 "glm-x",
+                "--context-window",
+                "none",
                 "--alias",
                 "mytok",
             ]

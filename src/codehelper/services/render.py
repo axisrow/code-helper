@@ -84,9 +84,15 @@ def _marker(spec: WrapperSpec) -> str:
     profile = (
         f", profile={quote(spec.profile_name, safe='._-')}" if spec.profile_name else ""
     )
+    # Recorded LAST (after profile) so every existing marker's bytes — and
+    # every prefix-matching consumer — are untouched; the generic fields
+    # regex reads it back. Written ONLY for an explicit answer (issue #83):
+    # a catalog-derived window is re-derivable, and recording it would churn
+    # every already-installed known-model wrapper's marker (the #82 rule).
+    ctx = f", ctx={spec.context_window}" if spec.context_window is not None else ""
     return (
         f"{MARKER_PREFIX} (agent={spec.agent.name}, "
-        f"provider={spec.provider.name}, shape={spec.shape.value}{auth}{profile})"
+        f"provider={spec.provider.name}, shape={spec.shape.value}{auth}{profile}{ctx})"
     )
 
 
@@ -155,6 +161,25 @@ def uniform_context_window(models: Iterable[str]) -> int | None:
     return None
 
 
+def _declared_window(spec: WrapperSpec) -> int | None:
+    """The window this spec declares, honouring the explicit axis (issue #83).
+
+    The covered model set comes from ``spec.window_models`` — the same
+    source the interactive question asks about, so ask and declare can
+    never drift (three review rounds, PR #84).
+
+    An explicit ``spec.context_window`` wins over everything: ``> 0`` is the
+    window the user (or the recorded answer behind a marker's ``ctx=``)
+    decided, ``0`` is an explicit "no declaration" that suppresses even a
+    catalog hit — the user was asked and answered, so the mixed-tier
+    uniformity rule does not get a vote. Without an explicit value the
+    catalog derivation stands, unchanged.
+    """
+    if spec.context_window is not None:
+        return spec.context_window or None
+    return uniform_context_window(spec.window_models)
+
+
 def _render_anthropic_env(spec: WrapperSpec, token: str) -> str:
     """Subshell exporting ``ANTHROPIC_*``, then ``claude --settings … "$@"``.
 
@@ -192,10 +217,7 @@ def _render_anthropic_env(spec: WrapperSpec, token: str) -> str:
     }
     if spec.subagent_model is not None:
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = spec.subagent_model
-    models = [tiers.haiku, tiers.sonnet, tiers.opus]
-    if spec.subagent_model is not None:
-        models.append(spec.subagent_model)
-    if (window := uniform_context_window(models)) is not None:
+    if (window := _declared_window(spec)) is not None:
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
     lines = ["#!/bin/bash", _marker(spec), "("]
     lines += [f"export {key}={q(value)}" for key, value in env.items()]
@@ -245,7 +267,7 @@ def _render_ollama_launch(spec: WrapperSpec, token: str) -> str:
             "ANTHROPIC_DEFAULT_OPUS_MODEL": spec.model,
             "CLAUDE_CODE_SUBAGENT_MODEL": spec.model,
         }
-        if (window := uniform_context_window([spec.model])) is not None:
+        if (window := _declared_window(spec)) is not None:
             env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
         launch += f" {_settings_flag(env)}"
     launch += ' "$@"'
@@ -448,7 +470,7 @@ def openai_toml_body(spec: WrapperSpec) -> str:
         f'model = "{toml_string(spec.model)}"\n',
         f'model_provider = "{toml_string(table)}"\n',
     ]
-    if (window := uniform_context_window([spec.model])) is not None:
+    if (window := _declared_window(spec)) is not None:
         lines.append(f"model_context_window = {window}\n")
     lines += [
         "\n",

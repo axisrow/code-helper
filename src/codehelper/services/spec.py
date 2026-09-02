@@ -90,6 +90,12 @@ class WrapperSpec:
     #: metadata, not a runtime lookup: the rendered wrapper still carries the
     #: resolved token so it works even if the cache is later removed.
     profile_name: str | None = None
+    #: EXPLICIT context window (issue #83): ``None`` means "derive from the
+    #: catalog" (``render.uniform_context_window``); ``0`` means an explicit
+    #: "no declaration" — suppress even a catalog hit; ``> 0`` is the window.
+    #: Like ``profile_name`` it is recorded data, not a derivation: it rides
+    #: the wrapper marker (``ctx=``) so reconstruction never re-derives it.
+    context_window: int | None = None
 
     @property
     def name(self) -> str:
@@ -116,6 +122,30 @@ class WrapperSpec:
         it, so two wrappers on the same provider can never disagree about it.
         """
         return self.provider.token_env_var
+
+    @property
+    def window_models(self) -> list[str]:
+        """Every model the context-window declaration covers (issue #83).
+
+        The ONE source for that set: the renderer derives the declaration
+        from it and the interactive question asks about it, so the two can
+        never drift — three review rounds (PR #84) each found a path where
+        a hook hand-built a different set than the renderer read. Tier
+        slots when :attr:`tier_models` exists (the ANTHROPIC_ENV shape);
+        otherwise the single model (OLLAMA_LAUNCH, OPENAI_TOML). The
+        subagent model participates when set — it shares the variable.
+        """
+        if self.tier_models is not None:
+            models = [
+                self.tier_models.haiku,
+                self.tier_models.sonnet,
+                self.tier_models.opus,
+            ]
+        else:
+            models = [self.model]
+        if self.subagent_model is not None:
+            models.append(self.subagent_model)
+        return models
 
 
 def suggest_alias(model: str, agent_name: str, profile_name: str | None = None) -> str:
@@ -158,6 +188,7 @@ def build_spec(
     subagent_model: str | None = None,
     description: str = "",
     profile_name: str | None = None,
+    context_window: int | None = None,
 ) -> WrapperSpec:
     """Assemble a :class:`WrapperSpec` from the three axes. Pure, no IO.
 
@@ -193,6 +224,16 @@ def build_spec(
         raise CodeHelperError(
             f"provider {provider_obj.name!r} requires a base URL — supply one "
             f"via model.with_base_url(provider, url) before build_spec"
+        )
+
+    # An unusable explicit window refuses here, before anything interactive —
+    # this is what makes spec_from_installed's garbage marker values
+    # (``ctx=abc`` → ValueError, ``ctx=-5`` → lands here) fail closed to
+    # None, the same answer as any other unrecognised marker value.
+    if context_window is not None and not (0 <= context_window <= 10_000_000):
+        raise CodeHelperError(
+            f"unusable context window {context_window}: expected 0 (no "
+            f"declaration) or a token count in 1..10_000_000"
         )
 
     chosen = resolve_shape(agent_obj, provider_obj, preferred=shape)
@@ -243,6 +284,7 @@ def build_spec(
         subagent_model=subagent_model,
         description=description,
         profile_name=profile_name,
+        context_window=context_window,
     )
 
 

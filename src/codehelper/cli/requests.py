@@ -77,6 +77,9 @@ class AddRequest:
     dry_run: bool
     force: bool
     debug: bool
+    # Explicit context window (issue #83): an int, or 0 for "no declaration".
+    # None asks (interactively) or derives — the resolver decides.
+    context_window: int | None = None
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> AddRequest:
@@ -104,6 +107,7 @@ class AddRequest:
             dry_run=bool(_g(args, "dry_run", False)),
             force=bool(_g(args, "force", False)),
             debug=bool(_g(args, "debug", False)),
+            context_window=_g(args, "context_window"),
         )
 
 
@@ -275,6 +279,10 @@ class SwitchRequest:
     # data, not a pathname: selecting it must work even when no wrapper has
     # been installed (or an unrelated executable owns that alias on PATH).
     from_preset: str | None = None
+    # Explicit context window (issue #83): an int, or 0 for "no declaration".
+    # Only meaningful on the explicit-axes path; --from-wrapper/--from-preset
+    # carry their own recorded answer, and mixing them is rejected.
+    context_window: int | None = None
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> SwitchRequest:
@@ -307,4 +315,5 @@ class SwitchRequest:
             force=bool(_g(args, "force", False)),
             debug=bool(_g(args, "debug", False)),
             from_preset=None,
+            context_window=_g(args, "context_window"),
         )

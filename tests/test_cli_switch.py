@@ -20,6 +20,8 @@ from codehelper.cli.requests import SwitchRequest
 from codehelper.services.claude_settings import MANAGED_ENV_KEYS
 from codehelper.services.paths import Paths
 from codehelper.services.secrets import save_credential
+from codehelper.services.spec import build_spec
+from codehelper.services.wrappers import install_wrapper
 
 
 def _settings(tmp_path) -> dict:
@@ -389,6 +391,8 @@ def test_switch_from_wrapper_rejects_a_non_claude_wrapper(tmp_path, monkeypatch)
                 "ollama-direct",
                 "--model",
                 "x",
+                "--context-window",
+                "none",
                 "--alias",
                 "codex-ollama",
             ]
@@ -434,6 +438,8 @@ def test_switch_from_wrapper_applies_a_secret_override_wrappers_own_token(
                 "secret",
                 "--model",
                 "glm-5:cloud",
+                "--context-window",
+                "none",
                 "--alias",
                 "ollama-secure",
             ]
@@ -464,3 +470,232 @@ def test_list_providers_tags_native_as_switch_only(capsys):
     assert "(switch-only)" not in lines["zai"]
     assert "(switch-only)" not in lines["ollama-direct"]
     assert "(switch-only)" not in lines["litellm"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #83: the explicit context_window axis on switch.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_switch_flags_context_window_applies(tmp_path, monkeypatch):
+    """`switch --provider P --model M --context-window N` declares N even
+    though the catalog is silent."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")  # CI has no ambient token
+    paths = Paths.from_home(tmp_path)
+    assert (
+        main(
+            [
+                "switch",
+                "--provider",
+                "zai",
+                "--model",
+                "mystery-3b",
+                "--context-window",
+                "750000",
+                "--force",
+            ]
+        )
+        == 0
+    )
+    from codehelper.services.claude_settings import read_settings
+
+    _, settings = read_settings(paths)
+    assert settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "750000"
+
+
+@pytest.mark.integration
+def test_switch_from_wrapper_uses_the_markers_ctx_and_never_prompts(tmp_path):
+    """--from-wrapper lifts the recorded ctx out of the marker — zero prompts,
+    same answer the wrapper's own script carries."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude",
+            provider="zai",
+            model="mystery-3b",
+            alias="mystery",
+            context_window=750_000,
+        ),
+        token="sk-mystery",
+    )
+
+    def _fail(_items, **_kwargs):
+        raise AssertionError("--from-wrapper showed the window menu")
+
+    import unittest.mock as mock
+
+    with mock.patch("codehelper.cli.menu.select_from_menu", _fail):
+        assert main(["switch", "--from-wrapper", "mystery", "--force"]) == 0
+
+    from codehelper.services.claude_settings import read_settings
+
+    _, settings = read_settings(paths)
+    assert settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "750000"
+
+
+@pytest.mark.integration
+def test_switch_rejects_context_window_with_from_wrapper(tmp_path, capsys):
+    """One source per axis: a wrapper carries its own recorded ctx — an
+    explicit --context-window next to it is a contradiction, refused. The
+    wrapper EXISTS here, so exit 1 can only come from the conflict check —
+    not from a missing-wrapper error masking it (the mutation trap this
+    test originally fell into)."""
+    install_wrapper(
+        paths=Paths.from_home(tmp_path),
+        spec=build_spec(
+            agent="claude", provider="zai", model="mystery-3b", alias="mystery"
+        ),
+        token="sk-mystery",
+    )
+    assert (
+        main(
+            [
+                "switch",
+                "--from-wrapper",
+                "mystery",
+                "--context-window",
+                "1000",
+                "--force",
+            ]
+        )
+        == 1
+    )
+    assert "explicit-axes form" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_chip_preset_apply_never_prompts_for_the_window(tmp_path, monkeypatch):
+    """The chip hot-apply path (from_preset, non-interactive token) never
+    reaches the window menu either."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")  # CI has no ambient token
+
+    def _fail(_items, **_kwargs):
+        raise AssertionError("chip apply showed the window menu")
+
+    import unittest.mock as mock
+
+    with mock.patch("codehelper.cli.menu.select_from_menu", _fail):
+        assert _handle_switch(_preset_request("glm")) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Review round 1 (PR #84): the switch flag must be parsed + validated like
+# add's — switch never builds a spec, so nothing downstream would catch a
+# raw string, and it would land in the LIVE settings verbatim.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("raw", ["abc", "-5", "0", "99999999999"])
+def test_switch_context_window_rejects_garbage(tmp_path, capsys, monkeypatch, raw):
+    """A malformed --context-window is a clean domain error (exit 1) and the
+    live env keeps the PREVIOUS window — never the raw text or nonsense."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")  # CI has no ambient token
+    assert (
+        main(
+            [
+                "switch",
+                "--provider",
+                "zai",
+                "--model",
+                "glm-5.2",
+                "--context-window",
+                "500000",
+                "--force",
+            ]
+        )
+        == 0
+    )  # sanity: a valid value applies
+
+    assert (
+        main(
+            [
+                "switch",
+                "--provider",
+                "zai",
+                "--model",
+                "glm-5.2",
+                "--context-window",
+                raw,
+                "--force",
+            ]
+        )
+        == 1
+    )
+    assert "--context-window" in capsys.readouterr().err
+
+    env = _settings(tmp_path)["env"]
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "500000"
+
+
+@pytest.mark.integration
+def test_switch_context_window_none_suppresses_the_catalog(tmp_path, monkeypatch):
+    """`--context-window none` is the scripted explicit suppression: even a
+    catalog-known model gets no declaration."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")  # CI has no ambient token
+    assert (
+        main(
+            [
+                "switch",
+                "--provider",
+                "zai",
+                "--model",
+                "glm-5.3",
+                "--context-window",
+                "none",
+                "--force",
+            ]
+        )
+        == 0
+    )
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in _settings(tmp_path)["env"]
+
+
+@pytest.mark.integration
+def test_switch_split_tier_question_names_and_records_the_unknown_model(
+    tmp_path, monkeypatch
+):
+    """Split tiers with one unknown model: the menu asks about THAT model and
+    the answer records under it — not under the selected --model name, or
+    the question would re-fire and mis-key the answer (round 1, PR #84)."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
+    import codehelper.cli.menu as menu
+
+    seen: list[str] = []
+
+    def _select(_items, *, prompt="", **_kwargs):
+        seen.append(str(prompt))
+        return "2000000"
+
+    monkeypatch.setattr(menu, "select_from_menu", _select)
+
+    assert (
+        main(
+            [
+                "switch",
+                "--provider",
+                "zai",
+                "--haiku",
+                "mystery-haiku",
+                "--sonnet",
+                "glm-5.3",
+                "--opus",
+                "glm-5.3",
+                "--force",
+            ]
+        )
+        == 0
+    )
+    assert seen == ["Context window for mystery-haiku:"]
+
+    from codehelper.services.state import context_window
+
+    paths = Paths.from_home(tmp_path)
+    # The answer records for the asked model and is NOT lost — but it does
+    # NOT declare a session-wide window: the catalog's 1M on the other tiers
+    # disagrees, and one variable may not claim a mix (review round 2).
+    assert context_window(paths, "mystery-haiku") == 2_000_000
+    assert context_window(paths, "glm-5.3") is None  # catalog tier: untouched
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in _settings(tmp_path)["env"]

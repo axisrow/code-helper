@@ -25,6 +25,7 @@ from codehelper.services.model import (
 )
 from codehelper.services.paths import Paths
 from codehelper.services.render import (
+    _marker,
     anthropic_base_url,
     openai_toml_body,
     render_script,
@@ -858,7 +859,19 @@ def test_cli_add_glm_reads_token_from_env(tmp_path, monkeypatch):
 
 @pytest.mark.integration
 def test_cli_add_with_model_override(tmp_path):
-    assert main(["add", "deepseek-ollama", "--model", "custom-model:tag"]) == 0
+    assert (
+        main(
+            [
+                "add",
+                "deepseek-ollama",
+                "--model",
+                "custom-model:tag",
+                "--context-window",
+                "none",
+            ]
+        )
+        == 0
+    )
 
     paths = Paths.from_home(tmp_path)
     body = paths.script_for("deepseek-ollama").read_text(encoding="utf-8")
@@ -2458,3 +2471,393 @@ def test_cli_remove_dry_run_never_prompts_and_never_writes(tmp_path, monkeypatch
 
     assert main(["--dry-run", "remove", spec.alias]) == 0
     assert paths.script_for(spec.alias).exists()
+
+
+# --------------------------------------------------------------------------- #
+# Issue #83: the explicit context_window axis — build_spec validation.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_build_spec_rejects_an_unusable_context_window():
+    """A garbage explicit window refuses at build time, before anything
+    interactive — the same early-refusal contract as a bad alias."""
+    for bad in (-1, -5, 10_000_001, 99_999_999):
+        with pytest.raises(CodeHelperError, match="unusable context window"):
+            build_spec(
+                agent="claude",
+                provider="ollama-direct",
+                model="mystery-3b",
+                context_window=bad,
+            )
+
+
+@pytest.mark.unit
+def test_build_spec_accepts_zero_and_positive_context_windows():
+    """``0`` is a real answer (explicit no-declaration) and any sane positive
+    count is accepted verbatim."""
+    assert (
+        build_spec(
+            agent="claude",
+            provider="ollama-direct",
+            model="mystery-3b",
+            context_window=0,
+        ).context_window
+        == 0
+    )
+    assert (
+        build_spec(
+            agent="claude",
+            provider="ollama-direct",
+            model="mystery-3b",
+            context_window=500_000,
+        ).context_window
+        == 500_000
+    )
+    assert (
+        build_spec(
+            agent="claude", provider="ollama-direct", model="mystery-3b"
+        ).context_window
+        is None
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #83: the explicit context_window axis — marker field + emission
+# precedence (explicit wins; 0 suppresses even a catalog hit; without an
+# explicit value every byte is unchanged).
+# --------------------------------------------------------------------------- #
+
+
+def _windowed_spec(model: str, window: int | None, agent: str = "claude"):
+    return build_spec(
+        agent=agent,
+        provider="ollama-direct",
+        model=model,
+        context_window=window,
+    )
+
+
+@pytest.mark.unit
+def test_marker_records_ctx_only_for_an_explicit_window():
+    """``ctx=`` appears ONLY for an explicit answer — and it rides LAST in the
+    marker so every existing marker's bytes (and all prefix-matching code)
+    are untouched."""
+    marker = _marker(_windowed_spec("mystery-3b", 500_000))
+    assert marker.endswith("ctx=500000)")
+
+    literal = _marker(_windowed_spec("mystery-3b", None))
+    assert "ctx=" not in literal
+
+    zero = _marker(_windowed_spec("glm-5.3", 0))
+    assert "ctx=0)" in zero  # an explicit suppression is recorded too
+
+    plain = _marker(_windowed_spec("glm-5.3", None))
+    assert "ctx=" not in plain  # catalog-known: today's bytes, unchanged
+
+
+@pytest.mark.unit
+def test_render_without_an_explicit_window_is_byte_identical_to_catalog():
+    """The golden rule from #82, restated for #83: a spec with no explicit
+    window renders EXACTLY today's body — no SKIP-path churn for any
+    already-installed wrapper."""
+    plain = build_spec(agent="claude", provider="ollama-direct", model="glm-5.3")
+    ctx_none = build_spec(
+        agent="claude", provider="ollama-direct", model="glm-5.3", context_window=None
+    )
+    assert render_script(plain, _LITERAL_TOKEN) == render_script(
+        ctx_none, _LITERAL_TOKEN
+    )
+
+
+@pytest.mark.unit
+def test_render_explicit_window_wins_over_the_catalog():
+    """An explicit answer overrides what the catalog would derive — in BOTH
+    channels (the export AND the --settings payload; one dict feeds both)."""
+    body = render_script(_windowed_spec("glm-5.3", 500_000), _LITERAL_TOKEN)
+    assert "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='500000'" in body
+    assert _settings_payload(body)["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "500000"
+
+
+@pytest.mark.unit
+def test_render_ctx_zero_suppresses_a_catalog_declaration():
+    """``0`` means the user chose 'no declaration' — the catalog's 1M must
+    NOT leak into the session."""
+    body = render_script(_windowed_spec("glm-5.3", 0), _LITERAL_TOKEN)
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in body
+
+
+@pytest.mark.unit
+def test_render_explicit_window_for_an_unknown_model():
+    """The whole point of #83: a model the catalog has never heard of gets a
+    declaration when — and only when — the user supplied one."""
+    body = render_script(_windowed_spec("mystery-3b", 1_000_000), _LITERAL_TOKEN)
+    assert "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'" in body
+
+
+@pytest.mark.unit
+def test_command_shape_honors_explicit_context_window():
+    """The OLLAMA_LAUNCH --settings payload follows the same precedence."""
+    from dataclasses import replace
+
+    preset_spec = spec_from_preset(
+        get_preset("glm-ollama"), model_override="mystery-3b"
+    )
+    spec = replace(preset_spec, context_window=2_000_000)
+    body = render_script(spec, "")
+    assert _settings_payload(body)["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == (
+        "2000000"
+    )
+
+
+@pytest.mark.unit
+def test_openai_toml_body_honors_explicit_context_window():
+    """Codex's profile gets ``model_context_window`` from the explicit
+    answer too — and nothing for an explicit suppression."""
+    spec = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery-codex",
+        context_window=2_000_000,
+    )
+    assert "model_context_window = 2000000" in openai_toml_body(spec)
+
+    suppressed = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="mystery-codex",
+        context_window=0,
+    )
+    assert "model_context_window" not in openai_toml_body(suppressed)
+
+
+# --------------------------------------------------------------------------- #
+# spec_from_installed — the recorded context window (issue #83)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_spec_from_installed_honors_a_recorded_ctx(tmp_path):
+    """A wrapper whose marker records ctx= must come back with that explicit
+    window — not a re-derivation: switch --from-wrapper, the chipset, and
+    edit-token all consume this reconstruction."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery",
+        context_window=750_000,
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+
+    recovered = spec_from_installed(paths, "mystery")
+    assert recovered is not None
+    assert recovered.context_window == 750_000
+
+
+@pytest.mark.integration
+def test_reinstalling_a_recovered_ctx_spec_is_byte_identical(tmp_path):
+    """The round-trip rule: install → reconstruct → re-render must reproduce
+    the same bytes (ctx= included) — reinstall's `no changes` SKIP path
+    depends on it."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery",
+        context_window=750_000,
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+    before = script_text(paths, "mystery")
+
+    recovered = spec_from_installed(paths, "mystery")
+    assert recovered is not None
+    assert render_script(recovered, _LITERAL_TOKEN) == before
+
+
+@pytest.mark.integration
+def test_spec_from_installed_keeps_no_ctx_when_the_marker_has_none(tmp_path):
+    """MIGRATION: a marker written before the ctx field existed reconstructs
+    with context_window=None — the catalog derivation stands, exactly the
+    pre-#83 behaviour. Emulated by stripping the field from a freshly
+    rendered marker."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery",
+        context_window=750_000,
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+    script = paths.script_for("mystery")
+    body = script.read_text(encoding="utf-8")
+    legacy_body = body.replace(", ctx=750000", "")
+    assert legacy_body != body  # sanity: the field was actually there
+    script.write_text(legacy_body, encoding="utf-8")
+
+    recovered = spec_from_installed(paths, "mystery")
+    assert recovered is not None
+    assert recovered.context_window is None
+
+
+@pytest.mark.integration
+def test_spec_from_installed_returns_none_on_garbage_ctx(tmp_path):
+    """`ctx=abc` (unparseable) fails CLOSED — None, the same answer as any
+    other unrecognised marker value, never a silently-windowless spec that
+    looks healthy."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery",
+        context_window=750_000,
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+    script = paths.script_for("mystery")
+    script.write_text(
+        script.read_text(encoding="utf-8").replace("ctx=750000", "ctx=abc"),
+        encoding="utf-8",
+    )
+
+    assert spec_from_installed(paths, "mystery") is None
+
+
+@pytest.mark.integration
+def test_spec_from_installed_returns_none_on_a_negative_ctx(tmp_path):
+    """`ctx=-5` parses as an int but fails build_spec's range check — the
+    same fail-closed None."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery",
+        context_window=750_000,
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+    script = paths.script_for("mystery")
+    script.write_text(
+        script.read_text(encoding="utf-8").replace("ctx=750000", "ctx=-5"),
+        encoding="utf-8",
+    )
+
+    assert spec_from_installed(paths, "mystery") is None
+
+
+@pytest.mark.integration
+def test_add_launch_shape_unknown_model_prompts_and_declares(tmp_path):
+    """Review round 3 (PR #84): single-model shapes (OLLAMA_LAUNCH) emit a
+    window declaration from spec.model — so the one-time question must
+    cover them too, never silently skip."""
+    from unittest import mock
+
+    from codehelper.services.state import context_window
+
+    answers = iter(["750000"])
+
+    def _select(_items, *, prompt="", **_kwargs):
+        assert str(prompt).startswith("Context window for launch-mystery")
+        return next(answers)
+
+    with mock.patch("codehelper.cli.menu.select_from_menu", _select):
+        assert (
+            main(
+                [
+                    "add",
+                    "glm-ollama",
+                    "--model",
+                    "launch-mystery",
+                    "--alias",
+                    "launch-mystery",
+                ]
+            )
+            == 0
+        )
+    body = (
+        Paths.from_home(tmp_path)
+        .script_for("launch-mystery")
+        .read_text(encoding="utf-8")
+    )
+    assert "ctx=750000" in body
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" in body
+    assert context_window(Paths.from_home(tmp_path), "launch-mystery") == 750_000
+
+
+@pytest.mark.integration
+def test_add_toml_shape_unknown_model_prompts_and_declares(tmp_path):
+    """Review round 3 (PR #84): the codex OPENAI_TOML shape also emits the
+    window from spec.model — the question must cover it."""
+    from unittest import mock
+
+    from codehelper.services.state import context_window
+
+    with mock.patch("codehelper.cli.menu.select_from_menu", lambda _items, **_kw: "0"):
+        assert (
+            main(
+                [
+                    "add",
+                    "--agent",
+                    "codex",
+                    "--provider",
+                    "ollama-direct",
+                    "--model",
+                    "toml-mystery",
+                    "--alias",
+                    "toml-mystery",
+                ]
+            )
+            == 0
+        )
+    body = (
+        Paths.from_home(tmp_path).script_for("toml-mystery").read_text(encoding="utf-8")
+    )
+    assert "ctx=0" in body  # explicit "no declaration" — recorded, not skipped
+    assert "model_context_window" not in body
+    assert context_window(Paths.from_home(tmp_path), "toml-mystery") == 0
+
+
+@pytest.mark.unit
+def test_window_models_is_the_single_source_for_every_shape():
+    """The invariant that closes the three-round drift: the question set
+    (spec.window_models) IS the renderer set — pinned per shape."""
+    from codehelper.services.render import _declared_window
+    from codehelper.services.spec import TierModels
+
+    env_spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="m",
+        subagent_model="sub",
+    )
+    assert env_spec.window_models == ["m", "m", "m", "sub"]
+
+    launch_spec = build_spec(agent="codex", provider="ollama-direct", model="m")
+    assert launch_spec.window_models == ["m"]
+
+    # And the renderer reads THAT set: a mixed set suppresses, a uniform
+    # one declares — through the same property the question asks about.
+    mixed = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        tier_models=TierModels(haiku="mystery-3b", sonnet="glm-5.3", opus="glm-5.3"),
+    )
+    assert _declared_window(mixed) is None
+
+    # Distinguishing case: the model is catalog-known but the subagent is
+    # not. window_models includes the subagent → no declaration; a
+    # spec.model-only derivation would wrongly declare 1M.
+    sub = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="glm-5.3",
+        subagent_model="mystery-sub",
+    )
+    assert sub.window_models == ["glm-5.3", "glm-5.3", "glm-5.3", "mystery-sub"]
+    assert _declared_window(sub) is None
