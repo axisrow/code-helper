@@ -141,10 +141,16 @@ def resolve_default_patch(agent: Agent, provider: Provider, model: str) -> Defau
             f"via model.with_base_url(provider, url) before resolve_default_patch"
         )
 
-    if provider.wire_api not in ("responses", "chat"):
+    # Same invariant as model._validate_provider (issue #74): "responses" is
+    # the ONLY wire_api a Codex config can carry — Codex hard-rejects "chat"
+    # at config deserialization (its WireApi enum has a single Responses
+    # variant, openai/codex#7782). set-default must refuse here rather than
+    # patch config.toml into a state Codex refuses to load.
+    if provider.wire_api != "responses":
         raise CodeHelperError(
             f"provider {provider.name!r} declares openai-toml but has invalid "
-            f"wire_api {provider.wire_api!r} (must be 'responses' or 'chat')"
+            f"wire_api {provider.wire_api!r} (must be 'responses' — Codex "
+            f"removed 'chat', see openai/codex#7782)"
         )
 
     if provider.name in CODEX_RESERVED_PROVIDER_IDS:

@@ -313,7 +313,12 @@ class Provider:
     model_list_api: ModelListAPI = ModelListAPI.NONE
     #: Only when the listing lives somewhere other than ``base_url``.
     model_list_url: str = ""
-    #: For :attr:`ConfigShape.OPENAI_TOML`: ``"responses"`` or ``"chat"``.
+    #: For :attr:`ConfigShape.OPENAI_TOML`. ``"responses"`` is the ONLY value
+    #: a generated profile can carry: Codex hard-rejects ``"chat"`` at config
+    #: deserialization (its ``WireApi`` enum has a single variant —
+    #: openai/codex#7782), so a ``chat`` profile is a wrapper that dies before
+    #: any request. Enforced by ``_validate_provider`` at import time — an
+    #: invariant, not a convention.
     wire_api: str = ""
     #: This provider is the agent's NATIVE backend: "switching to it" means
     #: REMOVING every managed key from the target config, restoring whatever
@@ -332,6 +337,19 @@ class Provider:
     #: reader of this field branches on ``provider.env_reset``, never on
     #: ``provider.name == "anthropic"``.
     env_reset: bool = False
+    #: This provider is registered but currently unusable — NO shape it can
+    #: honour with its real endpoint, so ``shapes`` is deliberately empty and
+    #: every pairing resolves to "no common configuration mechanism". Declared
+    #: data (mirror of ``env_reset``), never a name check: the only reader is
+    #: ``_validate_provider``, which permits empty ``shapes`` solely when this
+    #: flag is set — an accidental shapeless entry stays an import error.
+    #: Today's one case is ``gemini`` (#74): Google's OpenAI-compat surface is
+    #: chat-completions only while Codex accepts ``wire_api="responses"``
+    #: alone, and no Anthropic-compatible surface exists at all — so the
+    #: direct pairing is impossible until Google ships ``/responses``. The
+    #: entry keeps its endpoint/auth/model-list fields so unsuspending is one
+    #: commit: restore the shape + its ``wire_api`` and drop this flag.
+    suspended: bool = False
     #: Fallback model names offered when :func:`~codehelper.services.
     #: models_api.list_models` returns none — either because the provider
     #: structurally cannot publish a list (``model_list_api is NONE``, e.g.
@@ -500,11 +518,31 @@ PROVIDERS: tuple[Provider, ...] = (
     ),
     Provider(
         name="gemini",
-        # Gemini's documented compatibility surface is OpenAI chat
-        # completions only.  It does not expose Claude's Anthropic Messages
-        # protocol, so claude x gemini must remain incompatible by the normal
-        # shape intersection rather than a provider-name special case.
-        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        # SUSPENDED (issue #74): the direct pairing is impossible in both
+        # directions, so the entry declares NO shapes — every `add` cell
+        # resolves to "no common configuration mechanism" instead of
+        # installing a wrapper that cannot work:
+        #   - Google's OpenAI-compat surface
+        #     (https://generativelanguage.googleapis.com/v1beta/openai/) is
+        #     chat-completions only — `/responses` 404s (confirmed by Google
+        #     on the developer forum, still true as of 2026-08) — while Codex
+        #     hard-rejects `wire_api="chat"` at config load (its WireApi enum
+        #     has a single Responses variant; openai/codex#7782). Both values
+        #     this profile could carry are dead.
+        #   - Google exposes no Anthropic-compatible /v1/messages, so
+        #     claude x gemini has no shape either (and never did).
+        # The working path for Google models is a translating proxy: the
+        # `gemini-litellm` preset points claude at a LiteLLM instance
+        # (preset-supplied base_url, `--base-url` overrides), and
+        # `codex × litellm` rides the same proxy's /v1/responses.
+        # UNSUSPENDING (when Google actually serves /v1beta/openai/responses
+        # — verify with curl, not rumors): set
+        # `shapes=frozenset({ConfigShape.OPENAI_TOML})` and drop
+        # `suspended=True`. Everything below is kept exactly as the un
+        # suspended entry needs it — endpoint fields, credential, discovery,
+        # and the wire_api the restored profile will carry.
+        shapes=frozenset(),
+        suspended=True,
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
         # The stored base_url IS the complete OpenAI-compatible root — the
         # renderer must not append /v1/ to it (that would 404). See the field
@@ -513,8 +551,8 @@ PROVIDERS: tuple[Provider, ...] = (
         auth="secret",
         token_env_var="GEMINI_API_KEY",
         model_list_api=ModelListAPI.OPENAI_V1,
-        wire_api="chat",
-        description="Google Gemini (OpenAI-compatible)",
+        wire_api="responses",
+        description="Google Gemini (suspended — needs a proxy, see #74)",
     ),
     Provider(
         name="deepseek",
@@ -597,8 +635,17 @@ def _validate_provider(provider: Provider) -> None:
     """
     if not _BINARY_RE.match(provider.name):
         raise CodeHelperError(f"invalid provider name in registry: {provider.name!r}")
-    if not provider.shapes:
-        raise CodeHelperError(f"provider {provider.name!r} declares no config shapes")
+    # A shapeless provider pairs with nothing, so it is an authoring mistake —
+    # UNLESS it is declared suspended (#74): a documented endpoint whose real
+    # surfaces currently match no shape (gemini: chat-only compat while Codex
+    # accepts responses alone) stays registered and visible, honestly inert.
+    # The flag is the proof the emptiness is deliberate; an accidental
+    # shapeless entry still fails here at import time.
+    if not provider.shapes and not provider.suspended:
+        raise CodeHelperError(
+            f"provider {provider.name!r} declares no config shapes "
+            f"(suspended=True is required for a deliberately shapeless entry)"
+        )
     if provider.auth not in ("none", "literal", "secret"):
         raise CodeHelperError(
             f"provider {provider.name!r} has invalid auth {provider.auth!r}"
@@ -608,16 +655,17 @@ def _validate_provider(provider: Provider) -> None:
     # unrecognised value renders a profile Codex rejects at runtime rather
     # than a registry error at import time. The whole selling point of the
     # shape is "a second OpenAI-compatible provider is just a PROVIDERS
-    # entry"; catching a missing wire_api here, not at `codex` runtime, is
-    # what keeps that promise honest.
-    if ConfigShape.OPENAI_TOML in provider.shapes and provider.wire_api not in (
-        "responses",
-        "chat",
-    ):
+    # entry"; catching a bad wire_api here, not at `codex` runtime, is what
+    # keeps that promise honest. And "responses" is the ONLY value a profile
+    # can carry: Codex's WireApi enum has a single variant and hard-rejects
+    # "chat" at config deserialization (openai/codex#7782) — a chat profile
+    # is a wrapper that dies before any request, so it is an import-time
+    # error, not a runtime one (issue #74).
+    if ConfigShape.OPENAI_TOML in provider.shapes and provider.wire_api != "responses":
         raise CodeHelperError(
             f"provider {provider.name!r} declares openai-toml but has "
-            f"invalid wire_api {provider.wire_api!r} (must be 'responses' "
-            f"or 'chat')"
+            f"invalid wire_api {provider.wire_api!r} (must be 'responses' — "
+            f"Codex removed 'chat', see openai/codex#7782)"
         )
     # `export {token_env_var}=...` interpolates this name unquoted, left of
     # `=`, in the OPENAI_TOML wrapper for a secret provider — see

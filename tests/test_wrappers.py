@@ -16,6 +16,7 @@ import pytest
 
 from codehelper.errors import CodeHelperError
 from codehelper.services.model import (
+    BaseUrlPolicy,
     ConfigShape,
     ModelListAPI,
     Provider,
@@ -76,8 +77,35 @@ _SECRET_TOKEN = "00000000000000000000000000000000.aaaaaaaaaaaaaaaa"
 
 
 @pytest.mark.unit
-def test_registry_has_deepseek_ollama_glm_and_glm_ollama():
-    assert {w.name for w in WRAPPERS} == {"deepseek-ollama", "glm", "glm-ollama"}
+def test_registry_has_deepseek_ollama_glm_glm_ollama_and_gemini_litellm():
+    assert {w.name for w in WRAPPERS} == {
+        "deepseek-ollama",
+        "glm",
+        "glm-ollama",
+        "gemini-litellm",
+    }
+
+
+@pytest.mark.unit
+def test_gemini_litellm_preset_targets_the_proxy_with_its_default_url():
+    """Issue #86: Google serves no Anthropic-compatible endpoint, so the
+    preset points claude at a LiteLLM instance — whose address is REQUIRED
+    by the provider and therefore ships IN the preset (mirror of
+    deepseek-ollama's local ollama default). --base-url overrides it; the
+    wrapper itself stays a self-contained ANTHROPIC_ENV script."""
+    from codehelper.services.spec import spec_from_preset
+
+    spec = spec_from_preset(get_preset("gemini-litellm"))
+    assert spec.shape is ConfigShape.ANTHROPIC_ENV
+    assert spec.model == "gemini-3.7-flash"
+    assert spec.provider.base_url == "https://litellm.78.47.183.125.sslip.io"
+    assert spec.provider.base_url_policy == BaseUrlPolicy.REQUIRED
+
+    # The override wins over the preset's curated address.
+    overridden = spec_from_preset(
+        get_preset("gemini-litellm"), base_url_override="https://mine.invalid"
+    )
+    assert overridden.provider.base_url == "https://mine.invalid"
 
 
 @pytest.mark.unit
@@ -1326,26 +1354,68 @@ def test_openai_toml_body_for_non_ollama_provider_pins_extension_point():
 
 
 @pytest.mark.unit
-def test_openai_toml_body_gemini_keeps_full_openai_root():
-    """Gemini's base_url IS the complete OpenAI root — /v1/ must NOT be appended.
+def test_openai_toml_body_openai_root_provider_keeps_full_root():
+    """A base_url that IS the complete OpenAI root gets NO /v1/ appended.
 
     openai_base_url would otherwise rewrite
-    https://generativelanguage.googleapis.com/v1beta/openai/ to a nonexistent
-    .../openai/v1/ and every Codex request would 404. The provider declares
-    base_url_is_openai_root=True (data, not a name check) and the renderer
-    honours it.
+    https://generativelanguage.googleapis.com/v1beta/openai/ (Gemini's real
+    documented endpoint) to a nonexistent .../openai/v1/ and every Codex
+    request would 404. The provider declares base_url_is_openai_root=True
+    (data, not a name check) and the renderer honours it.
+
+    Built on an out-of-registry provider: gemini itself is suspended (#74)
+    and can no longer back a build_spec call — but the renderer feature is
+    not gemini's, it is any provider's with the flag set.
     """
-    spec = build_spec(
-        agent="codex", provider="gemini", model="gemini-2.5-pro", alias="gem"
+    provider = Provider(
+        name="openai-root",
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        base_url_is_openai_root=True,
+        auth="secret",
+        token_env_var="ROOT_API_KEY",
+        model_list_api=ModelListAPI.OPENAI_V1,
+        wire_api="responses",
     )
+    spec = build_spec(agent="codex", provider=provider, model="gem-2.5", alias="gem")
     body = openai_toml_body(spec)
-    assert 'model_provider = "gemini"' in body
-    assert "[model_providers.gemini]" in body
+    assert 'model_provider = "openai-root"' in body
+    assert "[model_providers.openai-root]" in body
     assert (
         'base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"' in body
     )
     assert "/v1beta/openai/v1/" not in body
-    assert 'wire_api = "chat"' in body
+    assert 'wire_api = "responses"' in body
+
+
+@pytest.mark.unit
+def test_no_registry_profile_ever_carries_the_dead_chat_wire_api():
+    """GOLDEN regression (issue #74): current Codex hard-rejects
+    `wire_api="chat"` at config deserialization (single-variant WireApi,
+    openai/codex#7782) — so NO generated profile may contain it, for ANY
+    OPENAI_TOML provider in the registry. This is the invariant the
+    import-time validation now enforces; the test proves it end-to-end
+    through the renderer, so a future provider that slips a `chat` past a
+    validation edit still fails here."""
+    from codehelper.services.model import PROVIDERS
+
+    toml_providers = [p for p in PROVIDERS if ConfigShape.OPENAI_TOML in p.shapes]
+    assert toml_providers, "no OPENAI_TOML providers — test lost its subject"
+    for provider in toml_providers:
+        # litellm is REQUIRED by base_url — the wire_api invariant does not
+        # depend on the address, so substitute the runtime value the normal
+        # add path would have supplied.
+        if provider.base_url_policy == BaseUrlPolicy.REQUIRED:
+            provider = with_base_url(provider, "http://h:4000")
+        spec = build_spec(
+            agent="codex",
+            provider=provider,
+            model="m",
+            alias=f"{provider.name.replace('-', '_')}_t",
+        )
+        body = openai_toml_body(spec)
+        assert 'wire_api = "chat"' not in body, provider.name
+        assert 'wire_api = "responses"' in body, provider.name
 
 
 @pytest.mark.unit

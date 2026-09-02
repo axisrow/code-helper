@@ -137,6 +137,9 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "deepseek-v4-pro": 1_000_000,
     "deepseek-v4-flash": 1_000_000,
     "deepseek-v4-flash-vision-exp": 1_000_000,
+    # Google's documented window for the gemini-litellm preset's model
+    # (ai.google.dev/gemini-api/docs/latest-model).
+    "gemini-3.7-flash": 1_000_000,
 }
 
 

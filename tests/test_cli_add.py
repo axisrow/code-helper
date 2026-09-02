@@ -142,6 +142,23 @@ def test_incompatible_pairing_is_refused(tmp_path, capsys):
 
 
 @pytest.mark.integration
+def test_suspended_gemini_refused_as_unknown_axes_not_a_broken_wrapper(
+    tmp_path, capsys
+):
+    """Issue #74: `codex × gemini` used to install a profile carrying
+    `wire_api="chat"`, which current Codex hard-rejects at config load. The
+    provider is now suspended, so the pairing must refuse through the NORMAL
+    incompatibility path — the provider is known (not "unknown provider"),
+    the mechanism is not (no common configuration)."""
+    assert (
+        main(["add", "--agent", "codex", "--provider", "gemini", "--model", "x"]) == 1
+    )
+    err = capsys.readouterr().err
+    assert "unknown provider" not in err
+    assert "no common configuration" in err
+
+
+@pytest.mark.integration
 def test_launch_only_agent_incompatible_with_zai(tmp_path, capsys):
     """A launch-only agent has no shape in common with a non-ollama provider,
     and the error's hint names `ollama` as what it DOES work with."""
@@ -208,6 +225,150 @@ def test_add_litellm_claude_with_base_url(tmp_path, monkeypatch):
     assert "export ANTHROPIC_BASE_URL='http://localhost:4000'" in body
     assert "/v1" not in body
     assert "export ANTHROPIC_AUTH_TOKEN='sk-test'" in body
+
+
+# --------------------------------------------------------------------------- #
+# gemini-litellm — the preset that carries its provider's REQUIRED base_url
+# (issue #86): Google serves no Anthropic-compatible endpoint, so the preset
+# ships its curated LiteLLM instance's address and --base-url retargets it.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_add_gemini_litellm_uses_the_preset_url(tmp_path, monkeypatch):
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
+    assert main(["add", "gemini-litellm", "--context-window", "none"]) == 0
+    body = _body(tmp_path, "gemini-litellm")
+    assert "export ANTHROPIC_BASE_URL='https://litellm.78.47.183.125.sslip.io'" in body
+    assert "gemini-3.7-flash" in body
+
+
+@pytest.mark.integration
+def test_add_gemini_litellm_base_url_overrides_the_preset(tmp_path, monkeypatch):
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
+    assert (
+        main(
+            [
+                "add",
+                "gemini-litellm",
+                "--base-url",
+                "https://mine.example.com",
+                "--context-window",
+                "none",
+            ]
+        )
+        == 0
+    )
+    assert "export ANTHROPIC_BASE_URL='https://mine.example.com'" in _body(
+        tmp_path, "gemini-litellm"
+    )
+
+
+@pytest.mark.integration
+def test_add_preset_base_url_never_injects_the_active_profile(tmp_path, monkeypatch):
+    """The implicit active-profile injection is for the provider's OWN default
+    endpoint only — the exact rule the constructor path already enforces
+    (see the guard at _handle_add). A preset retargeted with --base-url
+    points at a host the stored profile was never authorized for: it must
+    PROMPT, never silently embed the cached token of another host."""
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import set_active_selection
+
+    monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "litellm", "sk-cached-for-host-a", "work")
+    set_active_selection(paths, "litellm", "work")
+
+    # resolve_token's getpass_fn default is bound at def time, so the prompt
+    # is injected through the same seam the host-B test below uses.
+    real_resolve_token = secrets.resolve_token
+
+    def _resolve_with_fresh_prompt(**kwargs):
+        return real_resolve_token(
+            **kwargs, getpass_fn=lambda _p: "sk-typed-fresh-for-host-b"
+        )
+
+    monkeypatch.setattr(secrets, "resolve_token", _resolve_with_fresh_prompt)
+
+    assert (
+        main(
+            [
+                "add",
+                "gemini-litellm",
+                "--base-url",
+                "https://host-b.example",
+                "--context-window",
+                "none",
+            ]
+        )
+        == 0
+    )
+    body = _body(tmp_path, "gemini-litellm")
+    # The freshly typed token is what got installed — never the host-A cache.
+    assert "export ANTHROPIC_AUTH_TOKEN='sk-typed-fresh-for-host-b'" in body
+    assert "sk-cached-for-host-a" not in body
+
+
+@pytest.mark.integration
+def test_add_preset_base_url_gate_accepts_an_overridable_provider(
+    tmp_path, monkeypatch
+):
+    """The preset --base-url gate must be exactly as wide as the spec layer:
+    spec_from_preset/with_base_url honour any provider whose address the
+    caller may set (REQUIRED or OVERRIDABLE), so a hypothetical OVERRIDABLE
+    preset provider must not be refused with the constructor-form message.
+    Simulated by re-registering the litellm preset's provider as OVERRIDABLE
+    — no shipped provider uses that policy today, which is why the real
+    registry is untouched."""
+    from dataclasses import replace
+
+    import codehelper.cli.parser as parser_module
+    from codehelper.services.model import BaseUrlPolicy, get_provider
+
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        parser_module,
+        "get_provider",
+        lambda name: replace(
+            get_provider(name), base_url_policy=BaseUrlPolicy.OVERRIDABLE
+        ),
+    )
+    assert (
+        main(
+            [
+                "add",
+                "gemini-litellm",
+                "--base-url",
+                "https://overridable.example.com",
+                "--context-window",
+                "none",
+            ]
+        )
+        == 0
+    )
+    assert "export ANTHROPIC_BASE_URL='https://overridable.example.com'" in _body(
+        tmp_path, "gemini-litellm"
+    )
+
+
+@pytest.mark.integration
+def test_add_preset_with_fixed_provider_still_rejects_base_url(tmp_path, capsys):
+    """The one-preset-override exception (issue #86) must not generalize:
+    a preset whose provider carries its own registry address still rejects
+    --base-url with the teaching message."""
+    assert main(["add", "glm", "--base-url", "http://x"]) == 1
+    assert "applies to the constructor form only" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_add_base_url_with_an_unknown_preset_name_fails_clean(tmp_path, capsys):
+    """The override exception's lookup is defensive: a name that is not a
+    preset at all must fail with a domain error (either the flag message or
+    the unknown-wrapper hint) — never a crash, never a silent accept."""
+    code = main(["add", "nope", "--base-url", "http://x"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "applies to the constructor form only" in err or "unknown wrapper" in err
 
 
 @pytest.mark.integration
@@ -700,6 +861,17 @@ def test_list_providers(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "ollama-direct" in out and "zai" in out and "litellm" in out
     assert "deepseek" in out and "deepseek-openai" in out
+
+
+@pytest.mark.integration
+def test_list_providers_marks_the_suspended_entry(tmp_path, capsys):
+    """gemini stays registered and visible (issue #74) but pairs with nothing
+    BY DECISION — without the `(suspended)` tag its all-blank matrix column
+    reads as a bug."""
+    assert main(["list", "providers"]) == 0
+    out = capsys.readouterr().out
+    gemini_line = next(line for line in out.splitlines() if line.startswith("gemini"))
+    assert "(suspended)" in gemini_line
 
 
 @pytest.mark.integration
