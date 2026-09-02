@@ -25,6 +25,7 @@ from codehelper.services.model import (
 )
 from codehelper.services.paths import Paths
 from codehelper.services.render import (
+    _marker,
     anthropic_base_url,
     openai_toml_body,
     render_script,
@@ -2507,3 +2508,114 @@ def test_build_spec_accepts_zero_and_positive_context_windows():
         ).context_window
         is None
     )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #83: the explicit context_window axis — marker field + emission
+# precedence (explicit wins; 0 suppresses even a catalog hit; without an
+# explicit value every byte is unchanged).
+# --------------------------------------------------------------------------- #
+
+
+def _windowed_spec(model: str, window: int | None, agent: str = "claude"):
+    return build_spec(
+        agent=agent,
+        provider="ollama-direct",
+        model=model,
+        context_window=window,
+    )
+
+
+@pytest.mark.unit
+def test_marker_records_ctx_only_for_an_explicit_window():
+    """``ctx=`` appears ONLY for an explicit answer — and it rides LAST in the
+    marker so every existing marker's bytes (and all prefix-matching code)
+    are untouched."""
+    marker = _marker(_windowed_spec("mystery-3b", 500_000))
+    assert marker.endswith("ctx=500000)")
+
+    literal = _marker(_windowed_spec("mystery-3b", None))
+    assert "ctx=" not in literal
+
+    zero = _marker(_windowed_spec("glm-5.3", 0))
+    assert "ctx=0)" in zero  # an explicit suppression is recorded too
+
+    plain = _marker(_windowed_spec("glm-5.3", None))
+    assert "ctx=" not in plain  # catalog-known: today's bytes, unchanged
+
+
+@pytest.mark.unit
+def test_render_without_an_explicit_window_is_byte_identical_to_catalog():
+    """The golden rule from #82, restated for #83: a spec with no explicit
+    window renders EXACTLY today's body — no SKIP-path churn for any
+    already-installed wrapper."""
+    plain = build_spec(agent="claude", provider="ollama-direct", model="glm-5.3")
+    ctx_none = build_spec(
+        agent="claude", provider="ollama-direct", model="glm-5.3", context_window=None
+    )
+    assert render_script(plain, _LITERAL_TOKEN) == render_script(
+        ctx_none, _LITERAL_TOKEN
+    )
+
+
+@pytest.mark.unit
+def test_render_explicit_window_wins_over_the_catalog():
+    """An explicit answer overrides what the catalog would derive — in BOTH
+    channels (the export AND the --settings payload; one dict feeds both)."""
+    body = render_script(_windowed_spec("glm-5.3", 500_000), _LITERAL_TOKEN)
+    assert "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='500000'" in body
+    assert _settings_payload(body)["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "500000"
+
+
+@pytest.mark.unit
+def test_render_ctx_zero_suppresses_a_catalog_declaration():
+    """``0`` means the user chose 'no declaration' — the catalog's 1M must
+    NOT leak into the session."""
+    body = render_script(_windowed_spec("glm-5.3", 0), _LITERAL_TOKEN)
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in body
+
+
+@pytest.mark.unit
+def test_render_explicit_window_for_an_unknown_model():
+    """The whole point of #83: a model the catalog has never heard of gets a
+    declaration when — and only when — the user supplied one."""
+    body = render_script(_windowed_spec("mystery-3b", 1_000_000), _LITERAL_TOKEN)
+    assert "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='1000000'" in body
+
+
+@pytest.mark.unit
+def test_command_shape_honors_explicit_context_window():
+    """The OLLAMA_LAUNCH --settings payload follows the same precedence."""
+    from dataclasses import replace
+
+    preset_spec = spec_from_preset(
+        get_preset("glm-ollama"), model_override="mystery-3b"
+    )
+    spec = replace(preset_spec, context_window=2_000_000)
+    body = render_script(spec, "")
+    assert _settings_payload(body)["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == (
+        "2000000"
+    )
+
+
+@pytest.mark.unit
+def test_openai_toml_body_honors_explicit_context_window():
+    """Codex's profile gets ``model_context_window`` from the explicit
+    answer too — and nothing for an explicit suppression."""
+    spec = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery-codex",
+        context_window=2_000_000,
+    )
+    assert "model_context_window = 2000000" in openai_toml_body(spec)
+
+    suppressed = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="mystery-codex",
+        context_window=0,
+    )
+    assert "model_context_window" not in openai_toml_body(suppressed)
