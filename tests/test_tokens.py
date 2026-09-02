@@ -7,9 +7,12 @@ autouse ``_isolate_home`` fixture, like every other CLI test.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from codehelper.__main__ import main
+from codehelper.services.model import RETIRED_PROVIDER_NAMES
 from codehelper.services.paths import Paths
 from codehelper.services.secrets import mask_token, save_credential
 from codehelper.services.state import set_active_selection
@@ -84,6 +87,36 @@ def test_tokens_lists_every_profile_with_the_active_marker(tmp_path, capsys):
     assert "deepseek" in out
     # Exactly one active marker, even with three rows.
     assert out.count("← active") == 1
+
+
+@pytest.mark.integration
+def test_tokens_marks_a_legacy_keyed_profile_active(tmp_path, capsys):
+    """The active-profile lookup understands RETIRED provider names (a token
+    cached under the pre-rename key stays usable), so the viewer's marker
+    must too: an active selection naming the CURRENT provider still marks a
+    row stored under the legacy cache key — without this, the honest
+    "this profile is live" claim silently vanishes after a rename."""
+    paths = Paths.default()
+    legacy_key = next(
+        retired
+        for retired, current in RETIRED_PROVIDER_NAMES.items()
+        if current == "ollama-direct"
+    )
+    paths.credentials_file().parent.mkdir(parents=True, exist_ok=True)
+    paths.credentials_file().write_text(
+        json.dumps({legacy_key: {"default": _LONG_TOKEN}}), encoding="utf-8"
+    )
+    set_active_selection(paths, "ollama-direct", "default")
+
+    assert main(["tokens"]) == 0
+
+    out = capsys.readouterr().out
+    # The row renders under the provider's CURRENT name (the display, like
+    # the active lookup, thinks in current names), and it carries the marker.
+    marked = [line for line in out.splitlines() if "← active" in line]
+    assert len(marked) == 1
+    assert marked[0].startswith("ollama-direct")
+    assert _LONG_TOKEN not in out
 
 
 # --------------------------------------------------------------------------- #

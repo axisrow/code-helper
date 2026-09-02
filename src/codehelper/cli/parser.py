@@ -66,6 +66,7 @@ from codehelper.services.claude_settings import current_switch
 from codehelper.services.codex_default import restore_default
 from codehelper.services.model import (
     PROVIDERS,
+    RETIRED_PROVIDER_NAMES,
     BaseUrlPolicy,
     ConfigShape,
     get_agent,
@@ -221,6 +222,12 @@ def _token_view_rows(
     are ``(provider, profile, RAW token)`` — masking is the VIEW's job, the
     raw value is what ``--reveal`` and the toggle must show — and
     ``env_rows`` are ``(env_var, raw value or "")``.
+
+    Both sides of the active comparison are NORMALIZED to current provider
+    names first (``RETIRED_PROVIDER_NAMES``): ``valid_active_profile``
+    deliberately resolves a token still stored under a pre-rename cache key,
+    so the marker must survive that same rename — comparing raw keys would
+    drop ``← active`` from exactly the profile the lookup considers live.
     """
     active: tuple[str, str] | None = None
     selection = active_selection(paths)
@@ -228,14 +235,15 @@ def _token_view_rows(
         provider, _ = selection
         profile = valid_active_profile(paths, provider)
         if profile:
-            active = (provider, profile)
+            active = (RETIRED_PROVIDER_NAMES.get(provider, provider), profile)
 
     cache_rows: list[tuple[str, str, str]] = []
     creds = load_credentials(paths)
     for provider_name in sorted(creds):
         profiles = creds[provider_name]
+        row_name = RETIRED_PROVIDER_NAMES.get(provider_name, provider_name)
         for profile_name in sorted(profiles, key=lambda n: (n != DEFAULT_PROFILE, n)):
-            cache_rows.append((provider_name, profile_name, profiles[profile_name]))
+            cache_rows.append((row_name, profile_name, profiles[profile_name]))
 
     env_rows: list[tuple[str, str]] = []
     seen_env_vars: set[str] = set()
