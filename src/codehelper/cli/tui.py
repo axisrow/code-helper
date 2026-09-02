@@ -187,16 +187,23 @@ def _hint(
         digits = "1" if usable == 1 else f"1-{usable}"
         hint = f"Up/Down · {digits} · Enter select · Esc {exit_word} · Ctrl-C quit"
     elif chips:
+        # TWO lines — `menu` accepts exactly one "\n" in a hint and counts
+        # both rows into frame_lines, so the in-place redraw stays honest.
         # The editing keys are named here rather than left behind `?`: on the
         # main screen they are the only way to add or change a wrapper, and a
         # key nobody can see is a key nobody presses. `a` is split OUT of the
         # `e/d` cluster rather than folded into "edit" — `e` only rotates a
         # token (it dispatches to the same handler as `t`), so grouping `a`
-        # under "edit" mislabels what pressing it does. Kept short (`?` alone,
-        # not `? keys`) to stay well inside 80 columns — `_fit` would
-        # otherwise truncate the tail and silently eat the exit hint, which is
-        # exactly the bug a PTY run caught here.
-        hint = f"↑↓ row · ←→ chip · Enter apply · a add · e/t token · d delete · ? · Esc {exit_word}"
+        # under "edit" mislabels what pressing it does. Two lines are what
+        # lets every name stay whole: cramming `s settings` into one line
+        # forced `↵`/`d del`-style truncations and 80 columns was exactly the
+        # budget `_fit` truncates past (the bug a PTY run caught here). `p`
+        # is named too — bound in run()'s keys, pinned against
+        # `_translate_char`, never before hinted.
+        hint = (
+            f"↑↓ row · ←→ chip · Enter apply · a add · e/t token · d delete\n"
+            f"s settings · p profiles · ? · Esc {exit_word}"
+        )
     else:
         hint = f"Up/Down · Enter select · Esc {exit_word} · Ctrl-C quit"
     if has_token_key:
@@ -281,6 +288,7 @@ class TuiSession:
         "_chips",
         "_chip_index",
         "_chip_switch_tokens",
+        "_tokens_reveal",
     )
 
     def __init__(self, args: argparse.Namespace) -> None:
@@ -315,6 +323,10 @@ class TuiSession:
         #: `chip_switch_token` appears here. Filled once per iteration; the
         #: chip_is_applied predicate reads ONLY this on a redraw frame.
         self._chip_switch_tokens: dict[str, dict[str, str | None]] = {}
+        #: The Tokens screen's show/hide state. PER-VISIT: `_run_tokens_screen`
+        #: resets it to False on every entry, so a re-visit can never open
+        #: showing full credentials with no new action by the user.
+        self._tokens_reveal: bool = False
 
     # --- UI primitives ---------------------------------------------------
 
@@ -1174,6 +1186,7 @@ class TuiSession:
                         f"Proxy address: {status.display_restorable_url or '(none)'}",
                     ),
                     ("proxy-no-proxy", f"NO_PROXY: {status.no_proxy or '(none)'}"),
+                    ("tokens", "Tokens"),
                     ("debug", f"Debug: {'on' if debug else 'off'}"),
                     (
                         "dry-run",
@@ -1189,6 +1202,8 @@ class TuiSession:
                 self.args.debug = not debug
             elif choice == "dry-run":
                 self.args.dry_run = not getattr(self.args, "dry_run", False)
+            elif choice == "tokens":
+                self._run_tokens_screen()
             elif choice == "proxy-url":
                 entered = self._read_text("Proxy URL (e.g. http://127.0.0.1:8118): ")
                 if entered is None or not entered.strip():
@@ -1280,6 +1295,102 @@ class TuiSession:
         if choice == _BACK:
             return
         set_active_selection(paths, provider, choice)
+
+    def _run_tokens_screen(self) -> None:
+        """The read-only Tokens screen — the Settings screen's viewer twin of
+        the CLI's ``codehelper tokens``.
+
+        Lists every cached credential (``credentials.json``, provider ×
+        profile, active selection marked) plus one row per registry token
+        env var, masked by default via ``secrets.mask_token``. The ``s`` key
+        toggles reveal (``s`` is already in ``menu._PASSTHROUGH`` — see the
+        shipped-once ``w`` bug this project pins in test_tui.py); Enter on a
+        row does nothing on purpose: this screen edits nothing, rotation
+        lives on ``edit-token``/the ``t`` action, removal on ``remove``.
+
+        Rows are read ONCE per entry (a credential store the user is only
+        looking at does not change mid-screen), so the redraw loop does no
+        I/O — the toggle mutates ``self._tokens_reveal`` and lets the menu
+        redraw with re-formatted labels. The on_key handler MUST return
+        None: ``menu._dispatch_key`` turns a non-None return into a menu
+        selection, and a toggle is not a selection.
+
+        Reveal is PER-VISIT state, reset on every entry: a second visit must
+        never open showing full credentials with no new action by the user —
+        that is the accident the mask exists to prevent. The rows come from
+        ``parser._token_view_rows``, the same source the CLI command renders,
+        so the two views cannot drift (including the ``(nothing cached)``
+        row when only env vars exist).
+        """
+        from codehelper.cli.parser import _token_view_rows
+        from codehelper.services.paths import Paths
+
+        # Per-visit reset FIRST — before anything can render a frame.
+        self._tokens_reveal = False
+
+        paths = Paths.default()
+        rows, env_rows = _token_view_rows(paths)
+
+        while True:
+            reveal = self._tokens_reveal
+
+            items: list[object] = [
+                (
+                    f"{provider_name}/{profile_name}",
+                    f"{provider_name}/{profile_name}: {self._shown(token, reveal)}"
+                    + ("  ← active" if is_active else ""),
+                )
+                for provider_name, profile_name, token, is_active in rows
+            ]
+            if not rows:
+                # CLI parity: name the empty cache explicitly, so an
+                # env-vars-only screen does not read as "the store is empty".
+                items.append(("no-cache", "(nothing cached)"))
+            items += [
+                (
+                    f"env/{env_var}",
+                    f"{env_var}: "
+                    + (self._shown(value, reveal) if value else "not set"),
+                )
+                for env_var, value in env_rows
+            ]
+            items += [
+                ("toggle-reveal", f"Reveal values: {'on' if reveal else 'off'}"),
+                (_BACK, "Back"),
+            ]
+            keys: dict[str, Callable[[str], object]] = {
+                "s": lambda _value: self._toggle_tokens_reveal()
+            }
+            choice = self._pick(
+                items,
+                "Stored tokens (s: show/hide, Enter: back):",
+                on_key=keys,
+                numbered=False,
+            )
+            if choice == _BACK:
+                return
+            if choice == "toggle-reveal":
+                # Two ways to the same toggle, like the Settings screen's
+                # Debug/Dry-run rows: the `s` key or Enter on the row itself.
+                self._toggle_tokens_reveal()
+                continue
+            # Enter on a token row is a no-op — this screen is a viewer.
+            # The loop redraws unchanged.
+
+    @staticmethod
+    def _shown(value: str, reveal: bool) -> str:
+        """The screen's current rendering of one token value — the shared
+        ``secrets.render_token``, so this view and the CLI command cannot
+        drift on how a value is displayed."""
+        from codehelper.services.secrets import render_token
+
+        return render_token(value, reveal)
+
+    def _toggle_tokens_reveal(self) -> None:
+        """Flip the Tokens screen's show/hide state; returns None so
+        ``menu._dispatch_key`` treats ``s`` as state mutation, not selection.
+        """
+        self._tokens_reveal = not self._tokens_reveal
 
     # --- active-label subsystem -----------------------------------------
 
@@ -1829,7 +1940,7 @@ class TuiSession:
 
         print("a add (agent row: scoped to it) · t/e token · d delete")
         print("+ add agent: new CLI integration · + add wrapper: any agent")
-        print("p profiles · s settings (proxy on/off, address, NO_PROXY)")
+        print("p profiles · s settings (proxy, stored tokens)")
         print("←→ + Enter on the + add chip: same as a")
         print("Up/Down row · Left/Right chip · Enter apply · Esc quit · Ctrl-C quit")
         press_any_key("Press any key to continue...")

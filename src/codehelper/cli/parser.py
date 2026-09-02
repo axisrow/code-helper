@@ -89,7 +89,9 @@ from codehelper.services.secrets import (
     credential_for,
     invalidate_cached_credential,
     profile_names,
+    profile_rows,
     rename_profile,
+    render_token,
     token_for_discovery,
     valid_active_profile,
 )
@@ -200,6 +202,96 @@ def _handle_list(args: argparse.Namespace) -> int:
             print(f"Active profile: {provider}/{profile}")
 
     list_wrappers(paths)
+    return 0
+
+
+def _token_view_rows(
+    paths: Paths,
+) -> tuple[list[tuple[str, str, str, bool]], list[tuple[str, str]]]:
+    """Gather the tokens-viewer's rows — the ONE source for both views.
+
+    Shared by ``_handle_tokens`` (CLI) and the TUI's Tokens screen so the two
+    renderings of the same store cannot drift. The cache rows come from
+    :func:`secrets.profile_rows` — the runtime's OWN profile resolution
+    (canonical names, rename-duplicate collapse, the one active marker) — so
+    this layer derives nothing: it only adds the env section, because env
+    beats the cache in :func:`secrets.resolve_token`'s precedence and "which
+    key is live" is a question about BOTH stores. Two providers may share one
+    env variable (deepseek / deepseek-openai); the row is about the VARIABLE,
+    so it appears once.
+
+    Returns ``(cache_rows, env_rows)`` where ``cache_rows`` are
+    ``(provider, profile, RAW token, is_active)`` — masking is the VIEW's
+    job — and ``env_rows`` are ``(env_var, raw value or "")``.
+    """
+    cache_rows = profile_rows(paths)
+
+    env_rows: list[tuple[str, str]] = []
+    seen_env_vars: set[str] = set()
+    for provider in PROVIDERS:
+        env_var = provider.token_env_var
+        if not env_var or env_var in seen_env_vars:
+            continue
+        seen_env_vars.add(env_var)
+        env_rows.append((env_var, os.environ.get(env_var, "")))
+
+    return cache_rows, env_rows
+
+
+def _handle_tokens(args: argparse.Namespace) -> int:
+    """Show every stored credential, masked unless ``--reveal``.
+
+    The read-only answer to "which key is actually in this config?" — the
+    question ``list`` cannot answer (it shows wrappers, not credentials) and
+    reading ``credentials.json`` by hand shouldn't be. Two sections:
+
+    - the CACHE (``credentials.json``, ``{provider: {profile: token}}``),
+      one row per provider × profile, with the active selection marked;
+    - the ENVIRONMENT: every registry provider's ``token_env_var``, set or
+      not — because env beats the cache in :func:`secrets.resolve_token`'s
+      precedence, "which key is live" is a question about BOTH stores, and
+      the env half was exactly the half invisible until now.
+
+    Masked by default via :func:`secrets.mask_token` (head+tail readable,
+    middle gone). ``--reveal`` prints full values — an explicit user command
+    about the user's OWN local stores, the same values the generated wrapper
+    already carries on disk — with a stderr warning so a pasted transcript
+    can be scanned for the moment the secrets went by. Read-only: nothing is
+    written, and ``--dry-run`` would be a no-op flag on a command that never
+    writes. The rows come from :func:`_token_view_rows`, shared with the TUI.
+    """
+    paths = Paths.default()
+    reveal = getattr(args, "reveal", False)
+    if reveal:
+        print(
+            "tokens: revealing stored credentials — do not paste this output "
+            "into shared logs",
+            file=sys.stderr,
+        )
+
+    def shown(value: str) -> str:
+        return render_token(value, reveal)
+
+    cache_rows, env_rows = _token_view_rows(paths)
+
+    if not cache_rows and not any(value for _, value in env_rows):
+        print("no saved tokens")
+        return 0
+
+    print("provider   profile        token")
+    if cache_rows:
+        for provider_name, profile_name, token, is_active in cache_rows:
+            marker = "  ← active" if is_active else ""
+            print(f"{provider_name:10} {profile_name:14} {shown(token)}{marker}")
+    else:
+        print("(nothing cached)")
+    print()
+    print("environment")
+    for env_var, value in env_rows:
+        if value:
+            print(f"{env_var:18} set      {shown(value)}")
+        else:
+            print(f"{env_var:18} not set")
     return 0
 
 
@@ -1555,6 +1647,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="token profile to update (default: default)",
     )
     p_edit_token.set_defaults(func=_handle_edit_token)
+
+    p_tokens = subparsers.add_parser(
+        "tokens",
+        help="show stored tokens (credentials cache + token env vars), "
+        "masked by default",
+        parents=[sub_flags],
+    )
+    p_tokens.add_argument(
+        "--reveal",
+        action="store_true",
+        default=False,
+        help="print full token values instead of the head+tail mask",
+    )
+    p_tokens.set_defaults(func=_handle_tokens)
 
     p_remove = subparsers.add_parser(
         "remove",

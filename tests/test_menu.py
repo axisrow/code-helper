@@ -264,6 +264,40 @@ def test_select_from_menu_hint_extends_redraw_frame_by_two_lines(monkeypatch):
     assert "\x1b[6A" in joined
 
 
+@pytest.mark.unit
+def test_select_from_menu_two_line_hint_is_rendered():
+    lines = []
+    select_from_menu(
+        ["deepseek", "glm"],
+        hint="↑/↓ · Enter\ns settings · Esc back",
+        read_key=_fake_keys(["ENTER"]),
+        print_fn=lines.append,
+    )
+    assert any("↑/↓ · Enter" in line for line in lines)
+    assert any("s settings · Esc back" in line for line in lines)
+
+
+@pytest.mark.unit
+def test_select_from_menu_two_line_hint_extends_redraw_frame_by_three(monkeypatch):
+    # frame_lines = len(items) + 2 (heading + spacer) + 3 (spacer + 2 hint
+    # rows) = 7 for 2 items. Same creep risk as the one-line pin above — the
+    # second hint row must be counted, or the redraw erases one line too few.
+    joined = _run_menu(monkeypatch, ["DOWN", "ENTER"], hint="line one\nline two")
+    assert "\x1b[7A" in joined
+
+
+@pytest.mark.unit
+def test_select_from_menu_hint_rejects_more_than_two_lines():
+    for bad in ("a\n\nb", "a\nb\nc", "a\rb", "a\nb\n"):
+        with pytest.raises(ValueError):
+            select_from_menu(
+                ["deepseek", "glm"],
+                hint=bad,
+                read_key=_fake_keys(["ENTER"]),
+                print_fn=lambda _: None,
+            )
+
+
 # --- digit / home / end / page navigation --------------------------------
 
 

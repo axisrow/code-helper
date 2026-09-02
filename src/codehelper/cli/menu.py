@@ -532,6 +532,7 @@ class _MenuState:
         "width",
         "height",
         "hint_text",
+        "hint_rows",
         "frame_lines",
     )
 
@@ -546,6 +547,7 @@ class _MenuState:
         width,
         height,
         hint_text,
+        hint_rows,
         frame_lines,
     ) -> None:
         self.pairs = pairs
@@ -556,6 +558,7 @@ class _MenuState:
         self.width = width
         self.height = height
         self.hint_text = hint_text
+        self.hint_rows = hint_rows
         self.frame_lines = frame_lines
         self.index = 0
         self.first = True
@@ -596,7 +599,16 @@ def _build_menu_state(
     width = size.columns if size else 0
     height = size.lines if size else 0
     hint_text = hint() if callable(hint) else hint
-    frame_lines = len(pairs) + 2 + (2 if hint_text else 0)
+    hint_rows = 0
+    if hint_text:
+        # A hint is one line, or exactly two joined by a single "\n" (the
+        # main screen's chipset hint). More than that is a caller bug, not a
+        # rendering problem — refuse it the way Section refuses multi-line
+        # text, so the frame accounting below can never be lied to.
+        if "\r" in hint_text or hint_text.count("\n") > 1 or hint_text.endswith("\n"):
+            raise ValueError("hint must be one line, or two lines joined by '\\n'")
+        hint_rows = hint_text.count("\n") + 1
+    frame_lines = len(pairs) + 2 + (hint_rows + 1 if hint_rows else 0)
 
     return _MenuState(
         pairs=pairs,
@@ -607,6 +619,7 @@ def _build_menu_state(
         width=width,
         height=height,
         hint_text=hint_text,
+        hint_rows=hint_rows,
         frame_lines=frame_lines,
     )
 
@@ -620,7 +633,7 @@ def _viewport(state: _MenuState) -> tuple[int, list]:
     menus. ``state.frame_lines`` is updated as a side effect — the next
     redraw needs it to know how far up to move the cursor.
     """
-    fixed_rows = 2 + (2 if state.hint_text else 0)
+    fixed_rows = 2 + (state.hint_rows + 1 if state.hint_rows else 0)
     # Reserve two rows for viewport indicators only when clipping is
     # necessary, so indicators never push a frame below terminal height.
     capacity = max(1, state.height - fixed_rows)
@@ -738,8 +751,14 @@ def _render_frame(
     if state.redraw and first + len(visible) < len(state.pairs):
         print_fn(f" ↓ {len(state.pairs) - first - len(visible)} more")
     if state.hint_text:
-        fitted_hint = _fit(state.hint_text, width) if state.redraw else state.hint_text
-        print_fn(f"\n {fitted_hint}" if state.redraw else f" {fitted_hint}")
+        # One line, or two joined by "\n" (validated in _build_menu_state).
+        # Each line is its own print_fn (one physical row — the frame_lines
+        # contract), each _fit to the terminal width on a redraw; the blank
+        # row goes before the FIRST hint line only.
+        hint_lines = state.hint_text.split("\n")
+        for n, hint_line in enumerate(hint_lines):
+            fitted = _fit(hint_line, width) if state.redraw else hint_line
+            print_fn(f"\n {fitted}" if (state.redraw and n == 0) else f" {fitted}")
 
 
 def _dispatch_key(
@@ -843,10 +862,13 @@ def select_from_menu(
             ``lambda: _header()`` and the header tracks the change. A callable
             must return a single logical line with no ``\\n`` — the frame's line
             count must not depend on it (see ``frame_lines`` below).
-        hint: Optional key-hint line printed BELOW the list (e.g. "↑/↓ ·
-            Enter · Esc back"). Adds two lines to the erasable frame — see
-            ``frame_lines`` below. May be a callable; it is evaluated ONCE when
-            the menu starts (before ``frame_lines`` is computed), not per frame.
+        hint: Optional key-hint printed BELOW the list (e.g. "↑/↓ ·
+            Enter · Esc back"). ONE line, or exactly two joined by a single
+            ``\\n`` (the main screen's chipset hint) — anything else raises
+            ``ValueError``, so ``frame_lines`` can never be lied to. Adds
+            ``rows + 1`` lines to the erasable frame — see ``frame_lines``
+            below. May be a callable; it is evaluated ONCE when the menu
+            starts (before ``frame_lines`` is computed), not per frame.
         on_tab: Optional handler invoked on a ``"TAB"`` keypress, after which
             the menu simply redraws. The handler mutates external state; the
             frame is NOT rebuilt from it (only a callable ``prompt`` re-evaluates
