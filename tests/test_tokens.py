@@ -136,6 +136,38 @@ def test_tokens_marks_a_legacy_keyed_profile_active(tmp_path, capsys):
     assert marked[0].startswith("ollama-direct")
 
 
+@pytest.mark.integration
+def test_tokens_collapses_a_rename_duplicate_to_the_runtime_entry(tmp_path, capsys):
+    """The ROOT invariant the three review cycles converged on: the viewer
+    shows what the RUNTIME resolves, not a re-derivation of it. With both
+    the pre-rename and the current cache key on disk (a realistic upgrade
+    state), there is ONE (provider, profile) pair — rendered once, carrying
+    the token credential_for actually resolves (the canonical key), with at
+    most one active marker."""
+    paths = Paths.default()
+    paths.credentials_file().parent.mkdir(parents=True, exist_ok=True)
+    paths.credentials_file().write_text(
+        json.dumps(
+            {
+                "ollama": {"default": _LONG_TOKEN},
+                "ollama-direct": {"default": "sk-canonical-value-123456"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    set_active_selection(paths, "ollama-direct", "default")
+
+    assert main(["tokens"]) == 0
+
+    out = capsys.readouterr().out
+    # One row for the pair — under the canonical name, carrying the token
+    # the runtime resolves (the canonical entry), never the legacy duplicate.
+    assert out.count("ollama-direct") == 1
+    assert _LONG_TOKEN not in out
+    assert "sk-c****3456" in out
+    assert out.count("← active") == 1
+
+
 # --------------------------------------------------------------------------- #
 # The environment section — env beats the cache in resolve_token's
 # precedence, so "which key is live" is a question about BOTH stores.

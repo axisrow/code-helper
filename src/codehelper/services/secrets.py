@@ -79,6 +79,7 @@ __all__ = [
     "env_cache_conflict",
     "load_credentials",
     "mask_token",
+    "profile_rows",
     "render_token",
     "profile_names",
     "seed_default_profile",
@@ -139,6 +140,39 @@ def render_token(value: str, reveal: bool) -> str:
     explicit raw path — see :func:`mask_token` for the masked default.
     """
     return value if reveal else mask_token(value)
+
+
+def profile_rows(paths: Paths) -> list[tuple[str, str, str, bool]]:
+    """Canonical viewer rows for the cached credentials.
+
+    ``(provider, profile, token, is_active)`` — derived through the SAME
+    resolvers the runtime uses: :func:`credential_for` for the token and
+    :func:`valid_active_profile` for the marker. This is the ROOT invariant
+    the token viewer's review cycles converged on: the display must show
+    what an install would actually resolve, never its own re-derivation.
+
+    Storage keys are canonicalized to current provider names (a pre-rename
+    key stays reachable), and a legacy/current duplicate pair collapses to
+    the single entry :func:`credential_for` resolves — the canonical key
+    when present — so a rename can never yield two rows, or two active
+    markers, for one ``(provider, profile)``. Order: provider alphabetical,
+    ``default`` profile first.
+    """
+    creds = load_credentials(paths)
+    groups: dict[tuple[str, str], None] = {}
+    for key, profiles in creds.items():
+        name = RETIRED_PROVIDER_NAMES.get(key, key)
+        for profile in profiles:
+            groups.setdefault((name, profile), None)
+    rows: list[tuple[str, str, str, bool]] = []
+    for name, profile in sorted(
+        groups, key=lambda g: (g[0], g[1] != DEFAULT_PROFILE, g[1])
+    ):
+        token = credential_for(paths, name, profile)
+        rows.append(
+            (name, profile, token, valid_active_profile(paths, name) == profile)
+        )
+    return rows
 
 
 @dataclass(frozen=True)

@@ -66,7 +66,6 @@ from codehelper.services.claude_settings import current_switch
 from codehelper.services.codex_default import restore_default
 from codehelper.services.model import (
     PROVIDERS,
-    RETIRED_PROVIDER_NAMES,
     BaseUrlPolicy,
     ConfigShape,
     get_agent,
@@ -89,8 +88,8 @@ from codehelper.services.secrets import (
     cache_freshly_typed_token,
     credential_for,
     invalidate_cached_credential,
-    load_credentials,
     profile_names,
+    profile_rows,
     rename_profile,
     render_token,
     token_for_discovery,
@@ -208,47 +207,24 @@ def _handle_list(args: argparse.Namespace) -> int:
 
 def _token_view_rows(
     paths: Paths,
-) -> tuple[tuple[str, str] | None, list[tuple[str, str, str]], list[tuple[str, str]]]:
+) -> tuple[list[tuple[str, str, str, bool]], list[tuple[str, str]]]:
     """Gather the tokens-viewer's rows — the ONE source for both views.
 
     Shared by ``_handle_tokens`` (CLI) and the TUI's Tokens screen so the two
-    renderings of the same store cannot drift: the sort order (``default``
-    first), the active-selection pair, and the env-var dedup (two providers
-    may share one variable — deepseek / deepseek-openai — and the row is
-    about the VARIABLE, so it appears once) are decided here, exactly once.
+    renderings of the same store cannot drift. The cache rows come from
+    :func:`secrets.profile_rows` — the runtime's OWN profile resolution
+    (canonical names, rename-duplicate collapse, the one active marker) — so
+    this layer derives nothing: it only adds the env section, because env
+    beats the cache in :func:`secrets.resolve_token`'s precedence and "which
+    key is live" is a question about BOTH stores. Two providers may share one
+    env variable (deepseek / deepseek-openai); the row is about the VARIABLE,
+    so it appears once.
 
-    Returns ``(active, cache_rows, env_rows)`` where ``active`` is the valid
-    stored selection as ``(provider, profile)`` or ``None``, ``cache_rows``
-    are ``(provider, profile, RAW token)`` — masking is the VIEW's job, the
-    raw value is what ``--reveal`` and the toggle must show — and
-    ``env_rows`` are ``(env_var, raw value or "")``.
-
-    Both sides of the active comparison are NORMALIZED to current provider
-    names first (``RETIRED_PROVIDER_NAMES``): ``valid_active_profile``
-    deliberately resolves a token still stored under a pre-rename cache key,
-    so the marker must survive that same rename — comparing raw keys would
-    drop ``← active`` from exactly the profile the lookup considers live.
+    Returns ``(cache_rows, env_rows)`` where ``cache_rows`` are
+    ``(provider, profile, RAW token, is_active)`` — masking is the VIEW's
+    job — and ``env_rows`` are ``(env_var, raw value or "")``.
     """
-    active: tuple[str, str] | None = None
-    selection = active_selection(paths)
-    if selection is not None:
-        provider, _ = selection
-        # Canonicalize BEFORE the lookup, not after: a pre-rename state.json
-        # names the RETIRED provider, and valid_active_profile only resolves
-        # storage names OF the provider it is given — fed "ollama" it would
-        # never find a profile cached under "ollama-direct".
-        provider = RETIRED_PROVIDER_NAMES.get(provider, provider)
-        profile = valid_active_profile(paths, provider)
-        if profile:
-            active = (provider, profile)
-
-    cache_rows: list[tuple[str, str, str]] = []
-    creds = load_credentials(paths)
-    for provider_name in sorted(creds):
-        profiles = creds[provider_name]
-        row_name = RETIRED_PROVIDER_NAMES.get(provider_name, provider_name)
-        for profile_name in sorted(profiles, key=lambda n: (n != DEFAULT_PROFILE, n)):
-            cache_rows.append((row_name, profile_name, profiles[profile_name]))
+    cache_rows = profile_rows(paths)
 
     env_rows: list[tuple[str, str]] = []
     seen_env_vars: set[str] = set()
@@ -259,7 +235,7 @@ def _token_view_rows(
         seen_env_vars.add(env_var)
         env_rows.append((env_var, os.environ.get(env_var, "")))
 
-    return active, cache_rows, env_rows
+    return cache_rows, env_rows
 
 
 def _handle_tokens(args: argparse.Namespace) -> int:
@@ -296,7 +272,7 @@ def _handle_tokens(args: argparse.Namespace) -> int:
     def shown(value: str) -> str:
         return render_token(value, reveal)
 
-    active, cache_rows, env_rows = _token_view_rows(paths)
+    cache_rows, env_rows = _token_view_rows(paths)
 
     if not cache_rows and not any(value for _, value in env_rows):
         print("no saved tokens")
@@ -304,8 +280,8 @@ def _handle_tokens(args: argparse.Namespace) -> int:
 
     print("provider   profile        token")
     if cache_rows:
-        for provider_name, profile_name, token in cache_rows:
-            marker = "  ← active" if active == (provider_name, profile_name) else ""
+        for provider_name, profile_name, token, is_active in cache_rows:
+            marker = "  ← active" if is_active else ""
             print(f"{provider_name:10} {profile_name:14} {shown(token)}{marker}")
     else:
         print("(nothing cached)")

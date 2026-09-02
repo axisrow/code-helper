@@ -1329,7 +1329,7 @@ class TuiSession:
         self._tokens_reveal = False
 
         paths = Paths.default()
-        active, rows, env_rows = _token_view_rows(paths)
+        rows, env_rows = _token_view_rows(paths)
 
         while True:
             reveal = self._tokens_reveal
@@ -1338,9 +1338,9 @@ class TuiSession:
                 (
                     f"{provider_name}/{profile_name}",
                     f"{provider_name}/{profile_name}: {self._shown(token, reveal)}"
-                    + ("  ← active" if active == (provider_name, profile_name) else ""),
+                    + ("  ← active" if is_active else ""),
                 )
-                for provider_name, profile_name, token in rows
+                for provider_name, profile_name, token, is_active in rows
             ]
             if not rows:
                 # CLI parity: name the empty cache explicitly, so an
