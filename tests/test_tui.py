@@ -1540,7 +1540,12 @@ def test_main_screen_hint_names_a_as_add_not_edit(monkeypatch):
     assert main(["tui"]) == 0
     assert "a add" in captured["hint"]
     assert "a/e/d" not in captured["hint"]
-    assert len(captured["hint"]) <= 80
+    # The hint is TWO lines (menu accepts exactly one "\n"), and the budget
+    # that matters is PER LINE: `_fit` truncates any line past the terminal
+    # width and eats the tail (the exit hint) — the bug a PTY run caught here.
+    hint_lines = captured["hint"].split("\n")
+    assert len(hint_lines) == 2
+    assert all(len(line) <= 80 for line in hint_lines)
 
 
 # --- the chipset frame ------------------------------------------------------

@@ -187,19 +187,23 @@ def _hint(
         digits = "1" if usable == 1 else f"1-{usable}"
         hint = f"Up/Down · {digits} · Enter select · Esc {exit_word} · Ctrl-C quit"
     elif chips:
+        # TWO lines — `menu` accepts exactly one "\n" in a hint and counts
+        # both rows into frame_lines, so the in-place redraw stays honest.
         # The editing keys are named here rather than left behind `?`: on the
         # main screen they are the only way to add or change a wrapper, and a
         # key nobody can see is a key nobody presses. `a` is split OUT of the
         # `e/d` cluster rather than folded into "edit" — `e` only rotates a
         # token (it dispatches to the same handler as `t`), so grouping `a`
-        # under "edit" mislabels what pressing it does. Kept short (`?` alone,
-        # not `? keys`) to stay inside 80 columns — `_fit` would otherwise
-        # truncate the tail and silently eat the exit hint, which is exactly
-        # the bug a PTY run caught here. Fitting `s settings` in forced the
-        # compactions: `e` is `t`'s alias (help names both), `d del` still
-        # says "delete", and `↵` is the same Enter the arrows family already
-        # uses — every key named here remains a real, reachable promise.
-        hint = f"↑↓ row · ←→ chip · ↵ apply · a add · t token · d del · s settings · ? · Esc {exit_word}"
+        # under "edit" mislabels what pressing it does. Two lines are what
+        # lets every name stay whole: cramming `s settings` into one line
+        # forced `↵`/`d del`-style truncations and 80 columns was exactly the
+        # budget `_fit` truncates past (the bug a PTY run caught here). `p`
+        # is named too — bound in run()'s keys, pinned against
+        # `_translate_char`, never before hinted.
+        hint = (
+            f"↑↓ row · ←→ chip · Enter apply · a add · e/t token · d delete\n"
+            f"s settings · p profiles · ? · Esc {exit_word}"
+        )
     else:
         hint = f"Up/Down · Enter select · Esc {exit_word} · Ctrl-C quit"
     if has_token_key:
