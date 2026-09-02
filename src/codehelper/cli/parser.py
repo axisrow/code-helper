@@ -466,7 +466,14 @@ def _add_spec_from_preset(req, paths, profile_name):
             f"try: codehelper add --agent {req.name} --provider ollama "
             f"--model <model>"
         ) from None
-    if profile_name is None:
+    if profile_name is None and req.base_url is None:
+        # The same implicit-injection rule the constructor path enforces: the
+        # stored active profile was authorized for the preset's OWN default
+        # endpoint (the address curated into the preset). A --base-url
+        # retargeting must not silently inherit that profile's cached token —
+        # it was saved for a DIFFERENT host — so the retargeted install
+        # prompts instead (explicit --profile stays trusted either way,
+        # issue #19's documented named-profile rule).
         profile_name = valid_active_profile(paths, preset.provider)
     return spec_from_preset(
         preset,
@@ -610,9 +617,10 @@ def _handle_add(args: argparse.Namespace | AddRequest) -> int:
     # endpoint: a caller-supplied --base-url names a host the stored active
     # profile was never authorized for, so the caller must opt in explicitly
     # with --profile (or an env token) there — never a silent persisted
-    # pointer. The constructor branch knows the provider immediately; the
-    # preset branch (no custom base-url possible) falls back inside
-    # _add_spec_from_preset.
+    # pointer. BOTH branches enforce this: the constructor here (it knows the
+    # provider immediately), and the preset branch inside
+    # _add_spec_from_preset — since issue #86 a preset CAN carry a custom
+    # base-url, so "no custom base-url possible" no longer holds for it.
     profile_name = req.profile
     if profile_name is None and req.provider and req.base_url is None:
         profile_name = valid_active_profile(paths, req.provider)
@@ -631,10 +639,9 @@ def _handle_add(args: argparse.Namespace | AddRequest) -> int:
         preset_takes_url = False
         if req.name:
             try:
-                preset_takes_url = (
-                    get_provider(get_preset(req.name).provider).base_url_policy
-                    is BaseUrlPolicy.REQUIRED
-                )
+                preset_takes_url = get_provider(
+                    get_preset(req.name).provider
+                ).base_url_policy in (BaseUrlPolicy.REQUIRED, BaseUrlPolicy.OVERRIDABLE)
             except CodeHelperError:
                 preset_takes_url = False
         if not preset_takes_url:
