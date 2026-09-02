@@ -193,10 +193,13 @@ def _hint(
         # `e/d` cluster rather than folded into "edit" — `e` only rotates a
         # token (it dispatches to the same handler as `t`), so grouping `a`
         # under "edit" mislabels what pressing it does. Kept short (`?` alone,
-        # not `? keys`) to stay well inside 80 columns — `_fit` would
-        # otherwise truncate the tail and silently eat the exit hint, which is
-        # exactly the bug a PTY run caught here.
-        hint = f"↑↓ row · ←→ chip · Enter apply · a add · e/t token · d delete · ? · Esc {exit_word}"
+        # not `? keys`) to stay inside 80 columns — `_fit` would otherwise
+        # truncate the tail and silently eat the exit hint, which is exactly
+        # the bug a PTY run caught here. Fitting `s settings` in forced the
+        # compactions: `e` is `t`'s alias (help names both), `d del` still
+        # says "delete", and `↵` is the same Enter the arrows family already
+        # uses — every key named here remains a real, reachable promise.
+        hint = f"↑↓ row · ←→ chip · ↵ apply · a add · t token · d del · s settings · ? · Esc {exit_word}"
     else:
         hint = f"Up/Down · Enter select · Esc {exit_word} · Ctrl-C quit"
     if has_token_key:
@@ -1949,7 +1952,7 @@ class TuiSession:
 
         print("a add (agent row: scoped to it) · t/e token · d delete")
         print("+ add agent: new CLI integration · + add wrapper: any agent")
-        print("p profiles · s settings (proxy on/off, address, NO_PROXY)")
+        print("p profiles · s settings (proxy, stored tokens)")
         print("←→ + Enter on the + add chip: same as a")
         print("Up/Down row · Left/Right chip · Enter apply · Esc quit · Ctrl-C quit")
         press_any_key("Press any key to continue...")
