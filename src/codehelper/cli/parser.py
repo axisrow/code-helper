@@ -88,6 +88,8 @@ from codehelper.services.secrets import (
     cache_freshly_typed_token,
     credential_for,
     invalidate_cached_credential,
+    load_credentials,
+    mask_token,
     profile_names,
     rename_profile,
     token_for_discovery,
@@ -200,6 +202,90 @@ def _handle_list(args: argparse.Namespace) -> int:
             print(f"Active profile: {provider}/{profile}")
 
     list_wrappers(paths)
+    return 0
+
+
+def _handle_tokens(args: argparse.Namespace) -> int:
+    """Show every stored credential, masked unless ``--reveal``.
+
+    The read-only answer to "which key is actually in this config?" — the
+    question ``list`` cannot answer (it shows wrappers, not credentials) and
+    reading ``credentials.json`` by hand shouldn't be. Two sections:
+
+    - the CACHE (``credentials.json``, ``{provider: {profile: token}}`` via
+      :func:`secrets.load_credentials`), one row per provider × profile, with
+      the active selection marked (same ``active_selection`` +
+      ``valid_active_profile`` pair ``_handle_list``'s header uses);
+    - the ENVIRONMENT: every registry provider's ``token_env_var``, set or
+      not — because env beats the cache in :func:`secrets.resolve_token`'s
+      precedence, "which key is live" is a question about BOTH stores, and
+      the env half was exactly the half invisible until now.
+
+    Masked by default via :func:`secrets.mask_token` (head+tail readable,
+    middle gone). ``--reveal`` prints full values — an explicit user command
+    about the user's OWN local stores, the same values the generated wrapper
+    already carries on disk — with a stderr warning so a pasted transcript
+    can be scanned for the moment the secrets went by. Read-only: nothing is
+    written, and ``--dry-run`` would be a no-op flag on a command that never
+    writes.
+    """
+    paths = Paths.default()
+    reveal = getattr(args, "reveal", False)
+    if reveal:
+        print(
+            "tokens: revealing stored credentials — do not paste this output "
+            "into shared logs",
+            file=sys.stderr,
+        )
+
+    def shown(value: str) -> str:
+        return value if reveal else mask_token(value)
+
+    active: tuple[str, str] | None = None
+    selection = active_selection(paths)
+    if selection is not None:
+        provider, _ = selection
+        profile = valid_active_profile(paths, provider)
+        if profile:
+            active = (provider, profile)
+
+    rows: list[tuple[str, str, str]] = []
+    creds = load_credentials(paths)
+    for provider_name in sorted(creds):
+        profiles = creds[provider_name]
+        for profile_name in sorted(profiles, key=lambda n: (n != DEFAULT_PROFILE, n)):
+            token = profiles[profile_name]
+            marker = "  ← active" if active == (provider_name, profile_name) else ""
+            rows.append((provider_name, profile_name, shown(token) + marker))
+
+    env_rows: list[tuple[str, str]] = []
+    seen_env_vars: set[str] = set()
+    for provider in PROVIDERS:
+        env_var = provider.token_env_var
+        if not env_var or env_var in seen_env_vars:
+            # Two providers may share one variable (deepseek / deepseek-openai)
+            # — the row is about the VARIABLE, so it is printed once.
+            continue
+        seen_env_vars.add(env_var)
+        env_rows.append((env_var, os.environ.get(env_var, "")))
+
+    if not rows and not any(value for _, value in env_rows):
+        print("no saved tokens")
+        return 0
+
+    print("provider   profile        token")
+    if rows:
+        for provider_name, profile_name, token in rows:
+            print(f"{provider_name:10} {profile_name:14} {token}")
+    else:
+        print("(nothing cached)")
+    print()
+    print("environment")
+    for env_var, value in env_rows:
+        if value:
+            print(f"{env_var:18} set      {shown(value)}")
+        else:
+            print(f"{env_var:18} not set")
     return 0
 
 
@@ -1555,6 +1641,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="token profile to update (default: default)",
     )
     p_edit_token.set_defaults(func=_handle_edit_token)
+
+    p_tokens = subparsers.add_parser(
+        "tokens",
+        help="show stored tokens (credentials cache + token env vars), "
+        "masked by default",
+        parents=[sub_flags],
+    )
+    p_tokens.add_argument(
+        "--reveal",
+        action="store_true",
+        default=False,
+        help="print full token values instead of the head+tail mask",
+    )
+    p_tokens.set_defaults(func=_handle_tokens)
 
     p_remove = subparsers.add_parser(
         "remove",

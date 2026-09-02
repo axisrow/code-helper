@@ -78,6 +78,7 @@ __all__ = [
     "resolve_token",
     "env_cache_conflict",
     "load_credentials",
+    "mask_token",
     "profile_names",
     "seed_default_profile",
     "rename_profile",
@@ -97,6 +98,25 @@ SOURCE_ENV = "env"
 SOURCE_CACHE = "file"
 SOURCE_PROMPT = "prompt"
 DEFAULT_PROFILE = "default"
+
+
+def mask_token(value: str) -> str:
+    """A display-safe form of a stored token: ``fe42****6309``.
+
+    The viewer's default mask (``codehelper tokens``, the TUI Tokens screen):
+    the head and tail stay readable so a user can tell WHICH key a store
+    holds — the whole reason the viewer exists — while everything between is
+    unrecoverable. Distinct from ``claude_settings.redact_credential`` (the
+    ``4...3`` diff-preview mask), which is contracted by tests and used by
+    both settings.json owners; that one answers "is this secret safe to
+    print", this one answers "is this the key I think it is".
+
+    A token of 8 characters or fewer is ALL asterisks: head+tail of a short
+    value would leave nothing hidden.
+    """
+    if len(value) <= 8:
+        return "*" * len(value)
+    return value[:4] + "****" + value[-4:]
 
 
 @dataclass(frozen=True)

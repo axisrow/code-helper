@@ -54,6 +54,8 @@ codehelper --dry-run add deepseek-ollama  # preview, write nothing
 codehelper add glm --profile work        # use a named token profile
 codehelper edit-token glm --profile work # rotate the selected profile
 codehelper edit-token glm                # choose a profile and rotate it
+codehelper tokens                        # which keys are stored (masked head+tail)
+codehelper tokens --reveal               # full values (careful: not for pasting)
 codehelper                               # arrow-key menu over all of the above
 
 # change what a bare `codex` (no wrapper) runs by default

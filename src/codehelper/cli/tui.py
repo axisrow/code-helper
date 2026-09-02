@@ -281,6 +281,7 @@ class TuiSession:
         "_chips",
         "_chip_index",
         "_chip_switch_tokens",
+        "_tokens_reveal",
     )
 
     def __init__(self, args: argparse.Namespace) -> None:
@@ -315,6 +316,10 @@ class TuiSession:
         #: `chip_switch_token` appears here. Filled once per iteration; the
         #: chip_is_applied predicate reads ONLY this on a redraw frame.
         self._chip_switch_tokens: dict[str, dict[str, str | None]] = {}
+        #: The Tokens screen's show/hide state. Session-scoped (resets on
+        #: reopen) and OFF by default: the screen must never show a full
+        #: credential because the user forgot it was on from a previous visit.
+        self._tokens_reveal: bool = False
 
     # --- UI primitives ---------------------------------------------------
 
@@ -1174,6 +1179,7 @@ class TuiSession:
                         f"Proxy address: {status.display_restorable_url or '(none)'}",
                     ),
                     ("proxy-no-proxy", f"NO_PROXY: {status.no_proxy or '(none)'}"),
+                    ("tokens", "Tokens"),
                     ("debug", f"Debug: {'on' if debug else 'off'}"),
                     (
                         "dry-run",
@@ -1189,6 +1195,8 @@ class TuiSession:
                 self.args.debug = not debug
             elif choice == "dry-run":
                 self.args.dry_run = not getattr(self.args, "dry_run", False)
+            elif choice == "tokens":
+                self._run_tokens_screen()
             elif choice == "proxy-url":
                 entered = self._read_text("Proxy URL (e.g. http://127.0.0.1:8118): ")
                 if entered is None or not entered.strip():
@@ -1280,6 +1288,118 @@ class TuiSession:
         if choice == _BACK:
             return
         set_active_selection(paths, provider, choice)
+
+    def _run_tokens_screen(self) -> None:
+        """The read-only Tokens screen — the Settings screen's viewer twin of
+        the CLI's ``codehelper tokens``.
+
+        Lists every cached credential (``credentials.json``, provider ×
+        profile, active selection marked) plus one row per registry token
+        env var, masked by default via ``secrets.mask_token``. The ``s`` key
+        toggles reveal (``s`` is already in ``menu._PASSTHROUGH`` — see the
+        shipped-once ``w`` bug this project pins in test_tui.py); Enter on a
+        row does nothing on purpose: this screen edits nothing, rotation
+        lives on ``edit-token``/the ``t`` action, removal on ``remove``.
+
+        Rows are read ONCE per entry (a credential store the user is only
+        looking at does not change mid-screen), so the redraw loop does no
+        I/O — the toggle mutates ``self._tokens_reveal`` and lets the menu
+        redraw with re-formatted labels. The on_key handler MUST return
+        None: ``menu._dispatch_key`` turns a non-None return into a menu
+        selection, and a toggle is not a selection.
+        """
+        import os
+
+        from codehelper.services.model import PROVIDERS
+        from codehelper.services.paths import Paths
+        from codehelper.services.secrets import (
+            DEFAULT_PROFILE,
+            load_credentials,
+            valid_active_profile,
+        )
+        from codehelper.services.state import active_selection
+
+        paths = Paths.default()
+        creds = load_credentials(paths)
+        active: tuple[str, str] | None = None
+        selection = active_selection(paths)
+        if selection is not None:
+            provider, _ = selection
+            profile = valid_active_profile(paths, provider)
+            if profile:
+                active = (provider, profile)
+
+        rows: list[tuple[str, str, str]] = []
+        for provider_name in sorted(creds):
+            profiles = creds[provider_name]
+            for profile_name in sorted(
+                profiles, key=lambda n: (n != DEFAULT_PROFILE, n)
+            ):
+                rows.append((provider_name, profile_name, profiles[profile_name]))
+
+        env_rows: list[tuple[str, str]] = []
+        seen_env_vars: set[str] = set()
+        for provider in PROVIDERS:
+            env_var = provider.token_env_var
+            if not env_var or env_var in seen_env_vars:
+                continue
+            seen_env_vars.add(env_var)
+            env_rows.append((env_var, os.environ.get(env_var, "")))
+
+        while True:
+            reveal = self._tokens_reveal
+
+            items: list[object] = [
+                (
+                    f"{provider_name}/{profile_name}",
+                    f"{provider_name}/{profile_name}: {self._shown(token, reveal)}"
+                    + ("  ← active" if active == (provider_name, profile_name) else ""),
+                )
+                for provider_name, profile_name, token in rows
+            ]
+            items += [
+                (
+                    f"env/{env_var}",
+                    f"{env_var}: "
+                    + (self._shown(value, reveal) if value else "not set"),
+                )
+                for env_var, value in env_rows
+            ]
+            items += [
+                ("toggle-reveal", f"Reveal values: {'on' if reveal else 'off'}"),
+                (_BACK, "Back"),
+            ]
+            keys: dict[str, Callable[[str], object]] = {
+                "s": lambda _value: self._toggle_tokens_reveal()
+            }
+            choice = self._pick(
+                items,
+                "Stored tokens (s: show/hide, Enter: back):",
+                on_key=keys,
+                numbered=False,
+            )
+            if choice == _BACK:
+                return
+            if choice == "toggle-reveal":
+                # Two ways to the same toggle, like the Settings screen's
+                # Debug/Dry-run rows: the `s` key or Enter on the row itself.
+                self._toggle_tokens_reveal()
+                continue
+            # Enter on a token row is a no-op — this screen is a viewer.
+            # The loop redraws unchanged.
+
+    @staticmethod
+    def _shown(value: str, reveal: bool) -> str:
+        """The screen's current rendering of one token value."""
+        from codehelper.services.secrets import mask_token
+
+        return value if reveal else mask_token(value)
+
+    def _toggle_tokens_reveal(self) -> None:
+        """Flip the Tokens screen's show/hide state; returns None so
+        ``menu._dispatch_key`` treats ``s`` as state mutation, not selection.
+        """
+        self._tokens_reveal = not self._tokens_reveal
 
     # --- active-label subsystem -----------------------------------------
 

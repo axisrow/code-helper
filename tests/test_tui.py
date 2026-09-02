@@ -2325,6 +2325,115 @@ def test_cancelling_the_address_prompt_changes_nothing(monkeypatch):
     assert _proxy_env()["HTTPS_PROXY"] == "http://127.0.0.1:8118"
 
 
+# --------------------------------------------------------------------------- #
+# The Tokens screen (Settings → Tokens) — the CLI `tokens` command's viewer
+# twin: cached credentials + token env vars, masked until toggled.
+# --------------------------------------------------------------------------- #
+
+
+def _open_tokens_screen(monkeypatch, picks):
+    """Settings → Tokens, capture each Tokens-screen frame's items + on_key,
+    make `picks` there, then back out and quit. Frames are identified by the
+    "Stored tokens" prompt, the same way `_settings_screen` identifies
+    Settings. The main screen enters Settings by returning the `_SETTINGS`
+    sentinel, exactly what its real `s` key binding does."""
+    frames: list[dict] = []
+    iterator = iter(picks)
+
+    def _select(_items, prompt="", **kwargs):
+        if prompt == "Settings:":
+            return "tokens" if not frames else "__back__"
+        if str(prompt).startswith("Stored tokens"):
+            frames.append(
+                {
+                    "items": list(_items),
+                    "on_key": kwargs.get("on_key") or {},
+                }
+            )
+            return next(iterator, "__back__")
+        # The main screen (no matching prompt): enter Settings once, quit after.
+        return "settings" if not frames else "quit"
+
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.press_any_key", lambda *_a, **_k: None)
+    return frames
+
+
+def _labels(frame) -> list[str]:
+    return [
+        entry[1] if isinstance(entry, tuple) else str(entry) for entry in frame["items"]
+    ]
+
+
+@pytest.mark.integration
+def test_tokens_screen_lists_the_settings_entry_and_masks_by_default(monkeypatch):
+    from codehelper.services.secrets import save_credential
+
+    token = "fe4209" + "a" * 40 + "6309"
+    save_credential(Paths.default(), "zai", token)
+
+    # The Settings screen must carry the row that reaches the viewer.
+    settings_labels = []
+    frames: list[dict] = []
+
+    def _select(_items, prompt="", **kwargs):
+        if prompt == "Settings:":
+            settings_labels.extend(
+                entry[1] if isinstance(entry, tuple) else str(entry) for entry in _items
+            )
+            return "tokens" if not frames else "__back__"
+        if str(prompt).startswith("Stored tokens"):
+            frames.append({"items": list(_items), "on_key": kwargs.get("on_key") or {}})
+            return "__back__"
+        return "settings" if not frames else "quit"
+
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.press_any_key", lambda *_a, **_k: None)
+
+    main(["tui"])
+
+    assert "Tokens" in settings_labels
+
+    labels = _labels(frames[0])
+    assert any("zai/default" in label and "fe42****6309" in label for label in labels)
+    # Masked is the DEFAULT: the full value never reaches a frame.
+    assert not any(token in label for label in labels)
+
+
+@pytest.mark.integration
+def test_tokens_screen_toggle_reveals_then_re_masks(monkeypatch):
+    from codehelper.services.secrets import save_credential
+
+    token = "fe4209" + "a" * 40 + "6309"
+    save_credential(Paths.default(), "zai", token)
+
+    frames = _open_tokens_screen(monkeypatch, ["toggle-reveal", "toggle-reveal"])
+
+    main(["tui"])
+
+    assert len(frames) == 3
+    assert not any(token in label for label in _labels(frames[0]))
+    assert any(token in label for label in _labels(frames[1]))  # revealed
+    assert not any(token in label for label in _labels(frames[2]))  # re-masked
+
+
+@pytest.mark.integration
+def test_tokens_screen_binds_s_and_s_survives_translation(monkeypatch):
+    """The `w`-key rule: a key bound in `on_key` but missing from
+    `menu._PASSTHROUGH` is silently dead. The Tokens screen's `s` must both
+    be bound and survive `_translate_char`."""
+    frames = _open_tokens_screen(monkeypatch, [])
+
+    main(["tui"])
+
+    on_key = frames[0]["on_key"]
+    assert "s" in on_key
+
+    from codehelper.cli.menu import _translate_char
+
+    assert _translate_char("s") == "s"
+
+
 @pytest.mark.integration
 def test_proxy_row_marks_the_live_state_and_offers_the_other(monkeypatch):
     """The whole point of the chipset shape: both options are always on

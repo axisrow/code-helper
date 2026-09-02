@@ -16,7 +16,7 @@ Guidance for Claude Code when working in this repository.
 | Run tests | `pytest -q` |
 | Lint | `ruff check .` |
 | Format | `ruff format .` |
-| CLI entry points | `codehelper add [<preset>] \| add --agent A --provider P --model M \| list [wrappers\|agents\|providers\|matrix] \| edit-token [<name>] \| set-default [...] \| switch [<provider>\|--from-wrapper NAME] \| proxy [on\|off\|toggle] [--url URL] [--no-proxy LIST] \| tui` |
+| CLI entry points | `codehelper add [<preset>] \| add --agent A --provider P --model M \| list [wrappers\|agents\|providers\|matrix] \| tokens [--reveal] \| edit-token [<name>] \| set-default [...] \| switch [<provider>\|--from-wrapper NAME] \| proxy [on\|off\|toggle] [--url URL] [--no-proxy LIST] \| tui` |
 
 ## Architecture
 
