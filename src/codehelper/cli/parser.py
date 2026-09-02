@@ -348,15 +348,12 @@ def _add_resolve_context_window(spec, req, paths, explicit_window: int | None):
     """
     if explicit_window is not None:
         return replace(spec, context_window=explicit_window)
-    tiers = spec.tier_models
-    if tiers is None:
-        return spec  # no tier models → no window to declare
-    models = [tiers.haiku, tiers.sonnet, tiers.opus]
-    if spec.subagent_model is not None:
-        models.append(spec.subagent_model)
+    # The model set comes from the SPEC — the same source the renderer
+    # derives from — so the question covers every shape's declaration
+    # (single-model shapes included; review round 3, PR #84).
     value = context_window_service.resolve_context_window(
         paths,
-        models,
+        spec.window_models,
         interactive=not req.dry_run,
     )
     if value is None:

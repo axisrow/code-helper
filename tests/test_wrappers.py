@@ -2748,3 +2748,116 @@ def test_spec_from_installed_returns_none_on_a_negative_ctx(tmp_path):
     )
 
     assert spec_from_installed(paths, "mystery") is None
+
+
+@pytest.mark.integration
+def test_add_launch_shape_unknown_model_prompts_and_declares(tmp_path):
+    """Review round 3 (PR #84): single-model shapes (OLLAMA_LAUNCH) emit a
+    window declaration from spec.model — so the one-time question must
+    cover them too, never silently skip."""
+    from unittest import mock
+
+    from codehelper.services.state import context_window
+
+    answers = iter(["750000"])
+
+    def _select(_items, *, prompt="", **_kwargs):
+        assert str(prompt).startswith("Context window for launch-mystery")
+        return next(answers)
+
+    with mock.patch("codehelper.cli.menu.select_from_menu", _select):
+        assert (
+            main(
+                [
+                    "add",
+                    "glm-ollama",
+                    "--model",
+                    "launch-mystery",
+                    "--alias",
+                    "launch-mystery",
+                ]
+            )
+            == 0
+        )
+    body = (
+        Paths.from_home(tmp_path)
+        .script_for("launch-mystery")
+        .read_text(encoding="utf-8")
+    )
+    assert "ctx=750000" in body
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" in body
+    assert context_window(Paths.from_home(tmp_path), "launch-mystery") == 750_000
+
+
+@pytest.mark.integration
+def test_add_toml_shape_unknown_model_prompts_and_declares(tmp_path):
+    """Review round 3 (PR #84): the codex OPENAI_TOML shape also emits the
+    window from spec.model — the question must cover it."""
+    from unittest import mock
+
+    from codehelper.services.state import context_window
+
+    with mock.patch("codehelper.cli.menu.select_from_menu", lambda _items, **_kw: "0"):
+        assert (
+            main(
+                [
+                    "add",
+                    "--agent",
+                    "codex",
+                    "--provider",
+                    "ollama-direct",
+                    "--model",
+                    "toml-mystery",
+                    "--alias",
+                    "toml-mystery",
+                ]
+            )
+            == 0
+        )
+    body = (
+        Paths.from_home(tmp_path).script_for("toml-mystery").read_text(encoding="utf-8")
+    )
+    assert "ctx=0" in body  # explicit "no declaration" — recorded, not skipped
+    assert "model_context_window" not in body
+    assert context_window(Paths.from_home(tmp_path), "toml-mystery") == 0
+
+
+@pytest.mark.unit
+def test_window_models_is_the_single_source_for_every_shape():
+    """The invariant that closes the three-round drift: the question set
+    (spec.window_models) IS the renderer set — pinned per shape."""
+    from codehelper.services.render import _declared_window
+    from codehelper.services.spec import TierModels
+
+    env_spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="m",
+        subagent_model="sub",
+    )
+    assert env_spec.window_models == ["m", "m", "m", "sub"]
+
+    launch_spec = build_spec(agent="codex", provider="ollama-direct", model="m")
+    assert launch_spec.window_models == ["m"]
+
+    # And the renderer reads THAT set: a mixed set suppresses, a uniform
+    # one declares — through the same property the question asks about.
+    mixed = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        tier_models=TierModels(haiku="mystery-3b", sonnet="glm-5.3", opus="glm-5.3"),
+    )
+    assert _declared_window(mixed) is None
+
+    # Distinguishing case: the model is catalog-known but the subagent is
+    # not. window_models includes the subagent → no declaration; a
+    # spec.model-only derivation would wrongly declare 1M.
+    sub = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="glm-5.3",
+        subagent_model="mystery-sub",
+    )
+    assert sub.window_models == ["glm-5.3", "glm-5.3", "glm-5.3", "mystery-sub"]
+    assert _declared_window(sub) is None

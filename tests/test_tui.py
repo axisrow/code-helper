@@ -144,6 +144,8 @@ def test_add_agent_branch_persists_a_user_agent_end_to_end(monkeypatch):
     )
 
     def _select(_items, *, prompt="", **_kwargs):
+        if str(prompt).startswith("Context window for"):
+            return "0"  # scripted "no declaration"
         return next(answers)
 
     agent_field_answers = iter(["myagent", "", ""])  # name, binary, description
@@ -184,6 +186,8 @@ def test_alias_prompt_carries_a_breadcrumb_of_earlier_choices(monkeypatch):
     answers = iter(["add", "wrapper", "codex", "ollama-direct", "model-x", "quit"])
 
     def _select(_items, *, prompt, **_kwargs):
+        if str(prompt).startswith("Context window for"):
+            return "0"  # scripted "no declaration" — tests here don't care
         seen.append(prompt() if callable(prompt) else prompt)
         return next(answers)
 
@@ -1115,7 +1119,9 @@ def test_tui_add_preselects_the_active_profile_first(monkeypatch):
         ]
     )
 
-    def _select(_items, **_kwargs):
+    def _select(_items, *, prompt="", **_kwargs):
+        if str(prompt).startswith("Context window for"):
+            return "0"  # scripted "no declaration" — tests here don't care
         seen_items.append(list(_items))
         return next(answers)
 
@@ -1165,7 +1171,9 @@ def test_tui_stale_active_profile_falls_back_without_crashing(monkeypatch):
         ]
     )
 
-    def _select(_items, **_kwargs):
+    def _select(_items, *, prompt="", **_kwargs):
+        if str(prompt).startswith("Context window for"):
+            return "0"  # scripted "no declaration" — tests here don't care
         seen_items.append(list(_items))
         return next(answers)
 
@@ -1198,7 +1206,9 @@ def test_tui_provider_list_offers_ollama_with_a_token(monkeypatch):
     seen_items: list[list] = []
     answers = iter(["add", "wrapper", "claude", "__back__", "quit"])
 
-    def _select(_items, **_kwargs):
+    def _select(_items, *, prompt="", **_kwargs):
+        if str(prompt).startswith("Context window for"):
+            return "0"  # scripted "no declaration" — tests here don't care
         seen_items.append(list(_items))
         return next(answers)
 

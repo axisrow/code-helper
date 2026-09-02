@@ -123,6 +123,30 @@ class WrapperSpec:
         """
         return self.provider.token_env_var
 
+    @property
+    def window_models(self) -> list[str]:
+        """Every model the context-window declaration covers (issue #83).
+
+        The ONE source for that set: the renderer derives the declaration
+        from it and the interactive question asks about it, so the two can
+        never drift — three review rounds (PR #84) each found a path where
+        a hook hand-built a different set than the renderer read. Tier
+        slots when :attr:`tier_models` exists (the ANTHROPIC_ENV shape);
+        otherwise the single model (OLLAMA_LAUNCH, OPENAI_TOML). The
+        subagent model participates when set — it shares the variable.
+        """
+        if self.tier_models is not None:
+            models = [
+                self.tier_models.haiku,
+                self.tier_models.sonnet,
+                self.tier_models.opus,
+            ]
+        else:
+            models = [self.model]
+        if self.subagent_model is not None:
+            models.append(self.subagent_model)
+        return models
+
 
 def suggest_alias(model: str, agent_name: str, profile_name: str | None = None) -> str:
     """Derive a default alias, e.g. ``glm-5:cloud`` + ``codex`` -> ``glm-5-codex``.
