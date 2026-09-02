@@ -1379,10 +1379,12 @@ class TuiSession:
 
     @staticmethod
     def _shown(value: str, reveal: bool) -> str:
-        """The screen's current rendering of one token value."""
-        from codehelper.services.secrets import mask_token
+        """The screen's current rendering of one token value — the shared
+        ``secrets.render_token``, so this view and the CLI command cannot
+        drift on how a value is displayed."""
+        from codehelper.services.secrets import render_token
 
-        return value if reveal else mask_token(value)
+        return render_token(value, reveal)
 
     def _toggle_tokens_reveal(self) -> None:
         """Flip the Tokens screen's show/hide state; returns None so

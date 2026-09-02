@@ -90,9 +90,9 @@ from codehelper.services.secrets import (
     credential_for,
     invalidate_cached_credential,
     load_credentials,
-    mask_token,
     profile_names,
     rename_profile,
+    render_token,
     token_for_discovery,
     valid_active_profile,
 )
@@ -233,9 +233,14 @@ def _token_view_rows(
     selection = active_selection(paths)
     if selection is not None:
         provider, _ = selection
+        # Canonicalize BEFORE the lookup, not after: a pre-rename state.json
+        # names the RETIRED provider, and valid_active_profile only resolves
+        # storage names OF the provider it is given — fed "ollama" it would
+        # never find a profile cached under "ollama-direct".
+        provider = RETIRED_PROVIDER_NAMES.get(provider, provider)
         profile = valid_active_profile(paths, provider)
         if profile:
-            active = (RETIRED_PROVIDER_NAMES.get(provider, provider), profile)
+            active = (provider, profile)
 
     cache_rows: list[tuple[str, str, str]] = []
     creds = load_credentials(paths)
@@ -289,7 +294,7 @@ def _handle_tokens(args: argparse.Namespace) -> int:
         )
 
     def shown(value: str) -> str:
-        return value if reveal else mask_token(value)
+        return render_token(value, reveal)
 
     active, cache_rows, env_rows = _token_view_rows(paths)
 

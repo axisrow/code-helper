@@ -79,6 +79,7 @@ __all__ = [
     "env_cache_conflict",
     "load_credentials",
     "mask_token",
+    "render_token",
     "profile_names",
     "seed_default_profile",
     "rename_profile",
@@ -127,6 +128,17 @@ def mask_token(value: str) -> str:
         return "".join(ch if ch.isprintable() else f"\\x{ord(ch):02x}" for ch in part)
 
     return printable(value[:4]) + "****" + printable(value[-4:])
+
+
+def render_token(value: str, reveal: bool) -> str:
+    """The viewer's rendering of one token — the ONE place mask meets reveal.
+
+    Shared by the CLI's ``tokens`` command and the TUI Tokens screen so their
+    two renderings of the same value cannot drift (e.g. one gaining a
+    display-safety fix the other misses). ``reveal=True`` is the documented
+    explicit raw path — see :func:`mask_token` for the masked default.
+    """
+    return value if reveal else mask_token(value)
 
 
 @dataclass(frozen=True)

@@ -93,9 +93,11 @@ def test_tokens_lists_every_profile_with_the_active_marker(tmp_path, capsys):
 def test_tokens_marks_a_legacy_keyed_profile_active(tmp_path, capsys):
     """The active-profile lookup understands RETIRED provider names (a token
     cached under the pre-rename key stays usable), so the viewer's marker
-    must too: an active selection naming the CURRENT provider still marks a
-    row stored under the legacy cache key — without this, the honest
-    "this profile is live" claim silently vanishes after a rename."""
+    must too — in BOTH rename combinations: the active selection may name
+    the current provider while the cache key is legacy, or (mirrored) the
+    stored selection may carry the legacy name while the cache key is
+    current. Either way the honest "this profile is live" claim must not
+    silently vanish."""
     paths = Paths.default()
     legacy_key = next(
         retired
@@ -103,6 +105,8 @@ def test_tokens_marks_a_legacy_keyed_profile_active(tmp_path, capsys):
         if current == "ollama-direct"
     )
     paths.credentials_file().parent.mkdir(parents=True, exist_ok=True)
+
+    # Combination 1: legacy cache key, current-name selection.
     paths.credentials_file().write_text(
         json.dumps({legacy_key: {"default": _LONG_TOKEN}}), encoding="utf-8"
     )
@@ -117,6 +121,19 @@ def test_tokens_marks_a_legacy_keyed_profile_active(tmp_path, capsys):
     assert len(marked) == 1
     assert marked[0].startswith("ollama-direct")
     assert _LONG_TOKEN not in out
+
+    # Combination 2 (mirrored): current cache key, legacy-name selection.
+    paths.credentials_file().write_text(
+        json.dumps({"ollama-direct": {"default": _LONG_TOKEN}}), encoding="utf-8"
+    )
+    set_active_selection(paths, legacy_key, "default")
+
+    assert main(["tokens"]) == 0
+
+    out = capsys.readouterr().out
+    marked = [line for line in out.splitlines() if "← active" in line]
+    assert len(marked) == 1
+    assert marked[0].startswith("ollama-direct")
 
 
 # --------------------------------------------------------------------------- #
