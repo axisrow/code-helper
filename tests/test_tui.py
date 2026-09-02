@@ -2438,8 +2438,9 @@ def test_tokens_screen_reveals_never_survive_a_screen_exit(monkeypatch):
 
     def _select(_items, prompt="", **kwargs):
         if prompt == "Settings:":
-            # Two visits to the Tokens screen, then back out for good.
-            return "tokens" if len(frames) < 2 else "__back__"
+            # Two visits to the Tokens screen (frames 0-1 = visit 1, frame 2
+            # = visit 2), then back out for good.
+            return "tokens" if len(frames) < 3 else "__back__"
         if str(prompt).startswith("Stored tokens"):
             frames.append(
                 {"items": list(_items), "on_key": kwargs.get("on_key") or {}}
