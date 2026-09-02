@@ -2423,6 +2423,44 @@ def test_tokens_screen_toggle_reveals_then_re_masks(monkeypatch):
 
 
 @pytest.mark.integration
+def test_tokens_screen_reveals_never_survive_a_screen_exit(monkeypatch):
+    """Reveal is per-visit state: leaving the screen (Back) resets it, so a
+    RE-ENTRY shows masked values until the user toggles again. A persisted
+    reveal would splash full credentials on a second visit with no new
+    action by the user — the exact accident the mask exists to prevent."""
+    from codehelper.services.secrets import save_credential
+
+    token = "fe4209" + "a" * 40 + "6309"
+    save_credential(Paths.default(), "zai", token)
+
+    frames: list[dict] = []
+    answers = iter(["toggle-reveal", "__back__", "__back__"])
+
+    def _select(_items, prompt="", **kwargs):
+        if prompt == "Settings:":
+            # Two visits to the Tokens screen, then back out for good.
+            return "tokens" if len(frames) < 2 else "__back__"
+        if str(prompt).startswith("Stored tokens"):
+            frames.append(
+                {"items": list(_items), "on_key": kwargs.get("on_key") or {}}
+            )
+            return next(answers, "__back__")
+        return "settings" if not frames else "quit"
+
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.press_any_key", lambda *_a, **_k: None)
+
+    main(["tui"])
+
+    assert len(frames) == 3
+    assert not any(token in label for label in _labels(frames[0]))  # visit 1 masked
+    assert any(token in label for label in _labels(frames[1]))  # revealed in visit 1
+    assert not any(
+        token in label for label in _labels(frames[2])
+    )  # visit 2 starts masked again
+
+
+@pytest.mark.integration
 def test_tokens_screen_binds_s_and_s_survives_translation(monkeypatch):
     """The `w`-key rule: a key bound in `on_key` but missing from
     `menu._PASSTHROUGH` is silently dead. The Tokens screen's `s` must both

@@ -323,9 +323,9 @@ class TuiSession:
         #: `chip_switch_token` appears here. Filled once per iteration; the
         #: chip_is_applied predicate reads ONLY this on a redraw frame.
         self._chip_switch_tokens: dict[str, dict[str, str | None]] = {}
-        #: The Tokens screen's show/hide state. Session-scoped (resets on
-        #: reopen) and OFF by default: the screen must never show a full
-        #: credential because the user forgot it was on from a previous visit.
+        #: The Tokens screen's show/hide state. PER-VISIT: `_run_tokens_screen`
+        #: resets it to False on every entry, so a re-visit can never open
+        #: showing full credentials with no new action by the user.
         self._tokens_reveal: bool = False
 
     # --- UI primitives ---------------------------------------------------
@@ -1314,44 +1314,22 @@ class TuiSession:
         redraw with re-formatted labels. The on_key handler MUST return
         None: ``menu._dispatch_key`` turns a non-None return into a menu
         selection, and a toggle is not a selection.
-        """
-        import os
 
-        from codehelper.services.model import PROVIDERS
+        Reveal is PER-VISIT state, reset on every entry: a second visit must
+        never open showing full credentials with no new action by the user —
+        that is the accident the mask exists to prevent. The rows come from
+        ``parser._token_view_rows``, the same source the CLI command renders,
+        so the two views cannot drift (including the ``(nothing cached)``
+        row when only env vars exist).
+        """
+        from codehelper.cli.parser import _token_view_rows
         from codehelper.services.paths import Paths
-        from codehelper.services.secrets import (
-            DEFAULT_PROFILE,
-            load_credentials,
-            valid_active_profile,
-        )
-        from codehelper.services.state import active_selection
+
+        # Per-visit reset FIRST — before anything can render a frame.
+        self._tokens_reveal = False
 
         paths = Paths.default()
-        creds = load_credentials(paths)
-        active: tuple[str, str] | None = None
-        selection = active_selection(paths)
-        if selection is not None:
-            provider, _ = selection
-            profile = valid_active_profile(paths, provider)
-            if profile:
-                active = (provider, profile)
-
-        rows: list[tuple[str, str, str]] = []
-        for provider_name in sorted(creds):
-            profiles = creds[provider_name]
-            for profile_name in sorted(
-                profiles, key=lambda n: (n != DEFAULT_PROFILE, n)
-            ):
-                rows.append((provider_name, profile_name, profiles[profile_name]))
-
-        env_rows: list[tuple[str, str]] = []
-        seen_env_vars: set[str] = set()
-        for provider in PROVIDERS:
-            env_var = provider.token_env_var
-            if not env_var or env_var in seen_env_vars:
-                continue
-            seen_env_vars.add(env_var)
-            env_rows.append((env_var, os.environ.get(env_var, "")))
+        active, rows, env_rows = _token_view_rows(paths)
 
         while True:
             reveal = self._tokens_reveal
@@ -1364,6 +1342,10 @@ class TuiSession:
                 )
                 for provider_name, profile_name, token in rows
             ]
+            if not rows:
+                # CLI parity: name the empty cache explicitly, so an
+                # env-vars-only screen does not read as "the store is empty".
+                items.append(("no-cache", "(nothing cached)"))
             items += [
                 (
                     f"env/{env_var}",

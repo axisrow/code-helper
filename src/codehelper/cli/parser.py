@@ -205,6 +205,50 @@ def _handle_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _token_view_rows(
+    paths: Paths,
+) -> tuple[tuple[str, str] | None, list[tuple[str, str, str]], list[tuple[str, str]]]:
+    """Gather the tokens-viewer's rows — the ONE source for both views.
+
+    Shared by ``_handle_tokens`` (CLI) and the TUI's Tokens screen so the two
+    renderings of the same store cannot drift: the sort order (``default``
+    first), the active-selection pair, and the env-var dedup (two providers
+    may share one variable — deepseek / deepseek-openai — and the row is
+    about the VARIABLE, so it appears once) are decided here, exactly once.
+
+    Returns ``(active, cache_rows, env_rows)`` where ``active`` is the valid
+    stored selection as ``(provider, profile)`` or ``None``, ``cache_rows``
+    are ``(provider, profile, RAW token)`` — masking is the VIEW's job, the
+    raw value is what ``--reveal`` and the toggle must show — and
+    ``env_rows`` are ``(env_var, raw value or "")``.
+    """
+    active: tuple[str, str] | None = None
+    selection = active_selection(paths)
+    if selection is not None:
+        provider, _ = selection
+        profile = valid_active_profile(paths, provider)
+        if profile:
+            active = (provider, profile)
+
+    cache_rows: list[tuple[str, str, str]] = []
+    creds = load_credentials(paths)
+    for provider_name in sorted(creds):
+        profiles = creds[provider_name]
+        for profile_name in sorted(profiles, key=lambda n: (n != DEFAULT_PROFILE, n)):
+            cache_rows.append((provider_name, profile_name, profiles[profile_name]))
+
+    env_rows: list[tuple[str, str]] = []
+    seen_env_vars: set[str] = set()
+    for provider in PROVIDERS:
+        env_var = provider.token_env_var
+        if not env_var or env_var in seen_env_vars:
+            continue
+        seen_env_vars.add(env_var)
+        env_rows.append((env_var, os.environ.get(env_var, "")))
+
+    return active, cache_rows, env_rows
+
+
 def _handle_tokens(args: argparse.Namespace) -> int:
     """Show every stored credential, masked unless ``--reveal``.
 
@@ -212,10 +256,8 @@ def _handle_tokens(args: argparse.Namespace) -> int:
     question ``list`` cannot answer (it shows wrappers, not credentials) and
     reading ``credentials.json`` by hand shouldn't be. Two sections:
 
-    - the CACHE (``credentials.json``, ``{provider: {profile: token}}`` via
-      :func:`secrets.load_credentials`), one row per provider × profile, with
-      the active selection marked (same ``active_selection`` +
-      ``valid_active_profile`` pair ``_handle_list``'s header uses);
+    - the CACHE (``credentials.json``, ``{provider: {profile: token}}``),
+      one row per provider × profile, with the active selection marked;
     - the ENVIRONMENT: every registry provider's ``token_env_var``, set or
       not — because env beats the cache in :func:`secrets.resolve_token`'s
       precedence, "which key is live" is a question about BOTH stores, and
@@ -227,7 +269,7 @@ def _handle_tokens(args: argparse.Namespace) -> int:
     already carries on disk — with a stderr warning so a pasted transcript
     can be scanned for the moment the secrets went by. Read-only: nothing is
     written, and ``--dry-run`` would be a no-op flag on a command that never
-    writes.
+    writes. The rows come from :func:`_token_view_rows`, shared with the TUI.
     """
     paths = Paths.default()
     reveal = getattr(args, "reveal", False)
@@ -241,42 +283,17 @@ def _handle_tokens(args: argparse.Namespace) -> int:
     def shown(value: str) -> str:
         return value if reveal else mask_token(value)
 
-    active: tuple[str, str] | None = None
-    selection = active_selection(paths)
-    if selection is not None:
-        provider, _ = selection
-        profile = valid_active_profile(paths, provider)
-        if profile:
-            active = (provider, profile)
+    active, cache_rows, env_rows = _token_view_rows(paths)
 
-    rows: list[tuple[str, str, str]] = []
-    creds = load_credentials(paths)
-    for provider_name in sorted(creds):
-        profiles = creds[provider_name]
-        for profile_name in sorted(profiles, key=lambda n: (n != DEFAULT_PROFILE, n)):
-            token = profiles[profile_name]
-            marker = "  ← active" if active == (provider_name, profile_name) else ""
-            rows.append((provider_name, profile_name, shown(token) + marker))
-
-    env_rows: list[tuple[str, str]] = []
-    seen_env_vars: set[str] = set()
-    for provider in PROVIDERS:
-        env_var = provider.token_env_var
-        if not env_var or env_var in seen_env_vars:
-            # Two providers may share one variable (deepseek / deepseek-openai)
-            # — the row is about the VARIABLE, so it is printed once.
-            continue
-        seen_env_vars.add(env_var)
-        env_rows.append((env_var, os.environ.get(env_var, "")))
-
-    if not rows and not any(value for _, value in env_rows):
+    if not cache_rows and not any(value for _, value in env_rows):
         print("no saved tokens")
         return 0
 
     print("provider   profile        token")
-    if rows:
-        for provider_name, profile_name, token in rows:
-            print(f"{provider_name:10} {profile_name:14} {token}")
+    if cache_rows:
+        for provider_name, profile_name, token in cache_rows:
+            marker = "  ← active" if active == (provider_name, profile_name) else ""
+            print(f"{provider_name:10} {profile_name:14} {shown(token)}{marker}")
     else:
         print("(nothing cached)")
     print()
