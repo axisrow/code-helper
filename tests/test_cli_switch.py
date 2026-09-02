@@ -576,3 +576,122 @@ def test_chip_preset_apply_never_prompts_for_the_window(tmp_path):
 
     with mock.patch("codehelper.cli.menu.select_from_menu", _fail):
         assert _handle_switch(_preset_request("glm")) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Review round 1 (PR #84): the switch flag must be parsed + validated like
+# add's — switch never builds a spec, so nothing downstream would catch a
+# raw string, and it would land in the LIVE settings verbatim.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("raw", ["abc", "-5", "0", "99999999999"])
+def test_switch_context_window_rejects_garbage(tmp_path, capsys, raw):
+    """A malformed --context-window is a clean domain error (exit 1) and the
+    live env keeps the PREVIOUS window — never the raw text or nonsense."""
+    assert (
+        main(
+            [
+                "switch",
+                "--provider",
+                "zai",
+                "--model",
+                "glm-5.2",
+                "--context-window",
+                "500000",
+                "--force",
+            ]
+        )
+        == 0
+    )  # sanity: a valid value applies
+
+    assert (
+        main(
+            [
+                "switch",
+                "--provider",
+                "zai",
+                "--model",
+                "glm-5.2",
+                "--context-window",
+                raw,
+                "--force",
+            ]
+        )
+        == 1
+    )
+    assert "--context-window" in capsys.readouterr().err
+
+    env = _settings(tmp_path)["env"]
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "500000"
+
+
+@pytest.mark.integration
+def test_switch_context_window_none_suppresses_the_catalog(tmp_path):
+    """`--context-window none` is the scripted explicit suppression: even a
+    catalog-known model gets no declaration."""
+    assert (
+        main(
+            [
+                "switch",
+                "--provider",
+                "zai",
+                "--model",
+                "glm-5.3",
+                "--context-window",
+                "none",
+                "--force",
+            ]
+        )
+        == 0
+    )
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in _settings(tmp_path)["env"]
+
+
+@pytest.mark.integration
+def test_switch_split_tier_question_names_and_records_the_unknown_model(
+    tmp_path, monkeypatch
+):
+    """Split tiers with one unknown model: the menu asks about THAT model and
+    the answer records under it — not under the selected --model name, or
+    the question would re-fire and mis-key the answer (round 1, PR #84)."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
+    import codehelper.cli.menu as menu
+
+    seen: list[str] = []
+
+    def _select(_items, *, prompt="", **_kwargs):
+        seen.append(str(prompt))
+        return "2000000"
+
+    monkeypatch.setattr(menu, "select_from_menu", _select)
+
+    assert (
+        main(
+            [
+                "switch",
+                "--provider",
+                "zai",
+                "--haiku",
+                "mystery-haiku",
+                "--sonnet",
+                "glm-5.3",
+                "--opus",
+                "glm-5.3",
+                "--force",
+            ]
+        )
+        == 0
+    )
+    assert seen == ["Context window for mystery-haiku:"]
+
+    from codehelper.services.state import context_window
+
+    paths = Paths.from_home(tmp_path)
+    assert context_window(paths, "mystery-haiku") == 2_000_000
+    assert context_window(paths, "glm-5.3") is None  # catalog tier: untouched
+    # The just-recorded answer rides the spec as EXPLICIT — precedence rule 1
+    # (the user was asked and decided), so the session declares it even
+    # though the catalog's 1M disagrees.
+    assert _settings(tmp_path)["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "2000000"

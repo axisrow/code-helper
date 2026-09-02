@@ -303,7 +303,12 @@ def _parse_context_window(raw: str | int | None) -> int | None:
     if raw is None:
         return None
     if isinstance(raw, int):  # the TUI passes the parsed value straight through
-        return raw
+        if 0 <= raw <= 10_000_000:
+            return raw
+        raise CodeHelperError(
+            f"invalid --context-window: {raw} (expected 0 (no declaration) "
+            f"or a token count in 1..10_000_000)"
+        )
     text = raw.strip()
     if text.lower() == "none":
         return 0
@@ -313,11 +318,15 @@ def _parse_context_window(raw: str | int | None) -> int | None:
         raise CodeHelperError(
             f"invalid --context-window: {raw!r} (expected a token count or 'none')"
         ) from None
-    if value <= 0:
+    # The FULL range check lives here, not only in build_spec (issue #83,
+    # review round 1): switch never builds a spec, so an oversized value
+    # would otherwise sail straight into the live patch.
+    if not 0 < value <= 10_000_000:
         # 0 arrives only via the 'none' spelling — a literal 0 is almost
         # certainly a typo for it, and a negative is always garbage.
         raise CodeHelperError(
-            f"invalid --context-window: {raw!r} (use 'none' for no declaration)"
+            f"invalid --context-window: {raw!r} (expected a token count in "
+            f"1..10_000_000, or 'none' for no declaration)"
         )
     return value
 
@@ -348,7 +357,6 @@ def _add_resolve_context_window(spec, req, paths, explicit_window: int | None):
     value = context_window_service.resolve_context_window(
         paths,
         models,
-        target_model=spec.model,
         interactive=not req.dry_run,
     )
     if value is None:
@@ -1131,9 +1139,15 @@ def _switch_axes_from_preset(req: SwitchRequest, paths):
     )
 
 
-def _switch_axes_from_flags(req: SwitchRequest, paths):
+def _switch_axes_from_flags(
+    req: SwitchRequest, paths, context_window: int | None = None
+):
     """Resolve ``(provider, tier_models, token, subagent_model, context_window)``
-    from the explicit ``--provider``/``--model``/``--haiku``/... flags."""
+    from the explicit ``--provider``/``--model``/``--haiku``/... flags.
+
+    ``context_window`` arrives ALREADY PARSED by ``_handle_switch`` (a
+    validated ``int | None``) — this resolver never sees the raw flag text.
+    """
     from codehelper.services.spec import TierModels
 
     provider_name = req.provider
@@ -1168,9 +1182,7 @@ def _switch_axes_from_flags(req: SwitchRequest, paths):
     # scripted use already said what it means); otherwise ask once for an
     # unknown model and remember, exactly like `add` does. `switch native`
     # never reaches this line (the env_reset return above).
-    if req.context_window is not None:
-        context_window = req.context_window
-    else:
+    if context_window is None:
         context_window = context_window_service.resolve_context_window(
             paths,
             [
@@ -1179,7 +1191,6 @@ def _switch_axes_from_flags(req: SwitchRequest, paths):
                 tier_models.opus,
                 *([req.subagent_model] if req.subagent_model else []),
             ],
-            target_model=req.model or tier_models.sonnet,
             interactive=not req.dry_run,
         )
 
@@ -1210,6 +1221,12 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
     )
     paths = Paths.default()
 
+    # Parsed up front with the other flag validations (issue #83, review
+    # round 1): switch never builds a spec, so unlike `add` there is no
+    # build_spec range check downstream — a raw string here would reach
+    # the live patch verbatim.
+    context_window = _parse_context_window(req.context_window)
+
     if req.status:
         live = current_switch(paths)
         print(live if live is not None else "native (no override in settings.json)")
@@ -1226,7 +1243,7 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         or req.base_url
         or req.auth
         or req.profile
-        or req.context_window is not None
+        or context_window is not None
     ):
         raise CodeHelperError(
             "--restore cannot be combined with a provider or model flags"
@@ -1241,7 +1258,7 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
     # One source per axis (issue #83): --from-wrapper/--from-preset carry
     # their own recorded ctx — an explicit --context-window next to them
     # could contradict the record, so it is rejected outright.
-    if req.context_window is not None and (req.from_wrapper or req.from_preset):
+    if context_window is not None and (req.from_wrapper or req.from_preset):
         raise CodeHelperError(
             "--context-window applies to the explicit-axes form only "
             "(--provider/--model) — a wrapper or preset carries its own "
@@ -1262,17 +1279,20 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         return 0
 
     if req.from_preset:
-        provider, tier_models, token, subagent_model, context_window = (
+        provider, tier_models, token, subagent_model, preset_window = (
             _switch_axes_from_preset(req, paths)
         )
+        context_window = preset_window
     elif req.from_wrapper:
-        provider, tier_models, token, subagent_model, context_window = (
+        provider, tier_models, token, subagent_model, wrapper_window = (
             _switch_axes_from_wrapper(req, paths)
         )
+        context_window = wrapper_window
     else:
-        provider, tier_models, token, subagent_model, context_window = (
-            _switch_axes_from_flags(req, paths)
+        provider, tier_models, token, subagent_model, flag_window = (
+            _switch_axes_from_flags(req, paths, context_window)
         )
+        context_window = flag_window
 
     wrote = claude_settings.apply_switch(
         paths,

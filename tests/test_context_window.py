@@ -54,7 +54,7 @@ def test_catalog_hit_returns_none_without_prompting_or_writing(tmp_path):
     paths = _paths(tmp_path)
     assert (
         resolve_context_window(
-            paths, [GLM], target_model=GLM, interactive=True, select_fn=_select("NEVER")
+            paths, [GLM], interactive=True, select_fn=_select("NEVER")
         )
         is None
     )
@@ -69,7 +69,6 @@ def test_recorded_positive_value_is_returned_without_prompting(tmp_path):
         resolve_context_window(
             paths,
             ["mystery-3b"],
-            target_model="mystery-3b",
             interactive=True,
             select_fn=_select("NEVER"),
         )
@@ -86,7 +85,6 @@ def test_recorded_zero_sentinel_is_returned_without_prompting(tmp_path):
         resolve_context_window(
             paths,
             ["mystery-3b"],
-            target_model="mystery-3b",
             interactive=True,
             select_fn=_select("NEVER"),
         )
@@ -103,7 +101,6 @@ def test_menu_choices_are_recorded(tmp_path, choice, expected):
     value = resolve_context_window(
         paths,
         ["mystery-3b"],
-        target_model="mystery-3b",
         interactive=True,
         select_fn=_select(choice),
     )
@@ -123,7 +120,6 @@ def test_custom_input_is_validated_then_recorded(tmp_path):
     value = resolve_context_window(
         paths,
         ["mystery-3b"],
-        target_model="mystery-3b",
         interactive=True,
         select_fn=_select("c"),
         read_line_fn=_read,
@@ -143,7 +139,6 @@ def test_custom_input_gives_up_after_three_bad_answers(tmp_path):
         resolve_context_window(
             paths,
             ["mystery-3b"],
-            target_model="mystery-3b",
             interactive=True,
             select_fn=_select("c"),
             read_line_fn=_read,
@@ -159,7 +154,6 @@ def test_unknown_unrecorded_non_interactive_returns_none_and_writes_nothing(tmp_
         resolve_context_window(
             paths,
             ["mystery-3b"],
-            target_model="mystery-3b",
             interactive=False,
             select_fn=_select("NEVER"),
         )
@@ -179,7 +173,6 @@ def test_mixed_recorded_tiers_yield_none(tmp_path):
         resolve_context_window(
             paths,
             ["model-a", "model-b"],
-            target_model="model-a",
             interactive=True,
             select_fn=_select("NEVER"),
         )
@@ -196,7 +189,6 @@ def test_uniform_recorded_tiers_are_returned(tmp_path):
         resolve_context_window(
             paths,
             ["model-a", "model-b"],
-            target_model="model-a",
             interactive=True,
             select_fn=_select("NEVER"),
         )
@@ -217,7 +209,6 @@ def test_menu_cancel_records_nothing(tmp_path):
         resolve_context_window(
             paths,
             ["mystery-3b"],
-            target_model="mystery-3b",
             interactive=True,
             select_fn=_cancel,
         )
@@ -236,7 +227,6 @@ def test_mixed_catalog_and_recorded_tiers_agreeing_are_explicit(tmp_path):
         resolve_context_window(
             paths,
             [GLM, "mystery-3b"],
-            target_model="mystery-3b",
             interactive=True,
             select_fn=_select("NEVER"),
         )
@@ -255,9 +245,29 @@ def test_catalog_tier_disagreeing_with_recorded_tier_yields_none(tmp_path):
         resolve_context_window(
             paths,
             [GLM, "mystery-3b"],
-            target_model="mystery-3b",
             interactive=True,
             select_fn=_select("NEVER"),
         )
         is None
     )
+
+
+@pytest.mark.unit
+def test_split_tier_answer_records_under_the_unknown_model(tmp_path):
+    """The answer records under the model the menu actually asked about —
+    the loop's unknown model, never a caller-supplied fallback name
+    (review round 1, PR #84). A catalog tier can't receive the answer:
+    it is never recorded, so the question would re-fire forever."""
+    paths = _paths(tmp_path)
+
+    def _select(_items, **_kwargs):
+        return "2000000"
+
+    resolve_context_window(
+        paths,
+        ["mystery-haiku", GLM],  # GLM is catalog-known → never recorded
+        interactive=True,
+        select_fn=_select,
+    )
+    assert context_window(paths, "mystery-haiku") == 2_000_000
+    assert context_window(paths, GLM) is None

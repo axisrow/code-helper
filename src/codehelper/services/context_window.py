@@ -62,7 +62,6 @@ def resolve_context_window(
     paths: Paths,
     models: Iterable[str],
     *,
-    target_model: str,
     interactive: bool = False,
     select_fn: SelectFn | None = None,
     read_line_fn: ReadLineFn | None = None,
@@ -73,7 +72,6 @@ def resolve_context_window(
         paths: Resolved paths — locates ``state.json``.
         models: EVERY model the declaration would cover — all tiers plus the
             subagent when set. One variable declares one window per session.
-        target_model: The model a new answer is recorded under (``spec.model``).
         interactive: May a menu be shown? ``--dry-run`` and scripted paths
             pass ``False`` and simply get ``None`` for unknown models.
         select_fn: Menu source (injectable for tests; default: lazy
@@ -105,9 +103,13 @@ def resolve_context_window(
             value = context_window(paths, model)
             if value is None:
                 # Unknown AND unrecorded: ask once (or degrade honestly).
+                # The answer records under THIS model — the one the menu
+                # actually names — never under a spec-level fallback, or a
+                # split-tier spec would re-ask and mis-key the answer
+                # (review round 1, PR #84).
                 return _ask_or_none(
                     paths,
-                    target_model,
+                    model,
                     interactive=interactive,
                     select_fn=select_fn,
                     read_line_fn=read_line_fn,
@@ -127,7 +129,7 @@ def resolve_context_window(
 
 def _ask_or_none(
     paths: Paths,
-    target_model: str,
+    model: str,
     *,
     interactive: bool,
     select_fn: SelectFn | None,
@@ -141,14 +143,14 @@ def _ask_or_none(
         from codehelper.cli.menu import select_from_menu
 
         def menu_fn(items: Sequence[tuple[str, str]]) -> str:
-            return select_from_menu(items, prompt=f"Context window for {target_model}:")
+            return select_from_menu(items, prompt=f"Context window for {model}:")
 
     answer = menu_fn(_MENU_ITEMS)
     if answer == "custom":
         value = _ask_custom(read_line_fn)
     else:
         value = int(answer)  # "0" → 0, "1000000" → 1_000_000
-    set_context_window(paths, target_model, value)
+    set_context_window(paths, model, value)
     return value
 
 
