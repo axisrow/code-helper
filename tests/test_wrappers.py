@@ -2458,3 +2458,52 @@ def test_cli_remove_dry_run_never_prompts_and_never_writes(tmp_path, monkeypatch
 
     assert main(["--dry-run", "remove", spec.alias]) == 0
     assert paths.script_for(spec.alias).exists()
+
+
+# --------------------------------------------------------------------------- #
+# Issue #83: the explicit context_window axis — build_spec validation.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_build_spec_rejects_an_unusable_context_window():
+    """A garbage explicit window refuses at build time, before anything
+    interactive — the same early-refusal contract as a bad alias."""
+    for bad in (-1, -5, 10_000_001, 99_999_999):
+        with pytest.raises(CodeHelperError, match="unusable context window"):
+            build_spec(
+                agent="claude",
+                provider="ollama-direct",
+                model="mystery-3b",
+                context_window=bad,
+            )
+
+
+@pytest.mark.unit
+def test_build_spec_accepts_zero_and_positive_context_windows():
+    """``0`` is a real answer (explicit no-declaration) and any sane positive
+    count is accepted verbatim."""
+    assert (
+        build_spec(
+            agent="claude",
+            provider="ollama-direct",
+            model="mystery-3b",
+            context_window=0,
+        ).context_window
+        == 0
+    )
+    assert (
+        build_spec(
+            agent="claude",
+            provider="ollama-direct",
+            model="mystery-3b",
+            context_window=500_000,
+        ).context_window
+        == 500_000
+    )
+    assert (
+        build_spec(
+            agent="claude", provider="ollama-direct", model="mystery-3b"
+        ).context_window
+        is None
+    )
