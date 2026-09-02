@@ -36,6 +36,21 @@ def test_short_token_is_all_asterisks():
     assert mask_token("12345678") == "********"
 
 
+@pytest.mark.unit
+def test_mask_escapes_control_characters():
+    """The masked form is a TERMINAL-rendered string, and nothing constrains
+    what a cached or environment-provided value may contain — a control
+    character that survives into the readable head/tail could spoof the
+    display (ANSI colouring, cursor moves, fake rows), so the mask escapes
+    every non-printable as a visible \\xNN form.
+    """
+    masked = mask_token("\x1b[31m" + "a" * 40 + "ok\n")
+    assert "\x1b" not in masked
+    assert "\n" not in masked
+    assert "****" in masked
+    assert "\\x1b" in masked and "\\x0a" in masked
+
+
 # --------------------------------------------------------------------------- #
 # `codehelper tokens` — the masked default
 # --------------------------------------------------------------------------- #

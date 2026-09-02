@@ -113,10 +113,20 @@ def mask_token(value: str) -> str:
 
     A token of 8 characters or fewer is ALL asterisks: head+tail of a short
     value would leave nothing hidden.
+
+    "Display-safe" is enforced, not assumed: nothing constrains what a
+    cached or environment-provided value may contain, and a control
+    character surviving into the readable head/tail could spoof the
+    terminal (ANSI colouring, cursor moves, fake rows) — so every
+    non-printable renders as a visible ``\\xNN`` escape.
     """
     if len(value) <= 8:
         return "*" * len(value)
-    return value[:4] + "****" + value[-4:]
+
+    def printable(part: str) -> str:
+        return "".join(ch if ch.isprintable() else f"\\x{ord(ch):02x}" for ch in part)
+
+    return printable(value[:4]) + "****" + printable(value[-4:])
 
 
 @dataclass(frozen=True)
