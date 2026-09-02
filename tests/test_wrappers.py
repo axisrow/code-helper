@@ -20,6 +20,7 @@ from codehelper.services.model import (
     ModelListAPI,
     Provider,
     get_provider,
+    with_auth,
     with_base_url,
 )
 from codehelper.services.paths import Paths
@@ -1005,6 +1006,23 @@ def test_openai_toml_profile_has_no_env_key_for_a_literal_provider():
     assert "env_key" not in body
 
 
+@pytest.mark.unit
+def test_marker_records_auth_only_for_a_secret_wrapper():
+    """issue #81: the marker carries the wrapper's effective auth mode, but
+    ONLY when it is secret — a literal marker stays byte-identical to the
+    pre-#81 form, so every already-installed literal wrapper keeps matching
+    `_decide`'s SKIP path instead of being rewritten on the next add."""
+    secret = build_spec(
+        agent="claude",
+        provider=with_auth(get_provider("ollama-direct"), want_secret=True),
+        model="m",
+        alias="s",
+    )
+    literal = build_spec(agent="claude", provider="ollama-direct", model="m", alias="l")
+    assert "auth=secret" in render_script(secret, "tok")
+    assert "auth=" not in render_script(literal, "")
+
+
 def _secret_toml_provider(name: str = "secret-openai") -> Provider:
     return Provider(
         name=name,
@@ -1628,6 +1646,118 @@ def test_spec_from_installed_falls_back_to_the_default_for_overridable(
     recovered = spec_from_installed(paths, "ov")
     assert recovered is not None
     assert recovered.provider.base_url == "http://127.0.0.1:11434"
+
+
+# --------------------------------------------------------------------------- #
+# spec_from_installed — the recorded auth override (issue #81)
+#
+# The marker records the wrapper's effective auth mode. Without it, a wrapper
+# installed with `--auth secret` on an OVERRIDABLE provider (ollama-direct)
+# reconstructs as the registry's literal default — and every consumer of the
+# reconstruction (`switch --from-wrapper`, the TUI chipset, `edit-token`)
+# then applies or edits the literal "ollama" credential instead of the
+# account token embedded in the wrapper's own body.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_spec_from_installed_honors_a_recorded_auth_override(tmp_path):
+    """A wrapper installed with `--auth secret` on ollama-direct must come
+    back SECRET, with the embedded account token reachable through
+    token_from_installed — not the registry's literal 'ollama' default."""
+    paths = Paths.from_home(tmp_path)
+    provider = with_auth(get_provider("ollama-direct"), want_secret=True)
+    spec = build_spec(
+        agent="claude", provider=provider, model="glm-5:cloud", alias="ollama-secure"
+    )
+    install_wrapper(paths, spec, token="sk-account-token")
+
+    recovered = spec_from_installed(paths, "ollama-secure")
+    assert recovered is not None
+    assert recovered.auth == "secret"
+    assert recovered.auth_value == ""  # no literal value lingers on it
+    assert (
+        token_from_installed(paths, "ollama-secure", "ollama-direct")
+        == "sk-account-token"
+    )
+
+
+@pytest.mark.integration
+def test_spec_from_installed_keeps_the_registry_default_when_the_marker_has_no_auth(
+    tmp_path,
+):
+    """MIGRATION: a marker written before the auth field existed reconstructs
+    exactly as before — the registry default stands. ollama-direct reads back
+    literal; zai (registry-secret) reads back secret. Emulated by stripping
+    the field from a freshly rendered marker."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="claude", provider="zai", model="glm-5.3", alias="gz")
+    install_wrapper(paths, spec, token="sk-zai")
+    script = paths.script_for("gz")
+    body = script.read_text(encoding="utf-8")
+    legacy_body = body.replace(", auth=secret", "")
+    assert legacy_body != body  # sanity: the field was actually there
+    script.write_text(legacy_body, encoding="utf-8")
+
+    recovered = spec_from_installed(paths, "gz")
+    assert recovered is not None
+    assert recovered.auth == "secret"  # the registry default, as before #81's fix
+
+
+@pytest.mark.integration
+def test_spec_from_installed_never_raises_on_an_impossible_recorded_auth(
+    tmp_path, monkeypatch
+):
+    """`auth=secret` on a provider whose registry auth is FIXED-literal (a
+    hand-edited marker, or — as emulated here — a registry downgrade after
+    the install) fails CLOSED — the same "records something this build
+    cannot honour → None" answer as an unknown shape, never a
+    wrong-credential spec. No shipped provider is FIXED-literal, so the
+    downgrade is monkeypatched onto ollama-direct, the same out-of-registry
+    technique test_model.py pins with_auth's own refusal with."""
+    from dataclasses import replace
+
+    import codehelper.services.model as model_mod
+    from codehelper.services.model import AuthPolicy
+
+    paths = Paths.from_home(tmp_path)
+    provider = with_auth(get_provider("ollama-direct"), want_secret=True)
+    spec = build_spec(agent="claude", provider=provider, model="m", alias="od")
+    install_wrapper(paths, spec, token="sk-downgraded")
+
+    downgraded = replace(get_provider("ollama-direct"), auth_policy=AuthPolicy.FIXED)
+    monkeypatch.setattr(
+        model_mod,
+        "PROVIDERS",
+        tuple(
+            downgraded if p.name == "ollama-direct" else p for p in model_mod.PROVIDERS
+        ),
+    )
+
+    # Must return None, not raise — and not hand back a literal spec either.
+    assert spec_from_installed(paths, "od") is None
+
+
+@pytest.mark.integration
+def test_install_over_a_secret_override_wrapper_with_a_lost_profile_refuses(tmp_path):
+    """The `_discards_only_secret` fallback must honour the marker's recorded
+    auth (issue #81): an OPENAI_TOML secret wrapper whose sibling profile is
+    gone still holds the only copy of its token — `spec_from_installed`
+    returns None (no model to recover), and the marker-level fallback used to
+    ask the REGISTRY, which answers "literal" for ollama-direct. A literal
+    replacement at the same alias must refuse without --force, not silently
+    destroy the token."""
+    paths = Paths.from_home(tmp_path)
+    provider = with_auth(get_provider("ollama-direct"), want_secret=True)
+    secret = build_spec(agent="codex", provider=provider, model="m", alias="sec")
+    install_wrapper(paths, secret, token="sk-only-copy")
+    paths.codex_config_for("sec").unlink()  # lose the profile → no model to recover
+
+    literal = build_spec(
+        agent="codex", provider=get_provider("ollama-direct"), model="m", alias="sec"
+    )
+    with pytest.raises(CodeHelperError, match="only copy"):
+        install_wrapper(paths, literal, token="")
 
 
 @pytest.mark.integration

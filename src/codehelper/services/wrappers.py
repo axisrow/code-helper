@@ -42,6 +42,7 @@ from codehelper.services.model import (
     ConfigShape,
     Provider,
     get_provider_for_legacy_read,
+    with_auth,
     with_base_url,
 )
 from codehelper.services.naming import is_valid_alias_shape
@@ -198,6 +199,13 @@ def _ownership_marker_provider_is_secret(paths: Paths, name: str) -> bool:
     if marker is None:
         return False
     fields = dict(re.findall(r"(\w+)=([^,()\s]+)", marker[len(MARKER_PREFIX) :]))
+    # The RECORDED auth first (issue #81): a wrapper installed with
+    # `--auth secret` on an OVERRIDABLE provider (ollama-direct) is secret
+    # even though the registry answers "literal" — the registry check below
+    # is the fallback for markers predating the auth field, which is all it
+    # was ever able to answer for anyway.
+    if fields.get("auth") == "secret":
+        return True
     provider_name = fields.get("provider")
     if not provider_name:
         return False
@@ -320,7 +328,21 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     tiers = _tiers_from_body(body)
 
     try:
-        provider_obj = get_provider_for_legacy_read(fields["provider"])
+        # The RECORDED auth, honoured the way the recorded shape is (issue
+        # #81): `with_auth` re-substitutes the runtime override the wrapper
+        # was installed with, so every consumer of this reconstruction —
+        # `switch --from-wrapper`, the TUI chipset, `edit-token`, the
+        # ownership checks — gets the same answer the apply path would.
+        # A marker WITHOUT the field predates the recording (or names a
+        # literal wrapper): want_secret=False leaves the registry default
+        # standing, which is exactly the pre-#81 behaviour — the migration
+        # fallback. `auth=secret` on a provider the registry no longer lets
+        # override (a hand-edited marker, a registry downgrade) raises and
+        # fails closed to None, like any other unrecognised marker value.
+        provider_obj = with_auth(
+            get_provider_for_legacy_read(fields["provider"]),
+            want_secret=fields.get("auth") == "secret",
+        )
     except CodeHelperError:
         return None
 
