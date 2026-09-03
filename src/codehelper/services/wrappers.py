@@ -91,6 +91,7 @@ __all__ = [
     "describe_all",
     "discover_managed",
     "valid_default_wrapper",
+    "removal_discards_only_secret",
     "get_spec",
     "WRAPPERS",
 ]
@@ -165,6 +166,43 @@ def is_managed(paths: Paths, name: str) -> bool:
     answer, since it makes the guard refuse rather than clobber.
     """
     return _ownership_marker_at(paths.script_for(name))
+
+
+def removal_discards_only_secret(paths: Paths, name: str) -> bool:
+    """True iff removing ``name`` would destroy the only durable copy of a token.
+
+    The removal-flavored counterpart of :func:`_discards_only_secret`, which
+    guards the install/overwrite path: that path already refuses to discard
+    "the only copy of its token", and ``disable`` deletes with a strictly
+    wider blast radius, so it asks the same question before unlinking. A
+    wrapper is at risk when its OWN marker names a secret-auth provider (the
+    profile-independent check — a missing/corrupt ``OPENAI_TOML`` sibling
+    must not lower the guard) AND its token is not durably stored in
+    ``credentials.json`` under its provider: an env-sourced token is never
+    cached, and an ``add`` that saw a disagreeing cache entry invalidated it,
+    so the file can genuinely be the last copy. Literal wrappers carry no
+    credential and a cached token survives ``disable`` by contract — False.
+    Anything ambiguous (unreadable body, unresolvable provider) counts as
+    at-risk, the same fail-closed direction the overwrite guard takes.
+    """
+    if not is_managed(paths, name):
+        return False
+    if not _ownership_marker_provider_is_secret(paths, name):
+        return False
+    provider_name = _installed_provider_name(paths, name)
+    token = (
+        token_from_installed(paths, name, provider_name)
+        if provider_name is not None
+        else None
+    )
+    if not token:
+        return True
+    from codehelper.services.secrets import credential_for, profile_names
+
+    return token not in (
+        credential_for(paths, provider_name, profile)
+        for profile in profile_names(paths, provider_name)
+    )
 
 
 def _marker_fields_from(body: str) -> dict[str, str]:

@@ -334,12 +334,16 @@ codehelper enable ollama
 From then on the provider disappears from every choice surface — `add` menus,
 `switch`, the TUI chipset, the tokens and profile screens — and `list
 providers` keeps showing it tagged `(disabled)`. Tokens in
-`credentials.json` are kept, so `enable` reuses them. `enable` only lifts the
-mark: it does **not** restore the deleted wrappers — recreate them with
-`codehelper add`. `native` (the agent's own backend-clearing entry) cannot be
-disabled. If any wrapper cannot be removed, the whole `disable` is refused
-with `state.json` untouched — retry after fixing the cause (`--force` for
-files `codehelper` did not create).
+`credentials.json` are kept, so `enable` reuses them — and a wrapper whose
+token was never cached (it exists nowhere but the file) blocks the disable
+unless you pass `--force`. A live `switch` or `set-default` config that still
+names the provider is left alone (only `switch`/`set-default` touch agent
+config files) — `disable` prints a note with the clearing command instead.
+`enable` only lifts the mark: it does **not** restore the deleted wrappers —
+recreate them with `codehelper add`. `native` (the agent's own
+backend-clearing entry) cannot be disabled. If any wrapper cannot be removed,
+the whole `disable` is refused with `state.json` untouched — retry after
+fixing the cause (`--force` for files `codehelper` did not create).
 
 ## Safety
 

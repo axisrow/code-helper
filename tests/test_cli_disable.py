@@ -13,7 +13,9 @@ from __future__ import annotations
 import pytest
 
 from codehelper.__main__ import main
+from codehelper.services.model import get_provider
 from codehelper.services.paths import Paths
+from codehelper.services.spec import build_spec
 from codehelper.services.state import (
     active_selection,
     context_window,
@@ -24,6 +26,7 @@ from codehelper.services.state import (
 from codehelper.services.wrappers import (
     install_wrapper,
     is_installed,
+    removal_discards_only_secret,
 )
 
 
@@ -203,8 +206,8 @@ def test_tokens_hides_a_disabled_providers_rows(tmp_path, capsys):
     from codehelper.services.secrets import save_credential
 
     paths = Paths.from_home(tmp_path)
-    save_credential(paths, "ollama-direct", "default", "sk-ollama")
-    save_credential(paths, "zai", "default", "sk-zai")
+    save_credential(paths, "ollama-direct", "sk-ollama")
+    save_credential(paths, "zai", "sk-zai")
     main(["disable", "ollama-direct", "--yes"])
     cache_rows, env_rows = _token_view_rows(paths)
     assert all(row[0] != "ollama-direct" for row in cache_rows)
@@ -218,3 +221,102 @@ def test_enable_makes_add_work_again(tmp_path):
     main(["enable", "ollama-direct"])
     # Wrappers are NOT restored (see the test above) — but `add` works again.
     assert main(["add", "deepseek-ollama", "--dry-run"]) == 0
+
+
+# --------------------------------------------------------------------------- #
+# round-1 review fixes (cycle 1): live-config warning + only-copy token guard
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_disable_warns_when_claude_live_config_still_names_the_provider(
+    tmp_path, capsys
+):
+    """Disable hides the provider from choice surfaces by design, but a live
+    `switch` config is state — it keeps aiming claude at the retired backend.
+    Disable must SAY so (with the documented `switch native` remedy), not
+    leave the user auth-failing with no visible cause."""
+    from codehelper.services.claude_settings import apply_switch
+    from codehelper.services.model import with_auth
+    from codehelper.services.secrets import save_credential
+    from codehelper.services.spec import TierModels
+
+    paths = Paths.from_home(tmp_path)
+    apply_switch(
+        paths,
+        provider=with_auth(get_provider("zai"), want_secret=True),
+        tier_models=TierModels.uniform("glm-5.3"),
+        token="sk-live",
+        subagent_model=None,
+        context_window=None,
+        force=True,
+    )
+    install_wrapper(paths, "glm", token="sk-live")
+    save_credential(paths, "zai", "sk-live")  # cached → the only-copy guard passes
+    assert main(["disable", "zai", "--yes"]) == 0
+    err = capsys.readouterr().err
+    assert "zai" in err
+    assert "switch native" in err
+
+
+@pytest.mark.integration
+def test_disable_warns_when_codex_default_still_names_the_provider(tmp_path, capsys):
+    from codehelper.services.codex_default import apply_set_default
+    from codehelper.services.model import get_agent
+    from codehelper.services.secrets import save_credential
+
+    paths = Paths.from_home(tmp_path)
+    apply_set_default(
+        paths,
+        agent=get_agent("codex"),
+        provider=get_provider("deepseek-openai"),
+        model="deepseek-v4-flash",
+        force=True,
+    )
+    install_wrapper(
+        paths,
+        build_spec(agent="codex", provider="deepseek-openai", model="qwen3.5:9b"),
+        token="sk-ds",
+    )
+    save_credential(paths, "deepseek-openai", "sk-ds")
+    assert main(["disable", "deepseek-openai", "--yes"]) == 0
+    err = capsys.readouterr().err
+    assert "deepseek-openai" in err
+    assert "set-default --restore" in err
+
+
+@pytest.mark.integration
+def test_disable_refuses_to_delete_the_only_copy_of_a_token(tmp_path, capsys):
+    """A secret wrapper whose token was never cached (env-sourced at install,
+    cache invalidated) holds the ONLY durable copy — deletion loses it for
+    good. The overwrite path already refuses exactly this; disable must ask
+    the same question before unlinking, and --force is the explicit override.
+    A dry run refuses too — it must never promise a disable that cannot run.
+    """
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token="sk-only-copy")  # zai, secret, NOT cached
+
+    assert main(["disable", "zai", "--dry-run"]) == 1
+    assert is_installed(paths, "glm")
+    assert main(["disable", "zai", "--yes"]) == 1
+    assert is_installed(paths, "glm")
+    assert "--force" in capsys.readouterr().err
+    assert removal_discards_only_secret(paths, "glm") is True
+
+    assert main(["disable", "zai", "--yes", "--force"]) == 0
+    assert not is_installed(paths, "glm")
+
+
+@pytest.mark.integration
+def test_disable_proceeds_when_the_token_is_cached(tmp_path):
+    """The documented promise — cached tokens survive disable — is what makes
+    the guard narrow: a wrapper whose token IS in credentials.json deletes
+    without any extra flag."""
+    from codehelper.services.secrets import save_credential
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token="sk-cached")
+    save_credential(paths, "zai", "sk-cached")
+    assert removal_discards_only_secret(paths, "glm") is False
+    assert main(["disable", "zai", "--yes"]) == 0
+    assert not is_installed(paths, "glm")

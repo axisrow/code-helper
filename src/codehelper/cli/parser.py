@@ -117,6 +117,7 @@ from codehelper.services.wrappers import (
     install_wrapper,
     is_installed,
     list_wrappers,
+    removal_discards_only_secret,
     remove_wrapper,
     spec_from_installed,
     token_from_installed,
@@ -1114,6 +1115,33 @@ def _handle_remove(args: argparse.Namespace | RemoveRequest) -> int:
     return 0
 
 
+def _warn_live_configs(paths, provider) -> None:
+    """Point at agent configs still aimed at ``provider`` after a disable.
+
+    Disable hides the provider from CHOICE surfaces by design; a live
+    ``switch``/``set-default`` config is state, not a choice — and the
+    documented invariant that only ``switch``/``set-default`` may touch an
+    agent's own config file rules out clearing it here. What disable owes
+    instead is the hint: the motivating case (a subscription ending)
+    otherwise produces auth failures with no visible cause, because the
+    chipset row that showed the live backend is gone. stderr, like
+    ``_warn_env_cache_conflict``, so a TUI capture still surfaces it.
+    Read-only: both readbacks never raise.
+    """
+    if claude_settings.current_switch(paths) == provider.name:
+        print(
+            f"note: claude's live settings still point at {provider.name} — "
+            f"`codehelper switch native` clears them",
+            file=sys.stderr,
+        )
+    if codex_default.current_default(paths) == provider.name:
+        print(
+            f"note: codex's persisted default still names {provider.name} — "
+            f"`codehelper set-default --restore` clears it",
+            file=sys.stderr,
+        )
+
+
 def _handle_disable(args: argparse.Namespace | DisableRequest) -> int:
     """Disable a provider at runtime (issue #89): delete its wrappers, hide it.
 
@@ -1141,6 +1169,24 @@ def _handle_disable(args: argparse.Namespace | DisableRequest) -> int:
         raise CodeHelperError(f"provider {provider.name} is already disabled")
 
     targets = wrappers_for_provider(paths, provider)
+    # Only-copy preflight (round-1 review, cycle 1): BEFORE the dry-run
+    # branch, so a dry run refuses exactly what the real run would refuse —
+    # it must never promise a disable that cannot run. A secret wrapper
+    # whose token was never cached holds the only durable copy; deleting it
+    # is irreversible in a way "tokens are kept" does not cover, so it takes
+    # the explicit --force, the same bar the overwrite path sets.
+    irrecoverable = [
+        alias for alias in targets if removal_discards_only_secret(paths, alias)
+    ]
+    if irrecoverable and not req.force:
+        raise CodeHelperError(
+            f"refusing to disable {provider.name}: "
+            f"{', '.join(irrecoverable)} "
+            f"{'holds a token' if len(irrecoverable) == 1 else 'hold tokens'} "
+            f"that exists nowhere outside the wrapper file — cache it first "
+            f"(`codehelper add` on the wrapper re-caches) or pass --force "
+            f"to delete anyway"
+        )
     if req.dry_run:
         for alias in targets:
             remove_wrapper(paths, alias, dry_run=True)
@@ -1168,6 +1214,7 @@ def _handle_disable(args: argparse.Namespace | DisableRequest) -> int:
         )
 
     state.set_provider_disabled(paths, provider.name, True, storage_names=storage_names)
+    _warn_live_configs(paths, provider)
     removed = (
         f" ({len(targets)} wrapper{'s' if len(targets) != 1 else ''} removed)"
         if targets
