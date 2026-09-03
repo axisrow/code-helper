@@ -41,30 +41,21 @@ from dataclasses import dataclass
 
 from codehelper.backends._atomic import atomic_write
 from codehelper.errors import CodeHelperError
-from codehelper.services.model import RETIRED_PROVIDER_NAMES
+from codehelper.services.model import RETIRED_PROVIDER_NAMES, provider_storage_names
 from codehelper.services.paths import Paths
-
-#: Reverse of ``model.RETIRED_PROVIDER_NAMES`` — current provider name ->
-#: the retired name a pre-rename ``credentials.json`` may still hold a token
-#: under. Derived, not hand-maintained, so it cannot drift from the one
-#: source of truth in ``model.py``.
-_LEGACY_PROVIDER_NAME_FOR: dict[str, str] = {
-    current: retired for retired, current in RETIRED_PROVIDER_NAMES.items()
-}
 
 
 def _storage_names(provider_name: str) -> tuple[str, ...]:
     """``provider_name``, plus its retired predecessor name if it has one.
 
-    The ONE decision point for "which keys in credentials.json/state.json
-    may this provider be stored under" — every read path below
-    (:func:`profile_names`, :func:`valid_active_profile`,
-    :func:`credential_for`) consults this instead of separately re-deriving
-    the same current-name/legacy-name fallback, so a second retired name
-    only ever needs updating here.
+    The read-path consumer of ``model.provider_storage_names`` — the ONE
+    decision point for "which spellings may this provider be stored under"
+    now lives THERE, next to :data:`model.RETIRED_PROVIDER_NAMES`. Every
+    read path below (:func:`profile_names`, :func:`valid_active_profile`,
+    :func:`credential_for`) consults this wrapper instead of re-deriving
+    the current-name/legacy-name fallback separately.
     """
-    legacy_name = _LEGACY_PROVIDER_NAME_FOR.get(provider_name)
-    return (provider_name, legacy_name) if legacy_name else (provider_name,)
+    return provider_storage_names(provider_name)
 
 
 try:

@@ -600,8 +600,14 @@ class TuiSession:
     # --- wrappers --------------------------------------------------------
 
     def _all_wrapper_specs(self):
-        """Presets plus managed constructor wrappers, without duplicate names."""
+        """Presets plus managed constructor wrappers, without duplicate names.
+
+        Wrappers of a runtime-disabled provider are excluded (issue #89) —
+        the provider vanishes from the chipset and this list together.
+        """
+        from codehelper.services.model import is_provider_disabled
         from codehelper.services.paths import Paths
+        from codehelper.services.state import disabled_providers
         from codehelper.services.wrappers import (
             WRAPPERS,
             discover_managed,
@@ -609,14 +615,20 @@ class TuiSession:
         )
 
         paths = Paths.default()
+        disabled = disabled_providers(paths)
         specs = []
         known = set()
         for spec in WRAPPERS:
             resolved = spec_from_installed(paths, spec.name) or spec
+            if is_provider_disabled(resolved.provider, disabled):
+                continue
             specs.append(resolved)
             known.add(resolved.name)
         for name in discover_managed(paths):
-            if name not in known and (spec := spec_from_installed(paths, name)):
+            if name in known:
+                continue
+            spec = spec_from_installed(paths, name)
+            if spec and not is_provider_disabled(spec.provider, disabled):
                 specs.append(spec)
                 known.add(name)
         return specs
@@ -841,10 +853,16 @@ class TuiSession:
         actually calling it per provider.
         """
         from codehelper.services.model import AuthPolicy, compatible_providers
+        from codehelper.services.paths import Paths
+        from codehelper.services.state import disabled_providers
 
         items: list[tuple[str, str]] = []
         choices = {}
-        for provider in compatible_providers(agent):
+        # Disabled providers are not offered (issue #89) — compatible_providers
+        # carries the filter so an OVERRIDABLE provider's `:secret` twin
+        # (the same provider re-keyed) cannot leak back in below it.
+        disabled = disabled_providers(Paths.default())
+        for provider in compatible_providers(agent, disabled=disabled):
             items.append((provider.name, f"{provider.name} — {provider.description}"))
             choices[provider.name] = (provider, False)
             if (
@@ -1186,6 +1204,7 @@ class TuiSession:
                         f"Proxy address: {status.display_restorable_url or '(none)'}",
                     ),
                     ("proxy-no-proxy", f"NO_PROXY: {status.no_proxy or '(none)'}"),
+                    ("providers", "Providers"),
                     ("tokens", "Tokens"),
                     ("debug", f"Debug: {'on' if debug else 'off'}"),
                     (
@@ -1204,6 +1223,8 @@ class TuiSession:
                 self.args.dry_run = not getattr(self.args, "dry_run", False)
             elif choice == "tokens":
                 self._run_tokens_screen()
+            elif choice == "providers":
+                self._run_providers_screen()
             elif choice == "proxy-url":
                 entered = self._read_text("Proxy URL (e.g. http://127.0.0.1:8118): ")
                 if entered is None or not entered.strip():
@@ -1216,6 +1237,64 @@ class TuiSession:
                 if entered is None:
                     continue
                 self._run(_handle_proxy, self._proxy_request(no_proxy=entered.strip()))
+
+    def _run_providers_screen(self) -> None:
+        """Settings → Providers: runtime disable/enable per provider (issue #89).
+
+        One row per non-``env_reset`` registry provider, labelled with its
+        current state; Enter toggles by dispatching the REAL
+        ``parser._handle_disable``/``_handle_enable`` — the pick IS the
+        confirmation (``yes=True``), the same opt-in a chip press makes. The
+        submenu loops, so the label of the just-toggled row doubles as the
+        operation's result. ``env_reset`` providers (``native``) are absent:
+        they are the agent's own backend-clearing entry and ``disable``
+        refuses them — showing an action that can only fail would be noise.
+        """
+        from codehelper.cli.parser import _handle_disable, _handle_enable
+        from codehelper.cli.requests import DisableRequest, EnableRequest
+        from codehelper.services.model import PROVIDERS, is_provider_disabled
+        from codehelper.services.paths import Paths
+        from codehelper.services.state import disabled_providers
+
+        while True:
+            paths = Paths.default()
+            disabled = disabled_providers(paths)
+            dry_run = getattr(self.args, "dry_run", False)
+            debug = getattr(self.args, "debug", False)
+            rows = []
+            states = {}
+            for provider in PROVIDERS:
+                if provider.env_reset:
+                    continue
+                off = is_provider_disabled(provider, disabled)
+                states[provider.name] = off
+                rows.append(
+                    (
+                        provider.name,
+                        f"{provider.name}: {'disabled' if off else 'enabled'}"
+                        f"{'  (suspended)' if provider.suspended else ''}",
+                    )
+                )
+            choice = self._pick([*rows, (_BACK, "Back")], "Providers:")
+            if choice == _BACK:
+                return
+            if states.get(choice):
+                self._run(
+                    _handle_enable,
+                    EnableRequest(name=choice, dry_run=dry_run, debug=debug),
+                )
+            else:
+                self._run(
+                    _handle_disable,
+                    DisableRequest(
+                        name=choice,
+                        # The submenu pick IS the confirmation.
+                        yes=True,
+                        force=False,
+                        dry_run=dry_run,
+                        debug=debug,
+                    ),
+                )
 
     def _proxy_request(self, **overrides) -> object:
         """A ``ProxyRequest`` carrying this session's flags plus ``overrides``.
@@ -1404,11 +1483,16 @@ class TuiSession:
         keeps the Profile screen and Tab's fallback scan able to find
         profiles cached under an OVERRIDABLE provider.
         """
-        from codehelper.services.model import PROVIDERS, AuthPolicy
+        from codehelper.services.model import AuthPolicy, active_providers
+        from codehelper.services.paths import Paths
+        from codehelper.services.state import disabled_providers
 
+        disabled = disabled_providers(Paths.default())
+        # A disabled provider's profiles are not offered as choices (issue
+        # #89) — the tokens view hides its rows the same way.
         return [
             p
-            for p in PROVIDERS
+            for p in active_providers(disabled)
             if p.auth == "secret" or p.auth_policy is AuthPolicy.OVERRIDABLE
         ]
 
@@ -1573,12 +1657,26 @@ class TuiSession:
         wrappers yet) so that row always has a visible way to get its first
         one instead of reading as empty/broken.
         """
+        from codehelper.services.model import is_provider_disabled
         from codehelper.services.spec import PRESETS, spec_from_preset
+        from codehelper.services.state import disabled_providers
         from codehelper.services.wrappers import discover_managed, spec_from_installed
 
-        presets = [
-            spec_from_preset(preset) for preset in PRESETS if preset.agent == agent_name
-        ]
+        disabled = disabled_providers(paths)
+
+        def _live(spec) -> bool:
+            # A disabled provider produces NO chip at all (issue #89) — not a
+            # greyed-out one: its wrappers were deleted on disable, so a chip
+            # here would promise an Enter that cannot resolve.
+            return not is_provider_disabled(spec.provider, disabled)
+
+        presets = []
+        for preset in PRESETS:
+            if preset.agent != agent_name:
+                continue
+            spec = spec_from_preset(preset)
+            if _live(spec):
+                presets.append(spec)
         # A managed constructor wrapper has no registry entry and therefore
         # is an additional chip.  A preset name is deliberately not recovered
         # from disk: its chip means the canonical preset, never whatever file
@@ -1589,6 +1687,7 @@ class TuiSession:
             for name in discover_managed(paths)
             if (spec := spec_from_installed(paths, name)) is not None
             and spec.agent.name == agent_name
+            and _live(spec)
         ]
         return [_NATIVE_CHIP, *presets, *ad_hoc, _ADD_CHIP]
 

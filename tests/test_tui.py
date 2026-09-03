@@ -2867,3 +2867,120 @@ def test_ctx_wrapper_chip_matches_only_itself(monkeypatch):
     assert session._chip_is_applied("claude", _chip_named(session, "mystery")) is False
     assert "✓ mystery-1m" in session._chip_row("claude")(selected=False, ansi=False)
     assert "✓ mystery " not in session._chip_row("claude")(selected=False, ansi=False)
+
+
+# --------------------------------------------------------------------------- #
+# Settings → Providers submenu — runtime disable/enable parity (issue #89)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_providers_submenu_dispatches_the_real_handlers(monkeypatch):
+    """The submenu must dispatch into parser._handle_disable/_handle_enable —
+    the TUI mirrors the CLI, never a second implementation. The pick IS the
+    confirmation (yes=True), so `disable ollama-direct` from the submenu
+    deletes its wrappers and writes state exactly like the command."""
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+    from codehelper.services.paths import Paths
+    from codehelper.services.state import disabled_providers
+    from codehelper.services.wrappers import install_wrapper, is_installed
+
+    install_wrapper(Paths.default(), "deepseek-ollama", token="ollama")
+
+    seen: list[str] = []
+    picks = iter(["ollama-direct", "__back__"])  # toggle once, then leave
+
+    def _select(items, *, prompt, **_kwargs):
+        text = prompt() if callable(prompt) else prompt
+        seen.append(text)
+        return next(picks)
+
+    monkeypatch.setattr(menu, "select_from_menu", _select)
+    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session._run_providers_screen()
+
+    assert "Providers:" in seen
+    assert disabled_providers(Paths.default()) == frozenset({"ollama-direct"})
+    assert not is_installed(Paths.default(), "deepseek-ollama")
+
+
+@pytest.mark.integration
+def test_providers_submenu_toggles_back_to_enabled(monkeypatch):
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+    from codehelper.services.paths import Paths
+    from codehelper.services.state import disabled_providers, set_provider_disabled
+
+    set_provider_disabled(
+        Paths.default(),
+        "ollama-direct",
+        True,
+        storage_names=frozenset({"ollama", "ollama-direct"}),
+    )
+    picks = iter(["ollama-direct", "__back__"])  # toggle once, then leave
+
+    def _select(items, *, prompt, **_kwargs):
+        return next(picks)
+
+    monkeypatch.setattr(menu, "select_from_menu", _select)
+    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session._run_providers_screen()
+    assert disabled_providers(Paths.default()) == frozenset()
+
+
+@pytest.mark.integration
+def test_providers_submenu_hides_env_reset_and_tags_suspended(monkeypatch):
+    """`native` (env_reset) is absent — disable refuses it, so offering it
+    would be an action that can only fail. gemini stays visible (tagged)."""
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+
+    captured: dict = {}
+
+    def _select(items, *, prompt, **_kwargs):
+        captured["rows"] = {
+            value: label for value, label in items if isinstance(value, str)
+        }
+        return "__back__"
+
+    monkeypatch.setattr(menu, "select_from_menu", _select)
+    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session._run_providers_screen()
+
+    assert "native" not in captured["rows"]
+    assert "gemini" in captured["rows"]
+    assert "suspended" in captured["rows"]["gemini"]
+    assert captured["rows"]["ollama-direct"] == "ollama-direct: enabled"
+
+
+@pytest.mark.integration
+def test_chips_of_a_disabled_provider_vanish_from_the_chipset():
+    """A disabled provider produces NO chip at all — its wrappers were
+    deleted on disable, so a greyed chip would promise an Enter that cannot
+    resolve."""
+    from codehelper.cli.tui import TuiSession
+    from codehelper.services.paths import Paths
+    from codehelper.services.state import set_provider_disabled
+    from codehelper.services.wrappers import install_wrapper
+
+    install_wrapper(Paths.default(), "deepseek-ollama", token="ollama")
+    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session._refresh_active_label()
+    assert any(
+        getattr(chip, "name", None) == "deepseek-ollama"
+        for chip in session._chips_for("claude", Paths.default())
+    )
+
+    set_provider_disabled(
+        Paths.default(),
+        "ollama-direct",
+        True,
+        storage_names=frozenset({"ollama", "ollama-direct"}),
+    )
+    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session._refresh_active_label()
+    assert not any(
+        getattr(chip, "name", None) == "deepseek-ollama"
+        for chip in session._chips_for("claude", Paths.default())
+    )

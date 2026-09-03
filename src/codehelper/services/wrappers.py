@@ -167,6 +167,57 @@ def is_managed(paths: Paths, name: str) -> bool:
     return _ownership_marker_at(paths.script_for(name))
 
 
+def _marker_fields_from(body: str) -> dict[str, str]:
+    """The ``key=value`` fields of the ownership marker inside ``body``.
+
+    The ONE parser for the marker's field syntax — the first-two-line scan
+    and the ``key=value`` regex — behind :func:`_marker_fields`,
+    :func:`_ownership_marker_provider_is_secret`,
+    :func:`_installed_provider_name`, and :func:`spec_from_installed`. The
+    regex has grown fields twice (``auth=`` #81, ``ctx=`` #83); the next one
+    happens here or nowhere. Empty dict when ``body`` carries no marker on
+    its first two lines.
+    """
+    marker = next(
+        (ln for ln in body.split("\n")[:2] if ln.startswith(MARKER_PREFIX)), None
+    )
+    if marker is None:
+        return {}
+    return dict(re.findall(r"(\w+)=([^,()\s]+)", marker[len(MARKER_PREFIX) :]))
+
+
+def _marker_fields(paths: Paths, name: str) -> dict[str, str]:
+    """The marker fields of the INSTALLED wrapper ``name`` (file-reading form
+    of :func:`_marker_fields_from`). Empty dict for a missing/unreadable
+    file."""
+    body = read_text_or_none(paths.script_for(name))
+    if body is None:
+        return {}
+    return _marker_fields_from(body)
+
+
+def _installed_provider_name(paths: Paths, name: str) -> str | None:
+    """The provider name recorded by the INSTALLED wrapper ``name``, or ``None``.
+
+    Reads ONLY the marker's ``provider=`` field — every caller arrives
+    marker-gated (``is_managed``/``discover_managed``), and the marker is the
+    same source :func:`spec_from_installed` would resolve the provider from,
+    so a full spec reconstruction (body parse, possible TOML profile read,
+    ``build_spec`` validation) would buy nothing but a second file read per
+    candidate. Survives a missing/corrupt ``OPENAI_TOML`` profile sibling the
+    way :func:`_ownership_marker_provider_is_secret` does; ``None`` for a
+    wrapper whose provider cannot even be named — not this function's
+    problem to guess.
+    """
+    provider_name = _marker_fields(paths, name).get("provider")
+    if not provider_name:
+        return None
+    try:
+        return get_provider_for_legacy_read(provider_name).name
+    except CodeHelperError:
+        return None
+
+
 def _ownership_marker_provider_is_secret(paths: Paths, name: str) -> bool:
     """True iff the installed wrapper's OWN marker names a secret-auth provider.
 
@@ -190,15 +241,7 @@ def _ownership_marker_provider_is_secret(paths: Paths, name: str) -> bool:
     the same fail-open-to-"not secret" default the guard already had, just no
     longer reachable via a corrupt profile specifically.
     """
-    body = read_text_or_none(paths.script_for(name))
-    if body is None:
-        return False
-    marker = next(
-        (ln for ln in body.split("\n")[:2] if ln.startswith(MARKER_PREFIX)), None
-    )
-    if marker is None:
-        return False
-    fields = dict(re.findall(r"(\w+)=([^,()\s]+)", marker[len(MARKER_PREFIX) :]))
+    fields = _marker_fields(paths, name)
     # The RECORDED auth first (issue #81): a wrapper installed with
     # `--auth secret` on an OVERRIDABLE provider (ollama-direct) is secret
     # even though the registry answers "literal" — the registry check below
@@ -287,10 +330,8 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     if body is None:
         return None
 
-    marker = next(
-        (ln for ln in body.split("\n")[:2] if ln.startswith(MARKER_PREFIX)), None
-    )
-    if marker is None:
+    fields = _marker_fields_from(body)
+    if not fields:
         # A markerless file predates the marker, so its axes are not recorded
         # anywhere — but if a preset of this name renders to the same body
         # (any model), that preset supplies them and the FILE supplies the
@@ -298,8 +339,6 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
         # ``--model`` reverted it to the preset defaults: the very bug the
         # installed-spec lookup exists to prevent, just one release older.
         return _spec_from_legacy_body(name, body)
-
-    fields = dict(re.findall(r"(\w+)=([^,()\s]+)", marker[len(MARKER_PREFIX) :]))
 
     # The OPENAI_TOML wrapper body embeds no model — it lives in the sibling
     # TOML profile — so recover it from there rather than the body. The other
@@ -1519,6 +1558,32 @@ def discover_managed(paths: Paths) -> list[str]:
         and _is_usable_alias(entry.name)
     ]
     return sorted(found)
+
+
+def wrappers_for_provider(paths: Paths, provider: Provider) -> list[str]:
+    """Installed managed wrappers whose resolved provider is ``provider``.
+
+    The blast-radius enumeration behind ``disable <provider>`` (issue #89):
+    every alias ``disable`` must physically delete so the provider vanishes
+    from PATH. Covers BOTH kinds — presets installed on this provider (their
+    marker names it, exactly like an ad-hoc wrapper) and ``discover_managed``
+    entries — resolved through :func:`_installed_provider_name`, so a marker
+    predating a provider rename (legacy ``ollama``) still matches via
+    :func:`get_provider_for_legacy_read`.
+
+    Sorted for a deterministic removal/preview order. Not installed → empty
+    list; never raises — a wrapper whose provider cannot even be named
+    (corrupt marker) is skipped rather than guessed at, consistent with
+    :func:`_installed_provider_name`'s contract.
+    """
+    names: set[str] = set()
+    for spec in WRAPPERS:
+        if is_installed(paths, spec.name) and is_managed(paths, spec.name):
+            names.add(spec.name)
+    names.update(discover_managed(paths))
+    return sorted(
+        name for name in names if _installed_provider_name(paths, name) == provider.name
+    )
 
 
 def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:

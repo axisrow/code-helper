@@ -21,10 +21,14 @@ from codehelper.services.model import (
     ConfigShape,
     ModelListAPI,
     Provider,
+    active_providers,
     compatible_providers,
     get_agent,
     get_provider,
+    is_provider_disabled,
+    provider_storage_names,
     resolve_shape,
+    switchable_providers,
     with_auth,
     with_base_url,
 )
@@ -857,7 +861,6 @@ def test_claude_native_pairing_is_incompatible():
 
 @pytest.mark.unit
 def test_switchable_providers_includes_native_and_the_settings_providers():
-    from codehelper.services.model import switchable_providers
 
     assert {p.name for p in switchable_providers()} == {
         "ollama-direct",
@@ -921,3 +924,52 @@ def test_env_reset_provider_with_no_address_or_credential_is_accepted():
         env_reset=True,
     )
     m._validate_provider(ok)  # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# runtime disable — active_providers / is_provider_disabled / resolver threading
+# (issue #89: disabled-ness is state.json state, independent of `suspended`)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_active_providers_none_means_no_filtering():
+    assert active_providers(None) == list(PROVIDERS)
+
+
+@pytest.mark.unit
+def test_active_providers_filters_disabled_keeps_order():
+    disabled = frozenset({"ollama-direct"})
+    names = [p.name for p in active_providers(disabled)]
+    assert "ollama-direct" not in names
+    expected = [p.name for p in PROVIDERS if p.name != "ollama-direct"]
+    assert names == expected
+
+
+@pytest.mark.unit
+def test_disabled_is_not_suspended():
+    """The two flags are orthogonal: disabling at runtime must not touch the
+    registry entry, and gemini's static suspension is not a disable."""
+    ollama = get_provider("ollama-direct")
+    assert not ollama.suspended
+    assert is_provider_disabled(ollama, frozenset({"ollama-direct"}))
+    assert not is_provider_disabled(ollama, frozenset())
+    assert not is_provider_disabled(ollama, None)
+
+
+@pytest.mark.unit
+def test_compatible_providers_excludes_disabled():
+    agent = get_agent("claude")
+    full = compatible_providers(agent)
+    assert any(p.name == "ollama-direct" for p in full)
+    filtered = compatible_providers(agent, disabled=frozenset({"ollama-direct"}))
+    assert all(p.name != "ollama-direct" for p in filtered)
+
+
+@pytest.mark.unit
+def test_provider_storage_names_is_the_one_spelling_decision_point():
+    """``provider_storage_names`` owns "which spellings may identify this
+    provider in persisted records": the canonical name plus its retired
+    predecessor, nothing else — and an unrenamed provider is just itself."""
+    assert provider_storage_names("ollama-direct") == ("ollama-direct", "ollama")
+    assert provider_storage_names("zai") == ("zai",)

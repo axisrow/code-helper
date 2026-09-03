@@ -48,6 +48,7 @@ from codehelper.services.wrappers import (
     spec_from_installed,
     token_from_installed,
     valid_default_wrapper,
+    wrappers_for_provider,
 )
 
 
@@ -2931,3 +2932,62 @@ def test_window_models_is_the_single_source_for_every_shape():
     )
     assert sub.window_models == ["glm-5.3", "glm-5.3", "glm-5.3", "mystery-sub"]
     assert _declared_window(sub) is None
+
+
+# --------------------------------------------------------------------------- #
+# wrappers_for_provider — disable's blast-radius enumeration (issue #89)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_wrappers_for_provider_finds_installed_presets_and_ad_hoc(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "deepseek-ollama", token=_LITERAL_TOKEN)
+    install_wrapper(paths, "glm-ollama", token=_LITERAL_TOKEN)
+    install_wrapper(
+        paths, build_spec(agent="codex", provider="ollama-direct", model="qwen3.5:9b")
+    )
+    install_wrapper(paths, "glm", token="sk-something")  # zai — different provider
+
+    ollama = get_provider("ollama-direct")
+    assert wrappers_for_provider(paths, ollama) == [
+        "deepseek-ollama",
+        "glm-ollama",
+        "qwen3.5-codex",
+    ]
+    assert wrappers_for_provider(paths, get_provider("zai")) == ["glm"]
+
+
+@pytest.mark.integration
+def test_wrappers_for_provider_skips_not_installed_presets(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    assert wrappers_for_provider(paths, get_provider("ollama-direct")) == []
+
+
+@pytest.mark.integration
+def test_wrappers_for_provider_skips_unmanaged_and_foreign_files(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    paths.bin_dir.mkdir(parents=True, exist_ok=True)
+    paths.script_for("deepseek-ollama").write_text("#!/bin/sh\necho hi\n")
+    paths.script_for("blob").write_bytes(b"\x7fELF\x00\x01binary")
+    assert wrappers_for_provider(paths, get_provider("ollama-direct")) == []
+
+
+@pytest.mark.integration
+def test_wrappers_for_provider_matches_a_renamed_legacy_marker(tmp_path):
+    """A marker predating the `ollama` → `ollama-direct` rename must still
+    count as this provider's wrapper — read paths go through the legacy map."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(
+        paths, build_spec(agent="codex", provider="ollama-direct", model="qwen3.5:9b")
+    )
+    script = paths.script_for("qwen3.5-codex")
+    script.write_text(
+        script.read_text(encoding="utf-8").replace(
+            "provider=ollama-direct", "provider=ollama"
+        ),
+        encoding="utf-8",
+    )
+    assert wrappers_for_provider(paths, get_provider("ollama-direct")) == [
+        "qwen3.5-codex"
+    ]

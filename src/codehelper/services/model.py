@@ -65,8 +65,11 @@ __all__ = [
     "get_provider",
     "get_provider_for_legacy_read",
     "RETIRED_PROVIDER_NAMES",
+    "provider_storage_names",
     "validate_agent_binary",
     "resolve_shape",
+    "is_provider_disabled",
+    "active_providers",
     "compatible_providers",
     "switchable_providers",
     "with_base_url",
@@ -828,6 +831,26 @@ def get_provider(name: str) -> Provider:
 #: config.toml at all.
 RETIRED_PROVIDER_NAMES: dict[str, str] = {"ollama": "ollama-direct"}
 
+#: Reverse of :data:`RETIRED_PROVIDER_NAMES` — current provider name -> the
+#: retired name a pre-rename record may still hold. Derived, not
+#: hand-maintained, so it cannot drift from the map above.
+_LEGACY_PROVIDER_NAME_FOR: dict[str, str] = {
+    current: retired for retired, current in RETIRED_PROVIDER_NAMES.items()
+}
+
+
+def provider_storage_names(provider_name: str) -> tuple[str, ...]:
+    """``provider_name``, plus its retired predecessor name if it has one.
+
+    The ONE decision point for "which spellings of this provider may appear
+    in persisted records" — credentials.json keys (``secrets._storage_names``
+    delegates here), the disabled set and the ``active`` pointer in
+    ``state.json`` (``disable``/``enable`` normalize through it). A second
+    retired name only ever needs updating :data:`RETIRED_PROVIDER_NAMES`.
+    """
+    legacy_name = _LEGACY_PROVIDER_NAME_FOR.get(provider_name)
+    return (provider_name, legacy_name) if legacy_name else (provider_name,)
+
 
 def get_provider_for_legacy_read(name: str) -> Provider:
     """Like :func:`get_provider`, but also resolves a name this project has
@@ -901,13 +924,47 @@ def resolve_shape(
     )  # pragma: no cover
 
 
-def compatible_providers(agent: Agent) -> list[Provider]:
+def is_provider_disabled(provider: Provider, disabled: frozenset[str] | None) -> bool:
+    """Whether ``provider`` is runtime-disabled (``state.json``, issue #89).
+
+    Pure — the disabled set is read once by the caller from
+    ``state.disabled_providers`` and threaded down, keeping this module
+    IO-free so TUI label reads stay cheap. ``disabled=None`` means "no
+    filtering" — the default that keeps callers which must NOT honour the
+    disable (e.g. ``claude_settings``' readback of what is live in
+    ``~/.claude/settings.json``) working untouched.
+    """
+    return disabled is not None and provider.name in disabled
+
+
+def active_providers(disabled: frozenset[str] | None = None) -> list[Provider]:
+    """:data:`PROVIDERS` minus runtime-disabled entries, registry order.
+
+    For surfaces that enumerate the raw registry directly (the tokens view's
+    env section, the profile screen's provider list). Agent-scoped menus go
+    through :func:`compatible_providers`, which carries the same filter;
+    informational surfaces (``list providers``/``list matrix``) deliberately
+    keep showing disabled entries with a ``(disabled)`` tag, mirroring
+    ``(suspended)``.
+    """
+    return [p for p in PROVIDERS if not is_provider_disabled(p, disabled)]
+
+
+def compatible_providers(
+    agent: Agent, *, disabled: frozenset[str] | None = None
+) -> list[Provider]:
     """Providers that ``agent`` can actually use — for menus and ``list matrix``.
 
     Read-only and IO-free, so the TUI may call it to avoid offering a
-    combination that would only fail later.
+    combination that would only fail later. Runtime-disabled providers are
+    excluded when ``disabled`` is given — a disabled provider must not be
+    offered as a choice even though its shape would still pair.
     """
-    return [p for p in PROVIDERS if p.shapes & agent.shapes]
+    return [
+        p
+        for p in PROVIDERS
+        if p.shapes & agent.shapes and not is_provider_disabled(p, disabled)
+    ]
 
 
 def switchable_providers() -> list[Provider]:
@@ -919,6 +976,12 @@ def switchable_providers() -> list[Provider]:
     the intersection there is empty by construction (see the shape's
     docstring). Keeping the two resolvers separate is what guarantees adding
     this shape cannot perturb wrapper generation.
+
+    Deliberately UNFILTERED by the runtime-disabled set: the only callers are
+    ``claude_settings``' hint list and its readback of what is LIVE in
+    ``~/.claude/settings.json`` — a disabled provider whose switch is still
+    applied must keep reading by name (the honest "no ✓ marks it"), and an
+    explicit ``switch <disabled>`` is refused at the command's own gate.
     """
     return [p for p in PROVIDERS if ConfigShape.ANTHROPIC_SETTINGS in p.shapes]
 

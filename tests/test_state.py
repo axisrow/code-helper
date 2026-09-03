@@ -25,10 +25,12 @@ from codehelper.services.state import (
     active_selection,
     context_window,
     default_wrapper,
+    disabled_providers,
     load_state,
     set_active_selection,
     set_context_window,
     set_default_wrapper,
+    set_provider_disabled,
 )
 
 
@@ -386,3 +388,133 @@ def test_set_context_window_refuses_an_out_of_range_value(tmp_path):
     with pytest.raises(Exception, match="unusable context window"):
         set_context_window(paths, "m", 20_000_000)
     assert context_window(paths, "m") is None  # nothing recorded
+
+
+# --------------------------------------------------------------------------- #
+# disabled_providers / set_provider_disabled — runtime provider disable (issue #89)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_disabled_providers_unset_is_empty(tmp_path):
+    assert disabled_providers(_paths(tmp_path)) == frozenset()
+
+
+@pytest.mark.unit
+def test_set_provider_disabled_round_trips(tmp_path):
+    paths = _paths(tmp_path)
+    ollama = frozenset({"ollama-direct"})
+    set_provider_disabled(paths, "ollama-direct", True, storage_names=ollama)
+    assert disabled_providers(paths) == frozenset({"ollama-direct"})
+    set_provider_disabled(paths, "ollama-direct", False, storage_names=ollama)
+    assert disabled_providers(paths) == frozenset()
+
+
+@pytest.mark.unit
+def test_disabled_providers_ignores_a_malformed_value(tmp_path):
+    paths = _paths(tmp_path)
+    _write_state_file(paths, json.dumps({"disabled_providers": "oops"}))
+    assert disabled_providers(paths) == frozenset()
+    _write_state_file(paths, json.dumps({"disabled_providers": [42, None, "zai"]}))
+    assert disabled_providers(paths) == frozenset({"zai"})
+
+
+@pytest.mark.unit
+def test_set_provider_disabled_normalizes_legacy_spelling(tmp_path):
+    """A previously stored legacy spelling of the same provider is rewritten
+    to the canonical name on the next write — the set never holds two
+    spellings of one provider."""
+    paths = _paths(tmp_path)
+    _write_state_file(paths, json.dumps({"disabled_providers": ["ollama"]}))
+    set_provider_disabled(
+        paths,
+        "ollama-direct",
+        True,
+        storage_names=frozenset({"ollama", "ollama-direct"}),
+    )
+    assert disabled_providers(paths) == frozenset({"ollama-direct"})
+
+
+@pytest.mark.unit
+def test_set_provider_disabled_preserves_unrelated_keys_and_providers(tmp_path):
+    paths = _paths(tmp_path)
+    _write_state_file(
+        paths,
+        json.dumps(
+            {
+                "disabled_providers": ["deepseek"],
+                "default_wrapper": {"claude": "glm"},
+                "future_field": "keep-me",
+            }
+        ),
+    )
+    set_provider_disabled(
+        paths,
+        "ollama-direct",
+        True,
+        storage_names=frozenset({"ollama-direct"}),
+    )
+    state = load_state(paths)
+    assert state["disabled_providers"] == ["deepseek", "ollama-direct"]
+    assert state["default_wrapper"] == {"claude": "glm"}
+    assert state["future_field"] == "keep-me"
+
+
+@pytest.mark.unit
+def test_disable_clears_the_active_pointer_for_both_spellings(tmp_path):
+    """A disabled provider must not survive as the active pre-selection — its
+    wrappers are gone, so the pointer could never resolve. Both the legacy
+    ("ollama") and canonical ("ollama-direct") spellings are matched."""
+    paths = _paths(tmp_path)
+    set_active_selection(paths, "ollama", "default")
+    set_provider_disabled(
+        paths,
+        "ollama-direct",
+        True,
+        storage_names=frozenset({"ollama", "ollama-direct"}),
+    )
+    assert active_selection(paths) is None
+    # …and an active pointer naming a DIFFERENT provider survives.
+    set_active_selection(paths, "zai", "axisrow")
+    set_provider_disabled(
+        paths,
+        "ollama-direct",
+        True,
+        storage_names=frozenset({"ollama", "ollama-direct"}),
+    )
+    assert active_selection(paths) == ("zai", "axisrow")
+
+
+@pytest.mark.unit
+def test_disable_clears_a_legacy_shape_active_pointer(tmp_path):
+    """The pointer cleanup reads through ``active_selection``, so a pre-upgrade
+    two-key ``state.json`` whose ``active_provider`` names the disabled
+    provider is cleared too — the docstring promises a disabled provider never
+    survives as the active pre-selection, in EITHER stored shape."""
+    paths = _paths(tmp_path)
+    _write_state_file(
+        paths,
+        json.dumps(
+            {"active_provider": "ollama", "active_profiles": {"ollama": "default"}}
+        ),
+    )
+    assert active_selection(paths) == ("ollama", "default")
+    set_provider_disabled(
+        paths,
+        "ollama-direct",
+        True,
+        storage_names=frozenset({"ollama", "ollama-direct"}),
+    )
+    assert active_selection(paths) is None
+    assert "active_provider" not in load_state(paths)
+    assert "active_profiles" not in load_state(paths)
+
+
+@pytest.mark.unit
+def test_enable_leaves_the_active_pointer_alone(tmp_path):
+    paths = _paths(tmp_path)
+    set_active_selection(paths, "zai", "axisrow")
+    ollama = frozenset({"ollama-direct"})
+    set_provider_disabled(paths, "ollama-direct", True, storage_names=ollama)
+    set_provider_disabled(paths, "ollama-direct", False, storage_names=ollama)
+    assert active_selection(paths) == ("zai", "axisrow")
