@@ -61,6 +61,11 @@ codehelper                               # arrow-key menu over all of the above
 # change what a bare `codex` (no wrapper) runs by default
 codehelper set-default --agent codex --provider ollama-direct --model glm-5.2:cloud
 codehelper set-default --restore         # undo the last set-default
+
+# retire a provider for a while (subscription ended, daemon uninstalled):
+# delete its wrappers and hide it everywhere — list/add/switch/TUI chips/tokens
+codehelper disable ollama --yes          # legacy spellings accepted ('ollama' = ollama-direct)
+codehelper enable ollama                 # lift it; wrappers are NOT restored — `add` recreates them
 ```
 
 The alias defaults to `<model>-<agent>` (`glm-5:cloud` + `codex` →
@@ -312,6 +317,33 @@ Every real write rotates a 3-slot backup ring first
 (`~/.codex/config.toml.bak1` newest, `.bak2`, `.bak3` oldest) — `--restore`
 reads one back. Off a TTY, `set-default` refuses without `--force`, same as
 `add`.
+
+## `disable` / `enable`
+
+Retire a provider at runtime without editing anything by hand — for example
+when its subscription ends:
+
+```bash
+codehelper disable ollama --yes   # 'ollama' resolves to the registry name ollama-direct
+codehelper enable ollama
+```
+
+`disable` **physically deletes** every managed wrapper of that provider
+(installed presets included, ownership guard and Codex siblings as with
+`remove`), then records the disable in `state.json` (`disabled_providers`).
+From then on the provider disappears from every choice surface — `add` menus,
+`switch`, the TUI chipset, the tokens and profile screens — and `list
+providers` keeps showing it tagged `(disabled)`. Tokens in
+`credentials.json` are kept, so `enable` reuses them — and a wrapper whose
+token was never cached (it exists nowhere but the file) blocks the disable
+unless you pass `--force`. A live `switch` or `set-default` config that still
+names the provider is left alone (only `switch`/`set-default` touch agent
+config files) — `disable` prints a note with the clearing command instead.
+`enable` only lifts the mark: it does **not** restore the deleted wrappers —
+recreate them with `codehelper add`. `native` (the agent's own
+backend-clearing entry) cannot be disabled. If any wrapper cannot be removed,
+the whole `disable` is refused with `state.json` untouched — retry after
+fixing the cause (`--force` for files `codehelper` did not create).
 
 ## Safety
 

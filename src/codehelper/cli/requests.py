@@ -33,7 +33,9 @@ from codehelper.errors import CodeHelperError
 
 __all__ = [
     "AddRequest",
+    "DisableRequest",
     "EditTokenRequest",
+    "EnableRequest",
     "ProxyRequest",
     "RemoveRequest",
     "SetDefaultRequest",
@@ -168,6 +170,51 @@ class RemoveRequest:
             name=_g(args, "name"),
             dry_run=bool(_g(args, "dry_run", False)),
             force=bool(_g(args, "force", False)),
+            debug=bool(_g(args, "debug", False)),
+        )
+
+
+@dataclass(frozen=True)
+class DisableRequest:
+    """Inputs to ``_handle_disable`` (the ``disable`` subcommand and the TUI's
+    Settings → Providers submenu, issue #89).
+
+    ``yes`` skips the file-list confirmation — the TUI's submenu pick IS the
+    confirmation, mirroring how the chipset's apply hooks opt in via force.
+    ``force`` threads into each ``remove_wrapper`` call for unmanaged files.
+    """
+
+    name: str
+    yes: bool
+    force: bool
+    dry_run: bool
+    debug: bool
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> DisableRequest:
+        return cls(
+            name=_g(args, "name"),
+            yes=bool(_g(args, "yes", False)),
+            force=bool(_g(args, "force", False)),
+            dry_run=bool(_g(args, "dry_run", False)),
+            debug=bool(_g(args, "debug", False)),
+        )
+
+
+@dataclass(frozen=True)
+class EnableRequest:
+    """Inputs to ``_handle_enable`` (the ``enable`` subcommand and the TUI's
+    Settings → Providers submenu, issue #89)."""
+
+    name: str
+    dry_run: bool
+    debug: bool
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> EnableRequest:
+        return cls(
+            name=_g(args, "name"),
+            dry_run=bool(_g(args, "dry_run", False)),
             debug=bool(_g(args, "debug", False)),
         )
 

@@ -88,6 +88,8 @@ __all__ = [
     "set_saved_proxy",
     "context_window",
     "set_context_window",
+    "disabled_providers",
+    "set_provider_disabled",
 ]
 
 
@@ -384,4 +386,82 @@ def set_context_window(paths: Paths, model: str, value: int) -> None:
             windows = {}
         windows[model] = value
         state["context_windows"] = windows
+        _write_state(paths, state)
+
+
+def disabled_providers(paths: Paths) -> frozenset[str]:
+    """The set of provider names disabled at runtime, or an empty set.
+
+    A fourth independent top-level key (``"disabled_providers": [names]``),
+    following the named-key schema — no migration. **Never raises**: a
+    missing, malformed, or non-string entry reads as "not disabled", the same
+    posture every reader here keeps. Canonicalization of a user-typed name
+    (legacy "ollama" → registry "ollama-direct") is the CALLER's job via
+    ``model.get_provider_for_legacy_read`` — this module must not depend on
+    ``model.py``, so what is stored is taken as-is.
+    """
+    state = load_state(paths)
+    entries = state.get("disabled_providers")
+    if not isinstance(entries, list):
+        return frozenset()
+    return frozenset(entry for entry in entries if _string_or_none(entry))
+
+
+def set_provider_disabled(
+    paths: Paths,
+    name: str,
+    disabled: bool,
+    *,
+    storage_names: frozenset[str],
+) -> None:
+    """Record ``name`` in (``disabled=True``) or out of (``False``) the
+    disabled set.
+
+    Same degraded posture as :func:`set_active_selection`: re-pickable UI
+    state (``enable`` simply re-runs), so a lost write is harmless and the
+    default unlocked fallback stands.
+
+    ``storage_names`` (REQUIRED — the caller derives it from
+    ``model.provider_storage_names``) lists every spelling that may identify
+    this provider in ``state.json`` — canonical registry name plus any
+    retired legacy name — and serves two purposes in ONE locked cycle: the
+    disabled set is normalized to it, and — on disable — a stale ``active``
+    pointer naming the provider is dropped in the same write, so a disabled
+    provider never survives as the active pre-selection (its wrappers are
+    gone; keeping the pointer would make the next ``add``/``edit-token`` read
+    a selection that cannot resolve). Any stored entry NOT in
+    ``storage_names`` is untouched; one of this provider's OTHER spellings is
+    rewritten to ``name``, so the set never holds two spellings of one
+    provider.
+    """
+    names = frozenset(storage_names)
+    with _locked_update(paths):
+        state = load_state(paths)
+        entries = state.get("disabled_providers")
+        others = {
+            entry
+            for entry in (entries if isinstance(entries, list) else [])
+            if _string_or_none(entry) and entry not in names
+        }
+        if disabled:
+            entries = sorted(others | {name})
+        else:
+            entries = sorted(others)
+        if entries:
+            state["disabled_providers"] = entries
+        else:
+            state.pop("disabled_providers", None)
+
+        if disabled:
+            # Route through the module's ONE active-pointer reader so BOTH
+            # stored shapes are covered: the current single pointer AND the
+            # legacy two-key shape (read-only, but still readable — a
+            # pre-upgrade pointer naming the provider must not survive
+            # either). Legacy keys are dropped outright: every write here
+            # emits only the new shape.
+            selection = active_selection(paths)
+            if selection is not None and selection[0] in names:
+                state.pop("active", None)
+                state.pop("active_provider", None)
+                state.pop("active_profiles", None)
         _write_state(paths, state)

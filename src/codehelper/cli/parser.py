@@ -42,7 +42,9 @@ from dataclasses import replace
 
 from codehelper.cli.requests import (
     AddRequest,
+    DisableRequest,
     EditTokenRequest,
+    EnableRequest,
     ProxyRequest,
     RemoveRequest,
     SetDefaultRequest,
@@ -56,6 +58,7 @@ from codehelper.services import (
     codex_default,
     models_api,
     secrets,
+    state,
 )
 from codehelper.services import (
     context_window as context_window_service,
@@ -68,8 +71,12 @@ from codehelper.services.model import (
     PROVIDERS,
     BaseUrlPolicy,
     ConfigShape,
+    active_providers,
     get_agent,
     get_provider,
+    get_provider_for_legacy_read,
+    is_provider_disabled,
+    provider_storage_names,
     resolve_shape,
     with_auth,
     with_base_url,
@@ -110,10 +117,31 @@ from codehelper.services.wrappers import (
     install_wrapper,
     is_installed,
     list_wrappers,
+    removal_discards_only_secret,
     remove_wrapper,
     spec_from_installed,
     token_from_installed,
+    wrappers_for_provider,
 )
+
+
+def _refuse_disabled_provider(provider, paths) -> None:
+    """The ONE runtime-disable gate (issue #89): raise if ``provider`` is
+    disabled, with the ``enable`` hint every refusal site shares.
+
+    Called by every entry point that takes an explicit provider name or
+    resolves one for a NEW record (``add`` both paths, ``switch``,
+    ``set-default``) — a disabled provider must be refused BEFORE any
+    interactive step, per the "validate, then prompt" rule. Distinct from
+    "incompatible": the pairing is fine, the backend is retired — enable it
+    first. The TUI menus never offer a disabled provider, so only an
+    explicit name reaches this.
+    """
+    if is_provider_disabled(provider, state.disabled_providers(paths)):
+        raise CodeHelperError(
+            f"provider {provider.name} is disabled — enable it first "
+            f"(`codehelper enable {provider.name}`)"
+        )
 
 
 def _handle_list_axes(what: str) -> int:
@@ -131,6 +159,7 @@ def _handle_list_axes(what: str) -> int:
         return 0
 
     if what == "providers":
+        disabled = state.disabled_providers(Paths.default())
         for provider in PROVIDERS:
             shapes = ", ".join(sorted(s.value for s in provider.shapes))
             # A provider whose ONLY shape is ANTHROPIC_SETTINGS can never
@@ -149,6 +178,10 @@ def _handle_list_axes(what: str) -> int:
             # off provider.shapes.
             if provider.suspended:
                 tag += " (suspended)"
+            # Runtime-disabled (issue #89): still SHOWN here — this is an
+            # informational surface; choice surfaces hide it entirely.
+            if is_provider_disabled(provider, disabled):
+                tag += " (disabled)"
             print(f"{provider.name:10} {provider.description:24} [{shapes}]{tag}")
         return 0
 
@@ -226,9 +259,21 @@ def _token_view_rows(
     """
     cache_rows = profile_rows(paths)
 
+    # A disabled provider vanishes from this view too (issue #89): the token
+    # rows belong to the provider, and "disable" means "disappears from
+    # everything". Tokens themselves stay in the store — enable reuses them.
+    # The canonical set suffices: profile_rows already resolves storage keys
+    # to canonical names (secrets._storage_names).
+    disabled = state.disabled_providers(paths)
+    cache_rows = [
+        (provider, profile, token, is_active)
+        for provider, profile, token, is_active in cache_rows
+        if provider not in disabled
+    ]
+
     env_rows: list[tuple[str, str]] = []
     seen_env_vars: set[str] = set()
-    for provider in PROVIDERS:
+    for provider in active_providers(disabled):
         env_var = provider.token_env_var
         if not env_var or env_var in seen_env_vars:
             continue
@@ -477,7 +522,9 @@ def _add_resolve_provider(req, paths):
     if not req.agent or not req.provider:
         raise CodeHelperError("--agent and --provider must be given together")
     agent = get_any_agent(paths, req.agent)
-    provider = with_base_url(get_provider(req.provider), req.base_url)
+    provider = get_provider(req.provider)
+    _refuse_disabled_provider(provider, paths)
+    provider = with_base_url(provider, req.base_url)
     provider = with_auth(provider, want_secret=req.auth == "secret")
     return agent, provider
 
@@ -558,6 +605,10 @@ def _add_spec_from_preset(req, paths, profile_name):
             f"try: codehelper add --agent {req.name} --provider ollama "
             f"--model <model>"
         ) from None
+    # Same disabled gate as the constructor path (issue #89) — a preset whose
+    # provider is runtime-disabled must fail with "enable it first", not fall
+    # through to a wrapper for a backend the user retired.
+    _refuse_disabled_provider(get_provider(preset.provider), paths)
     if profile_name is None and req.base_url is None:
         # The same implicit-injection rule the constructor path enforces: the
         # stored active profile was authorized for the preset's OWN default
@@ -892,11 +943,23 @@ def _edit_token_spec(paths, name: str | None):
         return _resolve(name)
 
     # Presets plus anything the constructor installed — the latter are
-    # first-class wrappers and were previously unreachable from here.
-    secret_specs = [w for w in WRAPPERS if w.auth == "secret"]
+    # first-class wrappers and were previously unreachable from here. A
+    # disabled provider's wrappers are not offered (issue #89): the explicit
+    # name path refuses them, so the picker must not offer what Enter cannot
+    # have.
+    disabled = state.disabled_providers(paths)
+    secret_specs = [
+        w
+        for w in WRAPPERS
+        if w.auth == "secret" and not is_provider_disabled(w.provider, disabled)
+    ]
     for found in discover_managed(paths):
         installed = spec_from_installed(paths, found)
-        if installed is not None and installed.auth == "secret":
+        if (
+            installed is not None
+            and installed.auth == "secret"
+            and not is_provider_disabled(installed.provider, disabled)
+        ):
             secret_specs.append(installed)
     if not secret_specs:
         raise CodeHelperError("no wrapper has an editable (secret) token")
@@ -970,6 +1033,12 @@ def _handle_edit_token(args: argparse.Namespace | EditTokenRequest) -> int:
     if spec is None:
         print("cancelled")
         return 0
+
+    # Same disabled gate as add (issue #89, round-2 review): without it,
+    # `edit-token <name>` would prompt and reinstall a wrapper for a provider
+    # the user retired — a silent exception to "every explicit-name entry
+    # point refuses". BEFORE any prompt, per validate-then-prompt.
+    _refuse_disabled_provider(spec.provider, paths)
 
     if spec.auth != "secret":
         raise CodeHelperError(f"{spec.name} has no editable token (auth={spec.auth})")
@@ -1064,6 +1133,143 @@ def _handle_remove(args: argparse.Namespace | RemoveRequest) -> int:
     return 0
 
 
+def _warn_live_configs(paths, provider) -> None:
+    """Point at agent configs still aimed at ``provider`` after a disable.
+
+    Disable hides the provider from CHOICE surfaces by design; a live
+    ``switch``/``set-default`` config is state, not a choice — and the
+    documented invariant that only ``switch``/``set-default`` may touch an
+    agent's own config file rules out clearing it here. What disable owes
+    instead is the hint: the motivating case (a subscription ending)
+    otherwise produces auth failures with no visible cause, because the
+    chipset row that showed the live backend is gone. stderr, like
+    ``_warn_env_cache_conflict``, so a TUI capture still surfaces it.
+    Read-only: both readbacks never raise.
+    """
+    if claude_settings.current_switch(paths) == provider.name:
+        print(
+            f"note: claude's live settings still point at {provider.name} — "
+            f"`codehelper switch native` clears them",
+            file=sys.stderr,
+        )
+    if codex_default.current_default(paths) == provider.name:
+        print(
+            f"note: codex's persisted default still names {provider.name} — "
+            f"`codehelper set-default --restore` clears it",
+            file=sys.stderr,
+        )
+
+
+def _handle_disable(args: argparse.Namespace | DisableRequest) -> int:
+    """Disable a provider at runtime (issue #89): delete its wrappers, hide it.
+
+    Order is load-bearing: every file removal happens BEFORE the state write,
+    so a stuck wrapper leaves the provider enabled and retryable rather than
+    half-removed-and-marked-disabled. Tokens in credentials.json are kept —
+    ``enable`` reuses them.
+    """
+    req = (
+        args
+        if isinstance(args, DisableRequest)
+        else DisableRequest.from_namespace(args)
+    )
+    paths = Paths.default()
+    # Legacy-name acceptance ("ollama") for a user-TYPED argument is this
+    # function's documented exception to get_provider-only-for-new-input.
+    provider = get_provider_for_legacy_read(req.name)
+    storage_names = frozenset(provider_storage_names(provider.name))
+
+    if provider.env_reset:
+        raise CodeHelperError(
+            f"cannot disable {provider.name}: it is the agent's native backend"
+        )
+    if is_provider_disabled(provider, state.disabled_providers(paths)):
+        raise CodeHelperError(f"provider {provider.name} is already disabled")
+
+    targets = wrappers_for_provider(paths, provider)
+    # Only-copy preflight (round-1 review, cycle 1): BEFORE the dry-run
+    # branch, so a dry run refuses exactly what the real run would refuse —
+    # it must never promise a disable that cannot run. A secret wrapper
+    # whose token was never cached holds the only durable copy; deleting it
+    # is irreversible in a way "tokens are kept" does not cover, so it takes
+    # the explicit --force, the same bar the overwrite path sets.
+    irrecoverable = [
+        alias for alias in targets if removal_discards_only_secret(paths, alias)
+    ]
+    if irrecoverable and not req.force:
+        raise CodeHelperError(
+            f"refusing to disable {provider.name}: "
+            f"{', '.join(irrecoverable)} "
+            f"{'holds a token' if len(irrecoverable) == 1 else 'hold tokens'} "
+            f"that exists nowhere outside the wrapper file — cache it first "
+            f"(`codehelper add` on the wrapper re-caches) or pass --force "
+            f"to delete anyway"
+        )
+    if req.dry_run:
+        for alias in targets:
+            remove_wrapper(paths, alias, dry_run=True)
+        print(f"would disable {provider.name}")
+        return 0
+
+    if targets and not req.yes:
+        if not _confirm_remove([paths.script_for(alias) for alias in targets]):
+            raise CodeHelperError(f"disable of {provider.name} was not confirmed")
+
+    failures: list[str] = []
+    for alias in targets:
+        try:
+            remove_wrapper(paths, alias, force=req.force)
+        except CodeHelperError as exc:
+            failures.append(str(exc))
+    if failures:
+        # Refuse the WHOLE disable: its contract is "the provider vanishes
+        # from everything", and a half-removed set contradicts it. State is
+        # untouched — retry with --force after reading the failures.
+        raise CodeHelperError(
+            f"provider {provider.name} NOT disabled — some wrappers could "
+            f"not be removed (use --force for files codehelper did not "
+            f"create):\n  " + "\n  ".join(failures)
+        )
+
+    state.set_provider_disabled(paths, provider.name, True, storage_names=storage_names)
+    _warn_live_configs(paths, provider)
+    removed = (
+        f" ({len(targets)} wrapper{'s' if len(targets) != 1 else ''} removed)"
+        if targets
+        else ""
+    )
+    print(f"disabled {provider.name}{removed}")
+    return 0
+
+
+def _handle_enable(args: argparse.Namespace | EnableRequest) -> int:
+    """Re-enable a runtime-disabled provider (issue #89).
+
+    One state write, nothing on the filesystem — the wrappers deleted by
+    ``disable`` are NOT restored; recreate them with ``add``.
+    """
+    req = (
+        args if isinstance(args, EnableRequest) else EnableRequest.from_namespace(args)
+    )
+    paths = Paths.default()
+    provider = get_provider_for_legacy_read(req.name)
+    # BEFORE the dry-run branch (round-2 review): a dry run must never report
+    # a change the real run refuses — disable's dry run follows the same rule.
+    if not is_provider_disabled(provider, state.disabled_providers(paths)):
+        raise CodeHelperError(f"provider {provider.name} is not disabled")
+    if req.dry_run:
+        print(f"would enable {provider.name}")
+        return 0
+    state.set_provider_disabled(
+        paths,
+        provider.name,
+        False,
+        storage_names=frozenset(provider_storage_names(provider.name)),
+    )
+    print(f"enabled {provider.name} — recreate wrappers with `codehelper add`")
+    return 0
+
+
 def _handle_set_default(args: argparse.Namespace | SetDefaultRequest) -> int:
     """Patch (or restore) Codex's OWN ``~/.codex/config.toml`` default.
 
@@ -1108,6 +1314,11 @@ def _handle_set_default(args: argparse.Namespace | SetDefaultRequest) -> int:
         raise CodeHelperError("--model is required")
 
     agent = get_agent(req.agent)
+    # Same disabled gate as add/switch (issue #89): set-default takes an
+    # explicit provider name, so it is a choice surface too — pointing codex's
+    # own config at a retired backend would contradict "vanishes from
+    # everything".
+    _refuse_disabled_provider(get_provider(req.provider), paths)
     # Same substitution point as _handle_add's — and here it is not merely
     # convenient but load-bearing: without it, a runtime-base_url provider
     # with an empty registry base_url would make openai_base_url("") return
@@ -1214,6 +1425,11 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
             f"wrapper {name!r} is a {spec.agent.name} wrapper — "
             f"`switch --from-wrapper` can only retarget a claude session"
         )
+    # Same disabled gate as the flags path (issue #89): the TUI's chips filter
+    # disabled providers, but this resolver reads installed files that can
+    # outlive a disable — carry the gate at the resolver itself so a future
+    # surface cannot bypass it.
+    _refuse_disabled_provider(spec.provider, paths)
     provider, tier_models, subagent_model = claude_settings.live_axes_for_spec(spec)
     token = ""
     if spec.auth == "secret":
@@ -1247,6 +1463,9 @@ def _switch_axes_from_preset(req: SwitchRequest, paths):
     spec = spec_from_preset(get_preset(req.from_preset))
     if spec.agent.name != "claude":
         raise CodeHelperError(f"preset {spec.name!r} is not a Claude backend")
+    # Same gate as the flags path: a preset is registry data that survives a
+    # disable, so the resolver — not only the chip filter — must refuse.
+    _refuse_disabled_provider(spec.provider, paths)
     provider, tier_models, subagent_model = claude_settings.live_axes_for_spec(spec)
     return (
         provider,
@@ -1274,9 +1493,9 @@ def _switch_axes_from_flags(
             "give a provider — `switch <provider>`, `switch --provider P "
             "--model M`, or `switch --from-wrapper NAME`"
         )
-    provider = with_auth(
-        with_base_url(get_provider(provider_name), req.base_url), req.auth == "secret"
-    )
+    provider = get_provider(provider_name)
+    _refuse_disabled_provider(provider, paths)
+    provider = with_auth(with_base_url(provider, req.base_url), req.auth == "secret")
 
     if provider.env_reset:
         return provider, None, "", None, None
@@ -1675,6 +1894,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="remove an unmanaged wrapper file too",
     )
     p_remove.set_defaults(func=_handle_remove)
+
+    p_disable = subparsers.add_parser(
+        "disable",
+        help="runtime-disable a provider: delete its wrappers and hide it "
+        "everywhere (issue #89)",
+        parents=[sub_flags],
+    )
+    p_disable.add_argument(
+        "name",
+        help="provider name (a retired legacy name like 'ollama' is accepted)",
+    )
+    p_disable.add_argument(
+        "--yes",
+        action="store_true",
+        default=False,
+        help="skip the confirmation prompt",
+    )
+    p_disable.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="remove an unmanaged wrapper file too",
+    )
+    p_disable.set_defaults(func=_handle_disable)
+
+    p_enable = subparsers.add_parser(
+        "enable",
+        help="re-enable a runtime-disabled provider (wrappers are NOT "
+        "restored — recreate them with `add`)",
+        parents=[sub_flags],
+    )
+    p_enable.add_argument(
+        "name",
+        help="provider name (a retired legacy name like 'ollama' is accepted)",
+    )
+    p_enable.set_defaults(func=_handle_enable)
 
     p_set_default = subparsers.add_parser(
         "set-default",
