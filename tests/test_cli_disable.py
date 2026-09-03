@@ -320,3 +320,121 @@ def test_disable_proceeds_when_the_token_is_cached(tmp_path):
     assert removal_discards_only_secret(paths, "glm") is False
     assert main(["disable", "zai", "--yes"]) == 0
     assert not is_installed(paths, "glm")
+
+
+# --------------------------------------------------------------------------- #
+# round-2 review fixes (cycle 2): gate the other switch resolvers + edit-token
+# --------------------------------------------------------------------------- #
+
+
+def _switch_request(**overrides):
+    from codehelper.cli.requests import SwitchRequest
+
+    fields = dict(
+        provider=None,
+        from_wrapper=None,
+        model=None,
+        haiku=None,
+        sonnet=None,
+        opus=None,
+        subagent_model=None,
+        base_url=None,
+        auth=None,
+        profile=None,
+        restore=False,
+        slot=None,
+        status=False,
+        dry_run=False,
+        force=True,
+        debug=False,
+        from_preset=None,
+    )
+    fields.update(overrides)
+    return SwitchRequest(**fields)
+
+
+@pytest.mark.integration
+def test_switch_from_preset_and_wrapper_refuse_a_disabled_provider(tmp_path):
+    """The flags path has the disabled gate; the preset and wrapper resolvers
+    are reached through TUI chip presses (which filter) — but they resolve
+    registry/installed data that OUTLIVES the disable (preset specs, or a
+    wrapper resurrected by a future path), so both carry the gate themselves.
+    State is set WITHOUT the deletion step so the wrapper file exists and the
+    wrapper resolver's missing-file guard cannot mask the gate."""
+    from codehelper.cli.parser import _handle_switch
+    from codehelper.errors import CodeHelperError
+    from codehelper.services.state import set_provider_disabled
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token="sk-z")
+    set_provider_disabled(paths, "zai", True, storage_names=frozenset({"zai"}))
+
+    with pytest.raises(CodeHelperError, match="disabled"):
+        _handle_switch(_switch_request(from_preset="glm"))
+    with pytest.raises(CodeHelperError, match="disabled"):
+        _handle_switch(_switch_request(from_wrapper="glm"))
+
+
+@pytest.mark.integration
+def test_edit_token_refuses_a_disabled_provider(tmp_path):
+    """`edit-token glm` on a disabled provider must fail BEFORE any prompt or
+    install — otherwise it recreates a wrapper `add` correctly refuses, a
+    silent exception to "vanishes from every choice surface"."""
+    from codehelper.cli.parser import _handle_edit_token
+    from codehelper.cli.requests import EditTokenRequest
+    from codehelper.errors import CodeHelperError
+    from codehelper.services.secrets import save_credential
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token="sk-old")
+    save_credential(paths, "zai", "sk-old")  # so disable passes the only-copy guard
+    assert main(["disable", "zai", "--yes"]) == 0
+
+    req = EditTokenRequest(
+        name="glm",
+        profile=None,
+        profile_token="sk-new",
+        profile_rename_from=None,
+        profile_rename_to=None,
+        dry_run=False,
+        debug=False,
+    )
+    with pytest.raises(CodeHelperError, match="disabled"):
+        _handle_edit_token(req)
+    assert not is_installed(paths, "glm")
+
+
+@pytest.mark.integration
+def test_edit_token_picker_hides_a_disabled_providers_wrappers(tmp_path, monkeypatch):
+    import codehelper.cli.menu as menu
+    from codehelper.cli.parser import _edit_token_spec
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token="sk-a")
+    install_wrapper(paths, "gemini-litellm", token="sk-l")
+    from codehelper.services.secrets import save_credential
+
+    save_credential(paths, "zai", "sk-a")  # so disable passes the only-copy guard
+    captured: dict = {}
+
+    def _capture(items, **kwargs):
+        captured["values"] = [item[0] for item in items if isinstance(item, tuple)]
+        raise menu.MenuCancelled(False)  # soft cancel — picker's own back gesture
+
+    monkeypatch.setattr(menu, "select_from_menu", _capture)
+
+    assert _edit_token_spec(paths, None) is None
+    assert "glm" in captured["values"]
+
+    main(["disable", "zai", "--yes"])
+    assert _edit_token_spec(paths, None) is None
+    assert "glm" not in captured["values"]
+    assert "gemini-litellm" in captured["values"]  # untouched provider stays
+
+
+@pytest.mark.integration
+def test_enable_dry_run_refuses_a_not_disabled_provider(tmp_path, capsys):
+    """A dry run must never promise what the real run refuses — disable's
+    dry run already refuses exactly what the real run would refuse."""
+    assert main(["enable", "litellm", "--dry-run"]) == 1
+    assert "not disabled" in capsys.readouterr().err

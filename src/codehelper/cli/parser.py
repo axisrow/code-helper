@@ -943,11 +943,23 @@ def _edit_token_spec(paths, name: str | None):
         return _resolve(name)
 
     # Presets plus anything the constructor installed — the latter are
-    # first-class wrappers and were previously unreachable from here.
-    secret_specs = [w for w in WRAPPERS if w.auth == "secret"]
+    # first-class wrappers and were previously unreachable from here. A
+    # disabled provider's wrappers are not offered (issue #89): the explicit
+    # name path refuses them, so the picker must not offer what Enter cannot
+    # have.
+    disabled = state.disabled_providers(paths)
+    secret_specs = [
+        w
+        for w in WRAPPERS
+        if w.auth == "secret" and not is_provider_disabled(w.provider, disabled)
+    ]
     for found in discover_managed(paths):
         installed = spec_from_installed(paths, found)
-        if installed is not None and installed.auth == "secret":
+        if (
+            installed is not None
+            and installed.auth == "secret"
+            and not is_provider_disabled(installed.provider, disabled)
+        ):
             secret_specs.append(installed)
     if not secret_specs:
         raise CodeHelperError("no wrapper has an editable (secret) token")
@@ -1021,6 +1033,12 @@ def _handle_edit_token(args: argparse.Namespace | EditTokenRequest) -> int:
     if spec is None:
         print("cancelled")
         return 0
+
+    # Same disabled gate as add (issue #89, round-2 review): without it,
+    # `edit-token <name>` would prompt and reinstall a wrapper for a provider
+    # the user retired — a silent exception to "every explicit-name entry
+    # point refuses". BEFORE any prompt, per validate-then-prompt.
+    _refuse_disabled_provider(spec.provider, paths)
 
     if spec.auth != "secret":
         raise CodeHelperError(f"{spec.name} has no editable token (auth={spec.auth})")
@@ -1235,11 +1253,13 @@ def _handle_enable(args: argparse.Namespace | EnableRequest) -> int:
     )
     paths = Paths.default()
     provider = get_provider_for_legacy_read(req.name)
+    # BEFORE the dry-run branch (round-2 review): a dry run must never report
+    # a change the real run refuses — disable's dry run follows the same rule.
+    if not is_provider_disabled(provider, state.disabled_providers(paths)):
+        raise CodeHelperError(f"provider {provider.name} is not disabled")
     if req.dry_run:
         print(f"would enable {provider.name}")
         return 0
-    if not is_provider_disabled(provider, state.disabled_providers(paths)):
-        raise CodeHelperError(f"provider {provider.name} is not disabled")
     state.set_provider_disabled(
         paths,
         provider.name,
@@ -1405,6 +1425,11 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
             f"wrapper {name!r} is a {spec.agent.name} wrapper — "
             f"`switch --from-wrapper` can only retarget a claude session"
         )
+    # Same disabled gate as the flags path (issue #89): the TUI's chips filter
+    # disabled providers, but this resolver reads installed files that can
+    # outlive a disable — carry the gate at the resolver itself so a future
+    # surface cannot bypass it.
+    _refuse_disabled_provider(spec.provider, paths)
     provider, tier_models, subagent_model = claude_settings.live_axes_for_spec(spec)
     token = ""
     if spec.auth == "secret":
@@ -1438,6 +1463,9 @@ def _switch_axes_from_preset(req: SwitchRequest, paths):
     spec = spec_from_preset(get_preset(req.from_preset))
     if spec.agent.name != "claude":
         raise CodeHelperError(f"preset {spec.name!r} is not a Claude backend")
+    # Same gate as the flags path: a preset is registry data that survives a
+    # disable, so the resolver — not only the chip filter — must refuse.
+    _refuse_disabled_provider(spec.provider, paths)
     provider, tier_models, subagent_model = claude_settings.live_axes_for_spec(spec)
     return (
         provider,
