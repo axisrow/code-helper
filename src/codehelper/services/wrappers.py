@@ -59,6 +59,7 @@ from codehelper.services.paths import Paths
 from codehelper.services.profiles import NewProfileOutcome, validate_new_profile_name
 from codehelper.services.render import (
     MARKER_PREFIX,
+    openai_toml_body,
     render_legacy_script,
     render_script,
 )
@@ -1477,6 +1478,11 @@ def rename_wrapper(
         raise CodeHelperError(f"wrapper not found: {wrapper}")
     if not is_managed(paths, old_alias):
         raise CodeHelperError(f"refusing to rename unmanaged file {wrapper}")
+    if old_alias == new_alias:
+        # Renaming to itself: the destination check below would adopt the
+        # byte-identical source and then remove it — an explicit no-op is the
+        # only correct answer here.
+        return True
 
     validate_alias(new_alias)
     user_binaries = {a.binary for a in load_user_agents_strict(paths)}
@@ -1485,19 +1491,49 @@ def rename_wrapper(
             f"{new_alias!r} is a reserved name — a wrapper named after a "
             f"user-defined agent's binary would shadow the real one on PATH"
         )
-    new_path = paths.script_for(new_alias)
-    if new_path.exists():
-        raise CodeHelperError(f"wrapper already exists: {new_path}")
-    if paths.codex_config_for(new_alias).exists():
-        raise CodeHelperError(
-            f"codex profile already exists: {paths.codex_config_for(new_alias)}"
-        )
-
     spec = spec_from_installed(paths, old_alias)
     if spec is None:
         raise CodeHelperError(
             f"cannot rename {wrapper}: its marker is not recognisable"
         )
+    new_spec = replace(spec, alias=new_alias)
+    token = ""
+    if spec.shape is ConfigShape.OPENAI_TOML and spec.auth == "secret":
+        token = token_from_installed(paths, old_alias, spec.provider.name) or ""
+        if not token:
+            raise CodeHelperError(
+                f"cannot rename {wrapper}: its token could not be recovered"
+            )
+
+    # Retry-aware destination guards: a previous attempt may have committed
+    # the destination before failing on a later step (pointer write, source
+    # removal). An identical managed destination is ADOPTED — the write would
+    # be a byte-no-op — so a retry converges; anything else in the way is
+    # refused exactly as a first attempt would be.
+    retry = False
+    new_path = paths.script_for(new_alias)
+    if new_path.exists():
+        expected_wrapper = (
+            render_script(new_spec, token)
+            if spec.shape is ConfigShape.OPENAI_TOML
+            else wrapper.read_text(encoding="utf-8")
+        )
+        if (
+            is_managed(paths, new_alias)
+            and new_path.read_text(encoding="utf-8") == expected_wrapper
+        ):
+            retry = True
+        else:
+            raise CodeHelperError(f"wrapper already exists: {new_path}")
+    if spec.shape is ConfigShape.OPENAI_TOML:
+        companion_new = paths.codex_config_for(new_alias)
+        if companion_new.exists():
+            if _ownership_marker_only(companion_new) and companion_new.read_text(
+                encoding="utf-8"
+            ) == openai_toml_body(new_spec):
+                retry = True
+            else:
+                raise CodeHelperError(f"codex profile already exists: {companion_new}")
 
     from codehelper.services.state import default_wrapper
 
@@ -1507,17 +1543,11 @@ def rename_wrapper(
         if default_wrapper(paths, agent.name) == old_alias
     ]
 
-    new_spec = replace(spec, alias=new_alias)
     if spec.shape is ConfigShape.OPENAI_TOML:
-        token = ""
-        if spec.auth == "secret":
-            token = token_from_installed(paths, old_alias, spec.provider.name) or ""
-            if not token:
-                raise CodeHelperError(
-                    f"cannot rename {wrapper}: its token could not be recovered"
-                )
+        # Idempotent: a committed destination from a prior attempt is skipped
+        # by the install plan itself.
         install_wrapper(paths, new_spec, token=token, dry_run=dry_run)
-    else:
+    elif not retry:
         mode = stat.S_IMODE(wrapper.stat().st_mode)
         if dry_run:
             print(f"would move {wrapper} -> {new_path}")

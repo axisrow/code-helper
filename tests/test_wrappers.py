@@ -3097,8 +3097,18 @@ def test_rename_wrapper_refusals(tmp_path):
 
     with pytest.raises(CodeHelperError, match="wrapper not found"):
         rename_wrapper(paths, "nope", "whatever")
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude",
+            provider="zai",
+            model="glm-5.3",
+            alias="glm2",
+        ),
+        token=_SECRET_TOKEN + "x",  # a different body: the refusal is real
+    )
     with pytest.raises(CodeHelperError, match="already exists"):
-        rename_wrapper(paths, "glm", "glm")
+        rename_wrapper(paths, "glm", "glm2")
     with pytest.raises(CodeHelperError):
         rename_wrapper(paths, "glm", "codehelper")  # reserved
     with pytest.raises(CodeHelperError):

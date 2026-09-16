@@ -28,12 +28,38 @@ def test_rename_wrapper_moves_the_alias(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_rename_wrapper_collision_fails_clean(monkeypatch, capsys):
+def test_rename_wrapper_to_itself_is_a_quiet_noop(tmp_path, monkeypatch):
     monkeypatch.setenv("ZAI_API_KEY", "sk-env")
     assert main(["add", "glm"]) == 0
 
-    assert main(["rename", "wrapper", "glm", "glm"]) == 1
-    assert "already exists" in capsys.readouterr().err
+    assert main(["rename", "wrapper", "glm", "glm"]) == 0
+
+    assert is_installed(Paths.from_home(tmp_path), "glm")
+
+
+@pytest.mark.integration
+def test_rename_wrapper_collision_fails_clean(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
+    assert main(["add", "glm"]) == 0
+    assert (
+        main(
+            [
+                "add",
+                "--agent",
+                "claude",
+                "--provider",
+                "zai",
+                "--model",
+                "glm-5.2",
+                "--alias",
+                "glm-52",
+            ]
+        )
+        == 0
+    )
+
+    assert main(["rename", "wrapper", "glm", "glm-52"]) == 1
+    assert "wrapper already exists" in capsys.readouterr().err
 
 
 @pytest.mark.integration
