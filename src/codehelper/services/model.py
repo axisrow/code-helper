@@ -605,6 +605,81 @@ PROVIDERS: tuple[Provider, ...] = (
         description="DeepSeek (OpenAI-compatible)",
     ),
     Provider(
+        name="bai",
+        # B.AI serves BOTH protocols off one documented host (docs.b.ai): the
+        # Anthropic-compatible POST /v1/messages drives Claude Code directly
+        # and the OpenAI-style POST /v1/responses + /v1/models feed Codex —
+        # so it declares both shapes, and _SHAPE_PRIORITY resolves
+        # `claude × bai` to ANTHROPIC_ENV and `codex × bai` to OPENAI_TOML
+        # with no special-case code, exactly like litellm. Unlike litellm the
+        # address is a documented production host, so the policy is FIXED:
+        # --base-url is refused.
+        shapes=frozenset(
+            {
+                ConfigShape.ANTHROPIC_ENV,
+                ConfigShape.OPENAI_TOML,
+                ConfigShape.ANTHROPIC_SETTINGS,
+            }
+        ),
+        base_url="https://api.b.ai",
+        # A bare root, NOT is_openai_root — deepseek-openai's documented
+        # convention: /v1/ is appended for the TOML profile and discovery,
+        # never for the Anthropic surface.
+        auth="secret",
+        token_env_var="BAI_API_KEY",
+        model_list_api=ModelListAPI.OPENAI_V1,
+        wire_api="responses",
+        # Discovery is available (OPENAI_V1 above), so these are only the
+        # doc-verified fallbacks when the listing call fails — same role as
+        # deepseek's known_models, not the only source. gpt-6-astra is
+        # deliberately absent: it is Responses-API-only, and curating the
+        # shape-agnostic fallback list is hygiene, not protection — live
+        # discovery may still offer it for a claude pairing.
+        known_models=(
+            "claude-sonnet-4-6",
+            "claude-opus-4-8",
+            "qwen3.8-flash",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gemini-3.5-flash",
+            "deepseek-v3.2",
+        ),
+        description="B.AI (b.ai — one host, both protocols)",
+    ),
+    Provider(
+        name="freellmapi",
+        # A local FreeLLMAPI proxy serving BOTH protocols off one host
+        # (verified against its /v1/openapi.json): POST /v1/messages drives
+        # Claude Code, POST /v1/responses + /v1/models feed Codex — the bai
+        # shape set. The address is the documented local default
+        # (ollama-direct precedent), so FIXED: --base-url is refused.
+        shapes=frozenset(
+            {
+                ConfigShape.ANTHROPIC_ENV,
+                ConfigShape.OPENAI_TOML,
+                ConfigShape.ANTHROPIC_SETTINGS,
+            }
+        ),
+        base_url="http://127.0.0.1:3002",
+        # A bare root, NOT is_openai_root — same handling as bai above.
+        auth="secret",
+        token_env_var="FREELLMAPI_API_KEY",
+        model_list_api=ModelListAPI.OPENAI_V1,
+        wire_api="responses",
+        # The live list is ~200 ids and rotates — discovery (OPENAI_V1 above)
+        # is the real source; these are only the router aliases and a few
+        # stable names for when the listing call fails.
+        known_models=(
+            "auto",
+            "fusion",
+            "qwen3.8-flash",
+            "glm-5.2",
+            "kimi-k3",
+            "deepseek-v4-flash",
+        ),
+        description="FreeLLMAPI local proxy (one host, both protocols)",
+    ),
+    Provider(
         name="native",
         # "native", not "anthropic": this entry does not represent a backend
         # (an address to send requests to) — it represents the ABSENCE of

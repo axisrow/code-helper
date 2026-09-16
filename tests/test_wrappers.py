@@ -32,6 +32,7 @@ from codehelper.services.render import (
     render_script,
 )
 from codehelper.services.spec import (
+    TierModels,
     WrapperSpec,
     build_spec,
     get_preset,
@@ -78,12 +79,13 @@ _SECRET_TOKEN = "00000000000000000000000000000000.aaaaaaaaaaaaaaaa"
 
 
 @pytest.mark.unit
-def test_registry_has_deepseek_ollama_glm_glm_ollama_and_gemini_litellm():
+def test_registry_has_the_five_curated_presets():
     assert {w.name for w in WRAPPERS} == {
         "deepseek-ollama",
         "glm",
         "glm-ollama",
         "gemini-litellm",
+        "bai",
     }
 
 
@@ -107,6 +109,25 @@ def test_gemini_litellm_preset_targets_the_proxy_with_its_default_url():
         get_preset("gemini-litellm"), base_url_override="https://mine.invalid"
     )
     assert overridden.provider.base_url == "https://mine.invalid"
+
+
+@pytest.mark.unit
+def test_bai_preset_targets_the_fixed_host_and_refuses_a_url_override():
+    """The mirror image of the gemini-litellm preset: bai's address is FIXED
+    registry data (the one documented production host), so the preset ships
+    no base_url and with_base_url refuses an override instead of retargeting."""
+    spec = spec_from_preset(get_preset("bai"))
+    assert spec.shape is ConfigShape.ANTHROPIC_ENV
+    assert spec.agent.name == "claude"
+    assert spec.provider.name == "bai"
+    assert spec.provider.base_url == "https://api.b.ai"
+    assert spec.provider.base_url_policy is BaseUrlPolicy.FIXED
+    assert spec.model == "qwen3.8-flash"
+    assert spec.tier_models == TierModels.uniform("qwen3.8-flash")
+    assert spec.token_env_var == "BAI_API_KEY"
+
+    with pytest.raises(CodeHelperError, match="fixed base URL"):
+        spec_from_preset(get_preset("bai"), base_url_override="https://mine.invalid")
 
 
 @pytest.mark.unit
@@ -178,6 +199,7 @@ def test_glm_preset_targets_glm_5_3_in_every_tier():
     spec = get_spec("glm")
     tiers = spec.tier_models
     assert spec.model == "glm-5.3"
+    assert tiers is not None  # ANTHROPIC_ENV specs always carry tier models
     assert (tiers.haiku, tiers.sonnet, tiers.opus) == ("glm-5.3", "glm-5.3", "glm-5.3")
 
 

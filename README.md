@@ -30,6 +30,16 @@ codehelper add deepseek-ollama --model X  # override the preset's model
 codehelper add --agent claude --provider deepseek        --model deepseek-v4-flash
 codehelper add --agent codex  --provider deepseek-openai --model deepseek-v4-flash
 
+# B.AI (b.ai): one host serves both agents — Anthropic-compatible /v1/messages
+# for claude, OpenAI /v1/responses for codex — see the "B.AI" section below
+codehelper add bai                                          # preset: claude -> qwen3.8-flash
+codehelper add --agent codex  --provider bai --model gpt-5.5
+
+# local FreeLLMAPI proxy: same one-host-both-protocols deal at a fixed
+# loopback address; model ids come from its own /v1/models (the list rotates)
+codehelper add --agent claude --provider freellmapi --model qwen3.8-flash
+codehelper add --agent codex  --provider freellmapi --model auto
+
 # build your own: agent + provider + model
 codehelper add --agent codex  --provider ollama-direct --model glm-5:cloud
                                           # -> ~/.local/bin/glm-5-codex
@@ -100,6 +110,7 @@ token-profile association.
 | `glm` | Claude Code | Z.ai (`https://api.z.ai/api/anthropic`), `glm-5.3` | secret (`ZAI_API_KEY`) |
 | `glm-ollama` | Claude Code | `ollama launch claude --model glm-5.2:cloud` | none — `ollama launch` authenticates itself |
 | `gemini-litellm` | Claude Code | LiteLLM proxy (see [Google Gemini via LiteLLM](#google-gemini-via-litellm)), `gemini-3.7-flash` | secret (`LITELLM_API_KEY`) |
+| `bai` | Claude Code | B.AI (`https://api.b.ai`), `qwen3.8-flash` (see [B.AI](#bai)) | secret (`BAI_API_KEY`) |
 
 There is no preset for the cloud DeepSeek API (`deepseek`/`deepseek-openai`
 providers) — use the constructor, as shown above.
@@ -110,7 +121,9 @@ preset — a preset bundles a fixed provider address, and `litellm`'s whole
 point is that its address is yours, not this project's to bundle; use the
 constructor with `--base-url` instead (see below). `gemini-litellm` is the
 one exception: it exists precisely to bundle one concrete LiteLLM instance's
-address, and `--base-url` retargets it to yours.
+address, and `--base-url` retargets it to yours. `bai` sits on the opposite
+pole: its address is fixed registry data, so the preset bundles no URL and
+`--base-url` is refused.
 
 ## Google Gemini via LiteLLM
 
@@ -199,9 +212,11 @@ Generated wrappers and `switch` patches declare the real window via
 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` whenever the model is in the built-in
 catalog (`glm-5.3`, `glm-5.2`, `glm-5.2:cloud`,
 `deepseek-v4-flash:0731-cloud`, `deepseek-v4-pro`, `deepseek-v4-flash`,
-`deepseek-v4-flash-vision-exp` — all 1M). Models outside the catalog are
+`deepseek-v4-flash-vision-exp` — all 1M — plus B.AI's `gpt-6-astra` at its
+documented 1,050,000). Models outside the catalog are
 left undeclared on purpose: a guessed window that exceeds the real one
-overflows the session mid-flight, so no data means no claim. If a model of
+overflows the session mid-flight, so no data means no claim. (Claude model
+IDs need no entry — Claude Code resolves those natively.) If a model of
 yours is missing, add its real number to `MODEL_CONTEXT_WINDOWS` in
 `services/render.py`.
 
@@ -289,6 +304,31 @@ Point a wrapper at `primary` — `codehelper add ... --model primary` — and a
 transparently; the agent never sees the switch. Check the
 [LiteLLM reliability docs](https://docs.litellm.ai/docs/proxy/reliability) for
 the current config keys, since this is LiteLLM's surface, not this project's.
+
+## B.AI
+
+[B.AI](https://docs.b.ai/llmservice/introduction/) serves both protocols off
+one documented host, so both pairings work with no `--base-url`:
+
+```bash
+codehelper add bai                                          # preset: claude -> qwen3.8-flash
+codehelper add --agent claude --provider bai --model claude-opus-4-8
+codehelper add --agent codex  --provider bai --model gpt-5.5
+```
+
+`claude` resolves to the direct `ANTHROPIC_*` env shape (`/v1/messages`),
+`codex` to a `[model_providers.bai]` TOML profile whose `base_url` gets the
+`/v1` suffix appended — chosen automatically, same as every provider here.
+The address is fixed registry data, so `--base-url` is refused. The token
+comes from `BAI_API_KEY`, a selected token profile, or a hidden prompt —
+see [Where tokens live](#where-tokens-live); model discovery uses B.AI's own
+`GET /v1/models`.
+
+Two caveats from B.AI's own docs: models marked "Premium" may answer
+`403 access_denied` until the account is recharged, and `gpt-6-astra` speaks
+only the Responses API — a codex-only model. Prices and the rotating
+"Limited-Time Free" promotions are visible only in B.AI's dashboard; the API
+model list carries no pricing, so there is nothing to filter on here.
 
 ## `set-default`
 
@@ -379,8 +419,8 @@ fixing the cause (`--force` for files `codehelper` did not create).
 
 ## Where tokens live
 
-For a secret-auth provider (`zai`, `litellm`, `deepseek`, `deepseek-openai`),
-profiles are stored per provider:
+For a secret-auth provider (`zai`, `litellm`, `deepseek`, `deepseek-openai`,
+`bai`, `freellmapi`), profiles are stored per provider:
 
 ```json
 {
