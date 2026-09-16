@@ -1612,16 +1612,21 @@ def rename_provider_profile(
         print(f"would rename profile {old_name} -> {new_name}")
         return len(targets)
 
-    # Markers first, with rollback: a failed write midway restores the exact
-    # old bodies, so a partial rename can never strand wrappers on a profile
-    # the credential key has not moved to (a cycle-review finding — the first
-    # cut wrote markers straight through).
+    # Markers first, with rollback: a failed write midway — or the credential
+    # rename refusing the destination (a concurrent rename won the race) —
+    # restores the exact old bodies, so a partial rename can never strand
+    # wrappers on a profile the credential key has not moved to.
     committed: list[tuple[Path, str]] = []
     try:
         for path, old_body, new_body in rewrites:
             atomic_write(path, new_body)
             committed.append((path, old_body))
             print(f"re-pointed {path}")
+        rename_profile(paths, provider.name, old_name, new_name)
+        if new_name not in profile_names(paths, provider.name):
+            # rename_profile downgrades a credential-write OSError to a warning;
+            # a key that never moved must fail the verb, not fake success.
+            raise CodeHelperError(f"the credential key did not move to {new_name!r}")
     except OSError as exc:
         for path, old_body in reversed(committed):
             atomic_write(path, old_body)
@@ -1629,17 +1634,13 @@ def rename_provider_profile(
             f"profile rename failed midway — rolled back {len(committed)} "
             f"marker write(s): {exc}"
         ) from exc
-
-    rename_profile(paths, provider.name, old_name, new_name)
-    if new_name not in profile_names(paths, provider.name):
-        # rename_profile downgrades a credential-write OSError to a warning;
-        # a key that never moved must fail the verb, not fake success.
+    except CodeHelperError as exc:
         for path, old_body in reversed(committed):
             atomic_write(path, old_body)
         raise CodeHelperError(
-            f"profile rename failed: the credential key did not move to "
-            f"{new_name!r} — markers rolled back"
-        )
+            f"profile rename failed — rolled back {len(committed)} "
+            f"marker write(s): {exc}"
+        ) from exc
 
     from codehelper.services.state import active_selection, set_active_selection
 

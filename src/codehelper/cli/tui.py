@@ -379,7 +379,7 @@ class TuiSession:
             print(text)
         press_any_key("Press any key to continue...")
 
-    def _run(self, handler, request=None, *, silent: bool = False) -> None:
+    def _run(self, handler, request=None, *, silent: bool = False) -> bool:
         """Dispatch a CLI handler/request and preserve its user-facing output.
 
         Tees stdout instead of fully redirecting it: some handlers (e.g.
@@ -399,6 +399,11 @@ class TuiSession:
         redraw already reflects the new ``[applied]`` state, so a chip press
         must be quiet (no ``wrote ...`` echo, no "Press any key"). An error
         is still surfaced and paused on: a failed apply must never be silent.
+
+        Returns True iff the handler completed without an error — callers
+        that synthesize their own success message must gate it on this, not
+        on inspecting the filesystem afterwards (the handler may have failed
+        on a collision with an existing target that still exists).
         """
         import io
         import sys
@@ -419,11 +424,12 @@ class TuiSession:
             sys.stdout = real_stdout
             print(f"error: {exc}")
             self._notify(buffer.getvalue().rstrip())
-            return
+            return False
         finally:
             sys.stdout = real_stdout
         if not silent:
             self._notify(buffer.getvalue().rstrip())
+        return True
 
     def _read_text(self, prompt: str) -> str | None:
         from codehelper.cli.menu import MenuCancelled, read_line
@@ -1390,7 +1396,7 @@ class TuiSession:
                 if not new_name or new_name == old_name:
                     continue
                 # silent: same no-double-echo contract as the wrapper rename.
-                self._run(
+                renamed = self._run(
                     _handle_rename,
                     RenameRequest(
                         kind="profile",
@@ -1403,7 +1409,7 @@ class TuiSession:
                     silent=True,
                 )
                 names = list(profile_names(paths, provider))
-                if new_name in names:
+                if renamed:
                     self._notify(f"renamed profile {old_name} -> {new_name}")
                 continue
             set_active_selection(paths, provider, choice)
@@ -2050,7 +2056,10 @@ class TuiSession:
             return
         # silent: the tee would otherwise show the service transcript live AND
         # replay it in the notify pause — the doubled output a live run hit.
-        self._run(
+        # The confirmation is gated on the handler's RESULT, not on the target
+        # existing: a colliding alias leaves the source untouched and must not
+        # print a success line after its own error.
+        renamed = self._run(
             _handle_rename,
             RenameRequest(
                 kind="wrapper",
@@ -2062,7 +2071,7 @@ class TuiSession:
             ),
             silent=True,
         )
-        if is_installed(paths, new_name):
+        if renamed:
             self._notify(f"renamed wrapper {alias} -> {new_name}")
 
     def _apply_chip(self, agent_name: str) -> None:

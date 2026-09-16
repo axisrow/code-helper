@@ -1610,6 +1610,45 @@ def test_on_rename_moves_the_wrapper(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_on_rename_collision_reports_error_without_success(
+    tmp_path, monkeypatch, capsys
+):
+    """A colliding alias leaves the source untouched: the handler's error is
+    shown and the success line is suppressed (gated on the handler result,
+    not on the target existing)."""
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+    from codehelper.services.wrappers import install_wrapper, is_installed
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token="sk-one")
+    from codehelper.services.spec import build_spec
+
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude",
+            provider="zai",
+            model="glm-5.3",
+            alias="glm2",
+        ),
+        token="sk-two",
+    )
+
+    monkeypatch.setattr(menu, "read_line", lambda _prompt="", **_kw: "glm2")
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    session._on_rename("glm")
+
+    out = capsys.readouterr().out
+    assert "error:" in out
+    assert "renamed wrapper" not in out
+    assert is_installed(paths, "glm")
+    assert is_installed(paths, "glm2")
+
+
+@pytest.mark.integration
 def test_profile_screen_e_renames(tmp_path, monkeypatch):
     """`e` on the Profiles screen fires the profile rename; the renamed row
     is what the next frame shows."""

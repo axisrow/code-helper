@@ -3213,6 +3213,44 @@ def test_rename_provider_profile_fails_loud_when_the_credential_move_degrades(
 
 
 @pytest.mark.integration
+def test_rename_provider_profile_rolls_back_when_the_credential_rename_refuses(
+    tmp_path, monkeypatch
+):
+    """Two renames racing for one destination name: the loser's credential
+    rename raises after its markers were already written — the markers must
+    roll back so nothing points at a profile that was never moved."""
+    import codehelper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "bai", _SECRET_TOKEN, "work")
+    for alias in ("glm-work", "glm-work-codex"):
+        install_wrapper(
+            paths,
+            build_spec(
+                agent="claude" if alias == "glm-work" else "codex",
+                provider="bai",
+                model="claude-sonnet-4-6" if alias == "glm-work" else "gpt-5.5",
+                alias=alias,
+                profile_name="work",
+            ),
+            token=_SECRET_TOKEN,
+        )
+
+    def refusing_rename(_paths, _provider, _old, _new):
+        raise CodeHelperError("profile 'personal' already exists for provider 'bai'")
+
+    monkeypatch.setattr(secrets, "rename_profile", refusing_rename)
+
+    with pytest.raises(CodeHelperError, match="rolled back"):
+        rename_provider_profile(paths, "bai", "work", "personal")
+
+    for alias in ("glm-work", "glm-work-codex"):
+        assert profile_from_installed(paths, alias) == "work"
+        assert _SECRET_TOKEN in script_text(paths, alias)
+    assert secrets.credential_for(paths, "bai", "work") == _SECRET_TOKEN
+
+
+@pytest.mark.integration
 def test_rename_provider_profile_pointer_failure_raises_with_context(
     tmp_path, monkeypatch
 ):
