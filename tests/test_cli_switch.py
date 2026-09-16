@@ -79,7 +79,7 @@ def test_switch_flag_provider_applies(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_switch_positional_and_flag_provider_conflict(tmp_path, monkeypatch):
+def test_switch_positional_and_flag_provider_conflict(monkeypatch):
     monkeypatch.setenv("ZAI_API_KEY", "sk-env")
     code = main(["switch", "zai", "--provider", "zai", "--model", "x", "--force"])
     assert code != 0
@@ -237,7 +237,14 @@ def test_chip_preset_glm_never_prompts_for_a_token(tmp_path, monkeypatch):
     seen = {}
     cached = {"value": "sk-cached", "source": "cache"}
 
-    def fake_resolve_token(*, env_var, prompt, paths, provider_name, **kwargs):
+    def fake_resolve_token(  # noqa: ARG001
+        *,
+        env_var,
+        prompt,
+        paths,  # noqa: ARG001 — keyword-called by the production seam
+        provider_name,  # noqa: ARG001 — keyword-called by the production seam
+        **kwargs,
+    ):
         seen["env_var"] = env_var
         seen["getpass_fn"] = kwargs.get("getpass_fn")
         seen["prompt"] = prompt
@@ -270,7 +277,7 @@ def test_switch_status_never_writes(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.integration
-def test_switch_status_reports_native_when_no_override(tmp_path, capsys):
+def test_switch_status_reports_native_when_no_override(capsys):
     code = main(["switch", "--status"])
     assert code == 0
     out = capsys.readouterr().out
@@ -303,20 +310,20 @@ def test_switch_restore_without_flag_after_switch_and_restore(tmp_path, monkeypa
 
 
 @pytest.mark.integration
-def test_switch_slot_without_restore_rejected(tmp_path, monkeypatch):
+def test_switch_slot_without_restore_rejected(monkeypatch):
     monkeypatch.setenv("ZAI_API_KEY", "sk-env")
     code = main(["switch", "--slot", "2", "zai", "--model", "x", "--force"])
     assert code != 0
 
 
 @pytest.mark.integration
-def test_switch_restore_with_provider_rejected(tmp_path):
+def test_switch_restore_with_provider_rejected():
     code = main(["switch", "--restore", "--provider", "zai", "--force"])
     assert code != 0
 
 
 @pytest.mark.integration
-def test_switch_restore_with_profile_rejected(tmp_path):
+def test_switch_restore_with_profile_rejected():
     code = main(["switch", "--restore", "--profile", "named", "--force"])
     assert code != 0
 
@@ -360,7 +367,7 @@ def test_switch_from_wrapper_glm_has_no_subagent_model(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_switch_from_wrapper_unknown_name_fails(tmp_path):
+def test_switch_from_wrapper_unknown_name_fails():
     code = main(["switch", "--from-wrapper", "does-not-exist", "--force"])
     assert code != 0
 
@@ -376,7 +383,7 @@ def test_switch_from_wrapper_lifts_an_ollama_launch_wrapper_to_live_settings(tmp
 
 
 @pytest.mark.integration
-def test_switch_from_wrapper_rejects_a_non_claude_wrapper(tmp_path, monkeypatch):
+def test_switch_from_wrapper_rejects_a_non_claude_wrapper(tmp_path):
     """switch retargets a LIVE CLAUDE session, so a wrapper that belongs to
     another agent (codex shares Ollama) must fail closed — it must never
     silently retarget claude to a foreign selection just because the provider
@@ -410,7 +417,7 @@ def test_switch_from_wrapper_rejects_a_non_claude_wrapper(tmp_path, monkeypatch)
 
 
 @pytest.mark.integration
-def test_switch_from_wrapper_and_provider_conflict(tmp_path, monkeypatch):
+def test_switch_from_wrapper_and_provider_conflict(monkeypatch):
     monkeypatch.setenv("ZAI_API_KEY", "sk-env")
     assert main(["add", "glm"]) == 0
     code = main(["switch", "--from-wrapper", "glm", "--provider", "zai", "--force"])
@@ -566,7 +573,7 @@ def test_switch_rejects_context_window_with_from_wrapper(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_chip_preset_apply_never_prompts_for_the_window(tmp_path, monkeypatch):
+def test_chip_preset_apply_never_prompts_for_the_window(monkeypatch):
     """The chip hot-apply path (from_preset, non-interactive token) never
     reaches the window menu either."""
     monkeypatch.setenv("ZAI_API_KEY", "sk-env")  # CI has no ambient token

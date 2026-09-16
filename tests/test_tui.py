@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -306,7 +308,7 @@ def test_model_step_falls_back_to_known_models_when_discovery_is_unavailable(
     prompt must say the list is known-not-discovered (Stage 3)."""
     seen_prompts: list[str] = []
 
-    def _select(items, *, prompt="", **_kwargs):
+    def _select(_items, *, prompt="", **_kwargs):
         text = prompt() if callable(prompt) else prompt
         seen_prompts.append(text)
         if str(text).startswith("Context window for"):
@@ -523,7 +525,7 @@ def test_a_without_row_context_asks_what_to_add_first(monkeypatch):
     monkeypatch.setattr(
         secrets,
         "resolve_token",
-        lambda **kwargs: secrets.ResolvedToken("sk-test", secrets.SOURCE_PROMPT),
+        lambda **_kwargs: secrets.ResolvedToken("sk-test", secrets.SOURCE_PROMPT),
     )
     assert main(["add", "glm", "--profile", "default"]) == 0
     seen: list[str] = []
@@ -584,7 +586,7 @@ def test_add_agent_action_row_registers_a_new_agent(monkeypatch):
     monkeypatch.setattr(
         "codehelper.cli.menu.read_line", lambda _prompt, **_kwargs: "myagent"
     )
-    monkeypatch.setattr(tui.TuiSession, "_notify", lambda self, text: None)
+    monkeypatch.setattr(tui.TuiSession, "_notify", lambda _self, _text: None)
 
     assert main(["tui"]) == 0
 
@@ -601,7 +603,7 @@ def test_add_wrapper_action_row_opens_the_unscoped_kind_picker(monkeypatch):
     seen: list[str] = []
     answers = iter(["__action:add-wrapper", "__back__", "quit"])
 
-    def _select(items, *, prompt, **kwargs):
+    def _select(_items, *, prompt, **_kwargs):
         text = prompt() if callable(prompt) else prompt
         seen.append(text)
         return next(answers)
@@ -1568,6 +1570,120 @@ def test_e_on_chip_row_targets_highlighted_wrapper():
     assert session._token_action("glm") == "token:glm"
 
 
+@pytest.mark.unit
+def test_e_renames_on_chip_row_and_is_inert_where_nothing_is_renameable():
+    """`e` mirrors `t`'s focused-chip resolution for rename (issue #95):
+    the highlighted chip on a chipset row, the row itself elsewhere."""
+    from codehelper.cli.tui import TuiSession
+
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    session._chips = {"claude": ["native", "deepseek-ollama", "glm", "+ add"]}
+    session._chip_index = {"claude": 2}
+
+    assert session._rename_action("agent:claude") == "rename:glm"
+    session._chip_index["claude"] = 0
+    assert session._rename_action("agent:claude") is None
+    session._chip_index["claude"] = 3
+    assert session._rename_action("agent:claude") is None
+    assert session._rename_action("glm") == "rename:glm"
+
+
+@pytest.mark.integration
+def test_on_rename_moves_the_wrapper(tmp_path, monkeypatch):
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+    from codehelper.services.wrappers import install_wrapper, is_installed
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token="sk-existing")
+
+    monkeypatch.setattr(menu, "read_line", lambda _prompt="", **_kw: "glm2")
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    session._on_rename("glm")
+
+    assert is_installed(paths, "glm2")
+    assert not is_installed(paths, "glm")
+
+
+@pytest.mark.integration
+def test_on_rename_collision_reports_error_without_success(
+    tmp_path, monkeypatch, capsys
+):
+    """A colliding alias leaves the source untouched: the handler's error is
+    shown and the success line is suppressed (gated on the handler result,
+    not on the target existing)."""
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+    from codehelper.services.wrappers import install_wrapper, is_installed
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token="sk-one")
+    from codehelper.services.spec import build_spec
+
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude",
+            provider="zai",
+            model="glm-5.3",
+            alias="glm2",
+        ),
+        token="sk-two",
+    )
+
+    monkeypatch.setattr(menu, "read_line", lambda _prompt="", **_kw: "glm2")
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    session._on_rename("glm")
+
+    out = capsys.readouterr().out
+    assert "error:" in out
+    assert "renamed wrapper" not in out
+    assert is_installed(paths, "glm")
+    assert is_installed(paths, "glm2")
+
+
+@pytest.mark.integration
+def test_profile_screen_e_renames(tmp_path, monkeypatch):
+    """`e` on the Profiles screen fires the profile rename; the renamed row
+    is what the next frame shows."""
+    import codehelper.cli.menu as menu
+    import codehelper.services.secrets as secrets
+    from codehelper.cli.tui import TuiSession
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "zai", "sk-old", "work")
+    monkeypatch.setattr(menu, "read_line", lambda _prompt="", **_kw: "personal")
+
+    providers = iter(["zai"])
+
+    fired = {"done": False}
+
+    def _select(_items, prompt="", **kwargs):
+        if prompt.startswith("Active profile for"):
+            on_key = kwargs.get("on_key")
+            assert on_key is not None and "e" in on_key
+            if not fired["done"]:
+                fired["done"] = True
+                return on_key["e"]("work")
+            return "__back__"
+        return next(providers)
+
+    monkeypatch.setattr(menu, "select_from_menu", _select)
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    session._run_profile_screen()
+
+    assert secrets.credential_for(paths, "zai", "personal") == "sk-old"
+    assert secrets.credential_for(paths, "zai", "work") == ""
+
+
 def _chip_rows(items, *, cursor_pair: int = 0, ansi: bool = True) -> dict[str, str]:
     """Rendered chipset rows from a captured `items` list, keyed by agent.
 
@@ -1826,7 +1942,7 @@ def test_right_moves_the_chip_cursor_and_wraps(monkeypatch):
 
 
 @pytest.mark.integration
-def test_back_tab_moves_the_chip_cursor_like_left(monkeypatch):
+def test_back_tab_moves_the_chip_cursor_like_left():
     """Shift+Tab is the backwards twin of Left, not a second mechanism."""
     from codehelper.services.wrappers import install_wrapper
 
@@ -1932,7 +2048,7 @@ def test_enter_applies_the_second_wrapper_sharing_a_provider_with_the_first(
         tui._AGENT_BACKENDS,
         "claude",
         dataclasses.replace(
-            tui._AGENT_BACKENDS["claude"], read_applied=lambda paths: "zai"
+            tui._AGENT_BACKENDS["claude"], read_applied=lambda _paths: "zai"
         ),
     )
 
@@ -1940,7 +2056,7 @@ def test_enter_applies_the_second_wrapper_sharing_a_provider_with_the_first(
     monkeypatch.setattr(
         tui.TuiSession,
         "_apply_switch_wrapper",
-        lambda self, spec: seen.append(spec.name),
+        lambda _self, spec: seen.append(spec.name),
     )
     # Presets are first, then ad-hoc chips alphabetically; the bai preset chip
     # sits between gemini-litellm and the ad-hoc glm-air.
@@ -1978,7 +2094,7 @@ def test_enter_on_an_agent_row_applies_the_highlighted_chip(monkeypatch):
     monkeypatch.setattr(
         tui.TuiSession,
         "_apply_switch_wrapper",
-        lambda self, spec: seen.append(spec.name),
+        lambda _self, spec: seen.append(spec.name),
     )
     _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
@@ -2119,7 +2235,7 @@ def test_enter_on_an_already_applied_chip_does_not_rewrite(monkeypatch):
 
     applied = []
     monkeypatch.setattr(
-        tui.TuiSession, "_apply_switch_native", lambda self: applied.append("native")
+        tui.TuiSession, "_apply_switch_native", lambda _self: applied.append("native")
     )
     _real_menu_keys(monkeypatch, ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
@@ -2585,7 +2701,7 @@ def test_delete_on_an_agent_chipset_row_is_inert(monkeypatch):
     `agent:claude` — the dispatch a user hit as "invalid wrapper name"."""
     seen = []
 
-    def _spy_remove(*args, **kwargs):
+    def _spy_remove(*args, **_kwargs):
         seen.append(args)
         return 0
 
@@ -2603,7 +2719,7 @@ def test_delete_on_a_wrapper_row_still_dispatches(monkeypatch):
     row dispatches `_handle_remove` with that row's alias."""
     seen = []
 
-    def _spy_remove(*args, **kwargs):
+    def _spy_remove(*args, **_kwargs):
         seen.append(args)
         return 0
 
@@ -2794,7 +2910,7 @@ def test_enter_applies_a_chip_whose_token_differs_on_the_same_backend(monkeypatc
     monkeypatch.setattr(
         tui.TuiSession,
         "_apply_switch_wrapper",
-        lambda self, spec: seen.append(spec.name),
+        lambda _self, spec: seen.append(spec.name),
     )
     index = next(
         i
@@ -2864,7 +2980,7 @@ def test_literal_chips_not_applied_when_a_secret_wrapper_is_live(monkeypatch):
 
 
 @pytest.mark.integration
-def test_ctx_wrapper_chip_matches_only_itself(monkeypatch):
+def test_ctx_wrapper_chip_matches_only_itself():
     """CHIP HONESTY for the recorded window (issue #83, the #80/#81 class):
     a wrapper whose marker records ctx=1000000 shares provider AND tier
     models with a same-model catalog wrapper — the recorded window is the
@@ -2931,7 +3047,7 @@ def test_providers_submenu_dispatches_the_real_handlers(monkeypatch):
     seen: list[str] = []
     picks = iter(["ollama-direct", "__back__"])  # toggle once, then leave
 
-    def _select(items, *, prompt, **_kwargs):
+    def _select(_items, *, prompt, **_kwargs):
         text = prompt() if callable(prompt) else prompt
         seen.append(text)
         return next(picks)
@@ -2960,7 +3076,7 @@ def test_providers_submenu_toggles_back_to_enabled(monkeypatch):
     )
     picks = iter(["ollama-direct", "__back__"])  # toggle once, then leave
 
-    def _select(items, *, prompt, **_kwargs):
+    def _select(_items, *, prompt, **_kwargs):  # noqa: ARG001 — keyword-called by the screen
         return next(picks)
 
     monkeypatch.setattr(menu, "select_from_menu", _select)
@@ -2978,7 +3094,7 @@ def test_providers_submenu_hides_env_reset_and_tags_suspended(monkeypatch):
 
     captured: dict = {}
 
-    def _select(items, *, prompt, **_kwargs):
+    def _select(items, *, prompt, **_kwargs):  # noqa: ARG001 — keyword-called by the screen
         captured["rows"] = {
             value: label for value, label in items if isinstance(value, str)
         }

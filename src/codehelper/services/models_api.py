@@ -82,7 +82,7 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     one.
     """
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802, ARG002 — urllib's handler contract, params arrive positionally
         return None
 
 

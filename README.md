@@ -76,6 +76,12 @@ codehelper set-default --restore         # undo the last set-default
 # delete its wrappers and hide it everywhere — list/add/switch/TUI chips/tokens
 codehelper disable ollama --yes          # legacy spellings accepted ('ollama' = ollama-direct)
 codehelper enable ollama                 # lift it; wrappers are NOT restored — `add` recreates them
+
+# rename things: a wrapper alias (token, model and default pointer travel
+# with it) or a token profile (installed wrappers recording the old name
+# follow) — `e` does the same from the TUI
+codehelper rename wrapper old-alias new-alias
+codehelper rename profile zai old-profile new-profile
 ```
 
 The alias defaults to `<model>-<agent>` (`glm-5:cloud` + `codex` →
@@ -486,6 +492,15 @@ controls whether the next install/discovery prompts again.
 that profile; without it, the CLI/TUI lets you choose one when several exist
 (with only one profile, that profile is used). The newly typed value is cached
 after a successful rotation, so the cache stays in step.
+
+Renaming things: `e` on a wrapper row in the TUI (or `codehelper rename
+wrapper <old> <new>`) moves a wrapper to a new alias — the token, model and
+default-wrapper pointer travel with it, and nothing re-prompts for the key.
+`e` on a profile in the Profiles screen (or `codehelper rename profile
+<provider> <old> <new>`) renames the cached key AND rewrites the `profile=`
+field recorded in every installed wrapper that names it — including a Codex
+companion file — so nothing is left pointing at a name that no longer exists.
+`t` still rotates a token.
 
 `--list-models` discovery follows the same env → cache lookup (never the
 prompt — an optional listing must never block a script waiting on stdin); with

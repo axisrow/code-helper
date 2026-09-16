@@ -354,7 +354,7 @@ def _patch_top_level(original: str, patch: DefaultPatch) -> str:
         # character in a user-supplied --model value) as an escape — ``\u``
         # is not a valid one, so re.error crashes instead of patching. A
         # lambda's return value is used verbatim, no re-parsing.
-        new_top, count = no_newline_re.subn(lambda m, r=replacement: r, top, count=1)
+        new_top, count = no_newline_re.subn(lambda _m, r=replacement: r, top, count=1)
         if count:
             top = new_top
         else:

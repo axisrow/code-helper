@@ -63,7 +63,7 @@ def test_atomic_write_failure_leaves_no_partial_and_no_temp(tmp_path):
     """A forced os.replace failure leaves no dest file and no temp."""
     dest = tmp_path / "cfg.toml"
 
-    def boom(*args, **kwargs):
+    def boom(*_args, **_kwargs):
         raise _Boom("forced replace failure")
 
     monkeypatch_os_replace(boom)
@@ -90,7 +90,7 @@ def test_atomic_write_failure_preserves_pre_existing_destination(tmp_path):
     prior = b"ORIGINAL-CONFIG"
     dest.write_bytes(prior)
 
-    def boom(*args, **kwargs):
+    def boom(*_args, **_kwargs):
         raise _Boom("forced replace failure")
 
     monkeypatch_os_replace(boom)

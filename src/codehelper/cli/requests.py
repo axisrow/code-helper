@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from typing import Any
 
 from codehelper.errors import CodeHelperError
 
@@ -38,13 +39,18 @@ __all__ = [
     "EnableRequest",
     "ProxyRequest",
     "RemoveRequest",
+    "RenameRequest",
     "SetDefaultRequest",
     "SwitchRequest",
 ]
 
 
-def _g(args: argparse.Namespace, name: str, default: object = None) -> object:
+def _g(args: argparse.Namespace, name: str, default: object = None) -> Any:
     """``getattr`` with a stable default, for the ``from_namespace`` bridges.
+
+    ``Any`` on purpose: the bridges hand the value straight to typed
+    dataclass fields, and argparse's dynamic destinations cannot be typed
+    per-call without a cast at every site. The handlers own the validation.
 
     The TUI builds a ``Namespace`` itself and only fills the fields its flow
     uses, so an absent attribute is normal (not a bug) — exactly the contract
@@ -172,6 +178,62 @@ class RemoveRequest:
             force=bool(_g(args, "force", False)),
             debug=bool(_g(args, "debug", False)),
         )
+
+
+@dataclass(frozen=True)
+class RenameRequest:
+    """Inputs to ``_handle_rename`` (the ``rename`` subcommand and TUI ``e``).
+
+    Two kinds share the one verb, mirroring the two things a rename can mean
+    (issue #95): ``wrapper`` moves an installed wrapper to a new alias;
+    ``profile`` renames a provider's token profile AND re-points every
+    installed wrapper marker recording the old name — so ``provider`` is
+    required there and ``None`` for the wrapper kind. The positional mapping
+    is kind-shaped (``rename wrapper <old> <new>`` vs ``rename profile
+    <provider> <old> <new>``), checked here while the raw values are visible.
+    """
+
+    kind: str
+    provider: str | None
+    name: str
+    new_name: str
+    dry_run: bool
+    debug: bool
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> RenameRequest:
+        kind = _g(args, "kind")
+        first = _g(args, "first")
+        second = _g(args, "second")
+        third = _g(args, "third")
+        if kind == "wrapper":
+            if not (first and second):
+                raise CodeHelperError("rename wrapper takes <old> <new>")
+            if third:
+                raise CodeHelperError(
+                    "rename wrapper takes <old> <new> — to rename a profile: "
+                    "codehelper rename profile <provider> <old> <new>"
+                )
+            return cls(
+                kind=kind,
+                provider=None,
+                name=str(first),
+                new_name=str(second),
+                dry_run=bool(_g(args, "dry_run", False)),
+                debug=bool(_g(args, "debug", False)),
+            )
+        if kind == "profile":
+            if not (first and second and third):
+                raise CodeHelperError("rename profile takes <provider> <old> <new>")
+            return cls(
+                kind=kind,
+                provider=str(first),
+                name=str(second),
+                new_name=str(third),
+                dry_run=bool(_g(args, "dry_run", False)),
+                debug=bool(_g(args, "debug", False)),
+            )
+        raise CodeHelperError(f"unknown rename kind: {kind}")
 
 
 @dataclass(frozen=True)

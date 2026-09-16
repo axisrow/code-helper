@@ -51,7 +51,7 @@ def test_paths_is_frozen(tmp_path):
 
 
 @pytest.mark.unit
-def test_default_returns_from_home_of_path_home(tmp_path):
+def test_default_returns_from_home_of_path_home():
     """Under the autouse fixture, ``Path.home()`` is the tmp dir."""
     assert Paths.default() == Paths.from_home(Path.home())
 

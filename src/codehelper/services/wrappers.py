@@ -27,28 +27,39 @@ Presets still overwrite freely; only a *foreign* file triggers the guard.
 from __future__ import annotations
 
 import re
+import stat
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
 from typing import NamedTuple
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from codehelper.backends._atomic import atomic_write, read_text_or_none, remove_file
 from codehelper.errors import CodeHelperError
-from codehelper.services.agents import get_agent as get_any_agent
+from codehelper.services.agents import (
+    all_agents,
+    load_user_agents_strict,
+)
+from codehelper.services.agents import (
+    get_agent as get_any_agent,
+)
 from codehelper.services.model import (
     Agent,
     BaseUrlPolicy,
     ConfigShape,
     Provider,
     get_provider_for_legacy_read,
+    provider_storage_names,
     with_auth,
     with_base_url,
 )
-from codehelper.services.naming import is_valid_alias_shape
+from codehelper.services.naming import is_valid_alias_shape, validate_alias
 from codehelper.services.paths import Paths
+from codehelper.services.profiles import NewProfileOutcome, validate_new_profile_name
 from codehelper.services.render import (
     MARKER_PREFIX,
+    openai_toml_body,
     render_legacy_script,
     render_script,
 )
@@ -81,6 +92,8 @@ __all__ = [
     # lifecycle
     "install_wrapper",
     "remove_wrapper",
+    "rename_wrapper",
+    "rename_provider_profile",
     "is_installed",
     "is_managed",
     "spec_from_installed",
@@ -1405,6 +1418,283 @@ def remove_wrapper(
             f"removed {wrapper} but failed to clear its default pointer: {exc}"
         ) from exc
     return True
+
+
+def _marker_with_repointed_profile(
+    body: str, old_quoted: str, new_quoted: str
+) -> str | None:
+    """The body with its marker's ``profile=`` field re-pointed, or ``None``.
+
+    Only the ownership-marker region (the first two lines — the same region
+    :func:`_ownership_marker_only` trusts) is searched, and the field is
+    anchored between a comma and the closing delimiter so a profile value can
+    never be confused with a sibling field. ``None`` means the body carries no
+    matching ``profile=`` — a corrupt or already-re-pointed marker; callers
+    decide whether that is fatal.
+    """
+    lines = body.split("\n")
+    pattern = re.compile(rf"(?<=, )profile={re.escape(old_quoted)}(?=[,)])")
+    changed = False
+    for i, line in enumerate(lines[:2]):
+        new_line, count = pattern.subn(f"profile={new_quoted}", line)
+        if count:
+            lines[i] = new_line
+            changed = True
+    if not changed:
+        return None
+    return "\n".join(lines)
+
+
+def rename_wrapper(
+    paths: Paths,
+    old_alias: str,
+    new_alias: str,
+    *,
+    dry_run: bool = False,
+) -> bool:
+    """Move an installed managed wrapper to a new alias (issue #95).
+
+    The marker records no alias — for every shape except ``OPENAI_TOML`` the
+    body is byte-identical under any name, so the move is a byte-preserving
+    copy of the file: the token, model and profile binding travel untouched.
+    ``OPENAI_TOML`` is the one alias-referencing shape (the exec line launches
+    ``codex --profile '<alias>'`` and the companion TOML is alias-keyed), so
+    there the wrapper is re-rendered under the new spec with the token
+    recovered from the old file — a literal-auth wrapper keeps ``token=""``,
+    which is exactly what its body had.
+
+    The new name goes through the full creation gate —
+    :func:`naming.validate_alias` including reserved names, plus user-agent
+    binaries, the same boundary every wrapper creation flows through — because
+    a rename must not reach a name ``add`` could not have taken. The
+    default-wrapper pointers follow the move.
+
+    Returns True iff the rename happened (or was previewed).
+    """
+    if not _is_usable_alias(old_alias):
+        raise CodeHelperError(f"invalid wrapper name: {old_alias}")
+    wrapper = paths.script_for(old_alias)
+    if not wrapper.exists():
+        raise CodeHelperError(f"wrapper not found: {wrapper}")
+    if not is_managed(paths, old_alias):
+        raise CodeHelperError(f"refusing to rename unmanaged file {wrapper}")
+    if old_alias == new_alias:
+        # Renaming to itself: the destination check below would adopt the
+        # byte-identical source and then remove it — an explicit no-op is the
+        # only correct answer here.
+        return True
+
+    validate_alias(new_alias)
+    user_binaries = {a.binary for a in load_user_agents_strict(paths)}
+    if new_alias in user_binaries:
+        raise CodeHelperError(
+            f"{new_alias!r} is a reserved name — a wrapper named after a "
+            f"user-defined agent's binary would shadow the real one on PATH"
+        )
+    spec = spec_from_installed(paths, old_alias)
+    if spec is None:
+        raise CodeHelperError(
+            f"cannot rename {wrapper}: its marker is not recognisable"
+        )
+    new_spec = replace(spec, alias=new_alias)
+    token = ""
+    if spec.shape is ConfigShape.OPENAI_TOML and spec.auth == "secret":
+        token = token_from_installed(paths, old_alias, spec.provider.name) or ""
+        if not token:
+            raise CodeHelperError(
+                f"cannot rename {wrapper}: its token could not be recovered"
+            )
+
+    # Retry-aware destination guards: a previous attempt may have committed
+    # the destination before failing on a later step (pointer write, source
+    # removal). An identical managed destination is ADOPTED — the write would
+    # be a byte-no-op — so a retry converges; anything else in the way is
+    # refused exactly as a first attempt would be.
+    retry = False
+    new_path = paths.script_for(new_alias)
+    if new_path.exists():
+        expected_wrapper = (
+            render_script(new_spec, token)
+            if spec.shape is ConfigShape.OPENAI_TOML
+            else wrapper.read_text(encoding="utf-8")
+        )
+        if (
+            is_managed(paths, new_alias)
+            and new_path.read_text(encoding="utf-8") == expected_wrapper
+        ):
+            retry = True
+        else:
+            raise CodeHelperError(f"wrapper already exists: {new_path}")
+    if spec.shape is ConfigShape.OPENAI_TOML:
+        companion_new = paths.codex_config_for(new_alias)
+        if companion_new.exists():
+            if _ownership_marker_only(companion_new) and companion_new.read_text(
+                encoding="utf-8"
+            ) == openai_toml_body(new_spec):
+                retry = True
+            else:
+                raise CodeHelperError(f"codex profile already exists: {companion_new}")
+
+    from codehelper.services.state import default_wrapper
+
+    agents_to_repoint = [
+        agent.name
+        for agent in all_agents(paths)
+        if default_wrapper(paths, agent.name) == old_alias
+    ]
+
+    if spec.shape is ConfigShape.OPENAI_TOML:
+        # Idempotent: a committed destination from a prior attempt is skipped
+        # by the install plan itself.
+        install_wrapper(paths, new_spec, token=token, dry_run=dry_run)
+    elif not retry:
+        mode = stat.S_IMODE(wrapper.stat().st_mode)
+        if dry_run:
+            print(f"would move {wrapper} -> {new_path}")
+        else:
+            atomic_write(new_path, wrapper.read_text(encoding="utf-8"), mode=mode)
+            print(f"renamed wrapper {old_alias} -> {new_alias}")
+
+    from codehelper.services.state import set_default_wrapper
+
+    if not dry_run:
+        # Dry-run is "never writes anything" — the pointers included: repointing
+        # them here would aim defaults at a wrapper that is never created.
+        for agent_name in agents_to_repoint:
+            set_default_wrapper(paths, agent_name, new_alias)
+
+    try:
+        remove_wrapper(paths, old_alias, dry_run=dry_run)
+    except CodeHelperError as exc:
+        raise CodeHelperError(
+            f"renamed to {new_alias} but the old file could not be removed: {exc}"
+        ) from exc
+    return True
+
+
+def rename_provider_profile(
+    paths: Paths,
+    provider_name: str,
+    old_name: str,
+    new_name: str,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """Rename a provider's token profile AND follow the wrappers (issue #95).
+
+    A cache-only rename strands every installed wrapper whose marker records
+    the old profile: ``list`` keeps showing it and an ``edit-token --profile
+    <old>``, aimed at rotation, would silently create a fresh empty profile.
+    So the verb owns the whole move — the credentials key via
+    :func:`secrets.rename_profile`, the ``profile=`` field in every installed
+    wrapper marker naming it (wrapper body AND the ``OPENAI_TOML`` companion,
+    which carries the same marker line), and the stored active-selection
+    pointer, compared through the provider's storage names (a pre-rename
+    ``state.json`` may hold a retired spelling).
+
+    Returns the number of installed wrappers re-pointed.
+    """
+    provider = get_provider_for_legacy_read(provider_name)
+
+    from codehelper.services.secrets import profile_names, rename_profile
+
+    if old_name == new_name:
+        raise CodeHelperError("old and new profile names are identical")
+    existing = profile_names(paths, provider.name)
+    if old_name not in existing:
+        raise CodeHelperError(
+            f"unknown profile: {old_name!r} for provider {provider.name!r}"
+        )
+    outcome = validate_new_profile_name(
+        new_name, [n for n in existing if n != old_name]
+    )
+    if outcome in (NewProfileOutcome.EMPTY, NewProfileOutcome.COLLISION_NEW):
+        raise CodeHelperError(f"invalid new profile name: {new_name!r}")
+
+    targets = [
+        name
+        for name in wrappers_for_provider(paths, provider)
+        if profile_from_installed(paths, name) == old_name
+    ]
+
+    old_quoted = quote(old_name, safe="._-")
+    new_quoted = quote(new_name, safe="._-")
+    rewrites: list[tuple[Path, str, str]] = []
+    for name in targets:
+        files = [paths.script_for(name)]
+        spec = spec_from_installed(paths, name)
+        if spec is not None and spec.shape is ConfigShape.OPENAI_TOML:
+            companion = paths.codex_config_for(name)
+            if companion.exists() and _ownership_marker_only(companion):
+                files.append(companion)
+        for path in files:
+            old_body = path.read_text(encoding="utf-8")
+            new_body = _marker_with_repointed_profile(old_body, old_quoted, new_quoted)
+            if new_body is None:
+                raise CodeHelperError(
+                    f"cannot re-point {path}: no profile={old_quoted} in its marker"
+                )
+            rewrites.append((path, old_body, new_body))
+
+    if dry_run:
+        for path, _, _ in rewrites:
+            print(f"would update profile marker in {path}")
+        print(f"would rename profile {old_name} -> {new_name}")
+        return len(targets)
+
+    # Markers first, with rollback: a failed write midway — or the credential
+    # rename refusing the destination (a concurrent rename won the race) —
+    # restores the exact old bodies, so a partial rename can never strand
+    # wrappers on a profile the credential key has not moved to.
+    committed: list[tuple[Path, str]] = []
+    try:
+        for path, old_body, new_body in rewrites:
+            atomic_write(path, new_body)
+            committed.append((path, old_body))
+            print(f"re-pointed {path}")
+        rename_profile(paths, provider.name, old_name, new_name)
+        if new_name not in profile_names(paths, provider.name):
+            # rename_profile downgrades a credential-write OSError to a warning;
+            # a key that never moved must fail the verb, not fake success.
+            raise CodeHelperError(f"the credential key did not move to {new_name!r}")
+    except OSError as exc:
+        for path, old_body in reversed(committed):
+            atomic_write(path, old_body)
+        raise CodeHelperError(
+            f"profile rename failed midway — rolled back {len(committed)} "
+            f"marker write(s): {exc}"
+        ) from exc
+    except CodeHelperError as exc:
+        for path, old_body in reversed(committed):
+            atomic_write(path, old_body)
+        raise CodeHelperError(
+            f"profile rename failed — rolled back {len(committed)} "
+            f"marker write(s): {exc}"
+        ) from exc
+
+    from codehelper.services.state import active_selection, set_active_selection
+
+    selection = active_selection(paths)
+    if (
+        selection is not None
+        and selection[0] in provider_storage_names(provider.name)
+        and selection[1] == old_name
+    ):
+        try:
+            set_active_selection(paths, provider.name, new_name)
+        except OSError as exc:
+            # The rename itself is committed (markers + credential key); the
+            # pointer is re-pickable UI state whose readers degrade to None —
+            # but a failure here must say so with context, the same posture
+            # remove_wrapper takes for its final pointer clear, instead of a
+            # raw OSError traceback over a finished rename.
+            raise CodeHelperError(
+                f"renamed profile {old_name} -> {new_name} but failed to "
+                f"update the active pointer: {exc}"
+            ) from exc
+
+    print(f"renamed profile {old_name} -> {new_name}")
+    return len(targets)
 
 
 def describe_wrapper(

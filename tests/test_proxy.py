@@ -310,7 +310,7 @@ def test_a_refused_write_does_not_bank_the_address(tmp_path):
 
 
 @pytest.mark.unit
-def test_a_concurrent_change_does_not_bank_a_stale_address(tmp_path, monkeypatch):
+def test_a_concurrent_change_does_not_bank_a_stale_address(tmp_path):
     """`off` reads the live address, banks it, then writes. If another writer
     switches the proxy in between, the settings write is refused — so the
     proxy is never left off while pointing at a superseded endpoint."""

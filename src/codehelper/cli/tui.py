@@ -190,18 +190,18 @@ def _hint(
         # TWO lines — `menu` accepts exactly one "\n" in a hint and counts
         # both rows into frame_lines, so the in-place redraw stays honest.
         # The editing keys are named here rather than left behind `?`: on the
-        # main screen they are the only way to add or change a wrapper, and a
-        # key nobody can see is a key nobody presses. `a` is split OUT of the
-        # `e/d` cluster rather than folded into "edit" — `e` only rotates a
-        # token (it dispatches to the same handler as `t`), so grouping `a`
-        # under "edit" mislabels what pressing it does. Two lines are what
-        # lets every name stay whole: cramming `s settings` into one line
-        # forced `↵`/`d del`-style truncations and 80 columns was exactly the
-        # budget `_fit` truncates past (the bug a PTY run caught here). `p`
-        # is named too — bound in run()'s keys, pinned against
+        # main screen they are the only way to add, rename or change a
+        # wrapper, and a key nobody can see is a key nobody presses. `a` is
+        # split OUT of the `e/d` cluster rather than folded into "edit" —
+        # `e` renames the focused wrapper, `t` rotates its token, so grouping
+        # `a` under "edit" mislabels what pressing it does. Two lines are
+        # what lets every name stay whole: cramming `s settings` into one
+        # line forced `↵`/`d del`-style truncations and 80 columns was
+        # exactly the budget `_fit` truncates past (the bug a PTY run caught
+        # here). `p` is named too — bound in run()'s keys, pinned against
         # `_translate_char`, never before hinted.
         hint = (
-            f"↑↓ row · ←→ chip · Enter apply · a add · e/t token · d delete\n"
+            f"↑↓ row · ←→ chip · Enter apply · a add · e rename · t token · d delete\n"
             f"s settings · p profiles · ? · Esc {exit_word}"
         )
     else:
@@ -379,7 +379,7 @@ class TuiSession:
             print(text)
         press_any_key("Press any key to continue...")
 
-    def _run(self, handler, request=None, *, silent: bool = False) -> None:
+    def _run(self, handler, request=None, *, silent: bool = False) -> bool:
         """Dispatch a CLI handler/request and preserve its user-facing output.
 
         Tees stdout instead of fully redirecting it: some handlers (e.g.
@@ -399,6 +399,11 @@ class TuiSession:
         redraw already reflects the new ``[applied]`` state, so a chip press
         must be quiet (no ``wrote ...`` echo, no "Press any key"). An error
         is still surfaced and paused on: a failed apply must never be silent.
+
+        Returns True iff the handler completed without an error — callers
+        that synthesize their own success message must gate it on this, not
+        on inspecting the filesystem afterwards (the handler may have failed
+        on a collision with an existing target that still exists).
         """
         import io
         import sys
@@ -419,11 +424,12 @@ class TuiSession:
             sys.stdout = real_stdout
             print(f"error: {exc}")
             self._notify(buffer.getvalue().rstrip())
-            return
+            return False
         finally:
             sys.stdout = real_stdout
         if not silent:
             self._notify(buffer.getvalue().rstrip())
+        return True
 
     def _read_text(self, prompt: str) -> str | None:
         from codehelper.cli.menu import MenuCancelled, read_line
@@ -1357,23 +1363,57 @@ class TuiSession:
         if provider == _BACK:
             return
         names = list(profile_names(paths, provider))
-        if not names:
-            self._notify(f"No profiles for {provider}.")
-            return
-        current = valid_active_profile(paths, provider)
-        items = [
-            (
-                name,
-                f"{'default' if name == DEFAULT_PROFILE else name}"
-                f"{' (active)' if name == current else ''}",
+        rename_keys: dict[str, Callable[[str], object]] = {
+            "e": lambda value: None if value == _BACK else f"rename:{value}"
+        }
+        while True:
+            if not names:
+                self._notify(f"No profiles for {provider}.")
+                return
+            current = valid_active_profile(paths, provider)
+            items = [
+                (
+                    name,
+                    f"{'default' if name == DEFAULT_PROFILE else name}"
+                    f"{' (active)' if name == current else ''}",
+                )
+                for name in names
+            ]
+            items.extend([(_BACK, "Back")])
+            choice = self._pick(
+                items,
+                f"Active profile for {provider} (e: rename):",
+                on_key=rename_keys,
             )
-            for name in names
-        ]
-        items.extend([(_BACK, "Back")])
-        choice = self._pick(items, f"Active profile for {provider}:")
-        if choice == _BACK:
+            if choice == _BACK:
+                return
+            if isinstance(choice, str) and choice.startswith("rename:"):
+                from codehelper.cli.parser import _handle_rename
+                from codehelper.cli.requests import RenameRequest
+
+                old_name = choice.removeprefix("rename:")
+                new_name = self._read_text(f"New name for {old_name}: ")
+                if not new_name or new_name == old_name:
+                    continue
+                # silent: same no-double-echo contract as the wrapper rename.
+                renamed = self._run(
+                    _handle_rename,
+                    RenameRequest(
+                        kind="profile",
+                        provider=provider,
+                        name=old_name,
+                        new_name=new_name,
+                        dry_run=getattr(self.args, "dry_run", False),
+                        debug=getattr(self.args, "debug", False),
+                    ),
+                    silent=True,
+                )
+                names = list(profile_names(paths, provider))
+                if renamed:
+                    self._notify(f"renamed profile {old_name} -> {new_name}")
+                continue
+            set_active_selection(paths, provider, choice)
             return
-        set_active_selection(paths, provider, choice)
 
     def _run_tokens_screen(self) -> None:
         """The read-only Tokens screen — the Settings screen's viewer twin of
@@ -1986,6 +2026,54 @@ class TuiSession:
             return None
         return f"token:{self._chip_name(chip)}"
 
+    def _rename_action(self, value: str) -> str | None:
+        """Return the rename action for the focused row/chip (issue #95).
+
+        Same focused-chip resolution as :meth:`_token_action` — chipset rows
+        and action rows own nothing renameable, so they stay inert there.
+        """
+        chip = self._focused_chip(value)
+        if chip is None:
+            return None
+        return f"rename:{self._chip_name(chip)}"
+
+    def _on_rename(self, alias: str) -> None:
+        """`e` on a wrapper row: move the wrapper to a new alias (issue #95)."""
+        from codehelper.cli.parser import _handle_rename
+        from codehelper.cli.requests import RenameRequest
+        from codehelper.services.paths import Paths
+        from codehelper.services.wrappers import is_installed, is_managed
+
+        paths = Paths.default()
+        if not is_installed(paths, alias):
+            self._notify("Wrapper not installed — use Add first.")
+            return
+        if not is_managed(paths, alias):
+            self._notify("Refusing to rename an unmanaged wrapper file.")
+            return
+        new_name = self._read_text(f"New name for {alias}: ")
+        if not new_name or new_name == alias:
+            return
+        # silent: the tee would otherwise show the service transcript live AND
+        # replay it in the notify pause — the doubled output a live run hit.
+        # The confirmation is gated on the handler's RESULT, not on the target
+        # existing: a colliding alias leaves the source untouched and must not
+        # print a success line after its own error.
+        renamed = self._run(
+            _handle_rename,
+            RenameRequest(
+                kind="wrapper",
+                provider=None,
+                name=alias,
+                new_name=new_name,
+                dry_run=getattr(self.args, "dry_run", False),
+                debug=getattr(self.args, "debug", False),
+            ),
+            silent=True,
+        )
+        if renamed:
+            self._notify(f"renamed wrapper {alias} -> {new_name}")
+
     def _apply_chip(self, agent_name: str) -> None:
         """Apply the highlighted chip of ``agent_name`` (Enter on its row).
 
@@ -2037,7 +2125,7 @@ class TuiSession:
     def _show_help(self) -> None:
         from codehelper.cli.menu import press_any_key
 
-        print("a add (agent row: scoped to it) · t/e token · d delete")
+        print("a add (agent row: scoped to it) · t token · e rename · d delete")
         print("+ add agent: new CLI integration · + add wrapper: any agent")
         print("p profiles · s settings (proxy, stored tokens)")
         print("←→ + Enter on the + add chip: same as a")
@@ -2074,8 +2162,8 @@ class TuiSession:
                     "s": lambda _alias: _SETTINGS,
                     "?": lambda _alias: _HELP,
                     "TOKEN": self._token_action,
-                    "e": self._token_action,
                     "t": self._token_action,
+                    "e": self._rename_action,
                     # Chipset rows (agents, proxy) and the two action rows own
                     # no wrapper file, so `d` there must be inert rather than
                     # looking for a wrapper literally named `proxy:` or
@@ -2146,6 +2234,8 @@ class TuiSession:
                     self._show_help()
                 elif choice.startswith("token:"):
                     self._on_token(choice.removeprefix("token:"))
+                elif choice.startswith("rename:"):
+                    self._on_rename(choice.removeprefix("rename:"))
                 elif choice.startswith("remove:"):
                     from codehelper.cli.parser import _handle_remove
                     from codehelper.cli.requests import RemoveRequest

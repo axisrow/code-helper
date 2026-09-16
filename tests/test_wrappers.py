@@ -46,6 +46,9 @@ from codehelper.services.wrappers import (
     is_installed,
     is_managed,
     list_wrappers,
+    profile_from_installed,
+    rename_provider_profile,
+    rename_wrapper,
     spec_from_installed,
     token_from_installed,
     valid_default_wrapper,
@@ -930,7 +933,7 @@ def test_cli_add_with_model_override(tmp_path):
 
 
 @pytest.mark.integration
-def test_cli_list_shows_registry(tmp_path, capsys):
+def test_cli_list_shows_registry(capsys):
     assert main(["list"]) == 0
     out = capsys.readouterr().out
     assert "deepseek-ollama" in out
@@ -938,7 +941,7 @@ def test_cli_list_shows_registry(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_cli_unknown_wrapper_name_exits_1(tmp_path, capsys):
+def test_cli_unknown_wrapper_name_exits_1(capsys):
     code = main(["add", "nope"])
     assert code == 1
     err = capsys.readouterr().err
@@ -2387,7 +2390,7 @@ def test_remove_wrapper_asks_confirm_before_unlinking(tmp_path):
     assert paths.script_for(spec.alias) in seen
     assert paths.script_for(spec.alias).exists()
 
-    def accept(targets):
+    def accept(_targets):
         return True
 
     assert remove_wrapper(paths, spec.alias, confirm=accept) is True
@@ -2512,7 +2515,7 @@ def test_remove_wrapper_reports_but_does_not_undo_a_failed_default_clear(
     install_wrapper(paths, spec)
     set_default_wrapper(paths, "codex", spec.alias)
 
-    def flaky_write_state(paths_arg, state_dict):
+    def flaky_write_state(_paths_arg, _state_dict):
         raise OSError("simulated disk-full failure")
 
     monkeypatch.setattr(state, "_write_state", flaky_write_state)
@@ -3013,3 +3016,390 @@ def test_wrappers_for_provider_matches_a_renamed_legacy_marker(tmp_path):
     assert wrappers_for_provider(paths, get_provider("ollama-direct")) == [
         "qwen3.5-codex"
     ]
+
+
+# --------------------------------------------------------------------------- #
+# rename (issue #95): alias move + profile cascade
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_rename_wrapper_moves_an_anthropic_env_wrapper_byte_identical(tmp_path):
+    """A non-OPENAI_TOML body references no alias, so the move is a
+    byte-preserving copy: token and profile binding travel untouched."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token=_SECRET_TOKEN)
+    before = script_text(paths, "glm")
+
+    assert rename_wrapper(paths, "glm", "glm-moved")
+
+    assert not is_installed(paths, "glm")
+    assert is_installed(paths, "glm-moved")
+    assert is_managed(paths, "glm-moved")
+    assert script_text(paths, "glm-moved") == before
+    assert spec_from_installed(paths, "glm-moved") is not None
+    assert "glm-moved" in discover_managed(paths)
+
+
+@pytest.mark.integration
+def test_rename_wrapper_keeps_a_literal_wrapper_intact(tmp_path):
+    """A literal-auth wrapper must survive the move with its body byte-equal —
+    a re-render-from-extracted-token would have zeroed its auth line."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "deepseek-ollama", token=_LITERAL_TOKEN)
+    before = script_text(paths, "deepseek-ollama")
+
+    assert rename_wrapper(paths, "deepseek-ollama", "ds-local")
+
+    assert not is_installed(paths, "deepseek-ollama")
+    assert script_text(paths, "ds-local") == before
+    assert _LITERAL_TOKEN in script_text(paths, "ds-local")
+
+
+@pytest.mark.integration
+def test_rename_wrapper_default_pointer_follows(tmp_path):
+    from codehelper.services.state import set_default_wrapper
+    from codehelper.services.wrappers import valid_default_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token=_SECRET_TOKEN)
+    set_default_wrapper(paths, "claude", "glm")
+
+    assert rename_wrapper(paths, "glm", "glm-moved")
+
+    assert valid_default_wrapper(paths, "claude") == "glm-moved"
+
+
+@pytest.mark.integration
+def test_rename_wrapper_openai_toml_moves_companion_and_rewrites_exec(tmp_path):
+    """OPENAI_TOML is the alias-referencing shape: the companion moves and the
+    exec line launches the NEW profile name."""
+    from codehelper.services.wrappers import ConfigShape as _CS
+
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama-direct", model="qwen3.5:9b")
+    assert spec.shape is _CS.OPENAI_TOML
+    install_wrapper(paths, spec)
+
+    assert rename_wrapper(paths, "qwen3.5-codex", "qwen-moved")
+
+    assert not is_installed(paths, "qwen3.5-codex")
+    assert not paths.codex_config_for("qwen3.5-codex").exists()
+    body = script_text(paths, "qwen-moved")
+    assert "codex --profile 'qwen-moved'" in body
+    assert paths.codex_config_for("qwen-moved").exists()
+
+
+@pytest.mark.unit
+def test_rename_wrapper_refusals(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token=_SECRET_TOKEN)
+
+    with pytest.raises(CodeHelperError, match="wrapper not found"):
+        rename_wrapper(paths, "nope", "whatever")
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude",
+            provider="zai",
+            model="glm-5.3",
+            alias="glm2",
+        ),
+        token=_SECRET_TOKEN + "x",  # a different body: the refusal is real
+    )
+    with pytest.raises(CodeHelperError, match="already exists"):
+        rename_wrapper(paths, "glm", "glm2")
+    with pytest.raises(CodeHelperError):
+        rename_wrapper(paths, "glm", "codehelper")  # reserved
+    with pytest.raises(CodeHelperError):
+        rename_wrapper(paths, "glm", "-leading-dash")  # malformed
+
+
+@pytest.mark.integration
+def test_rename_wrapper_dry_run_writes_nothing(tmp_path):
+    """Dry-run is never-writes-anything: files AND the default-wrapper
+    pointers (a dry rename must not aim defaults at a ghost alias)."""
+    from codehelper.services.state import set_default_wrapper
+    from codehelper.services.wrappers import valid_default_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token=_SECRET_TOKEN)
+    set_default_wrapper(paths, "claude", "glm")
+
+    assert rename_wrapper(paths, "glm", "glm-moved", dry_run=True)
+
+    assert is_installed(paths, "glm")
+    assert not is_installed(paths, "glm-moved")
+    assert valid_default_wrapper(paths, "claude") == "glm"
+
+
+@pytest.mark.integration
+def test_rename_provider_profile_rolls_back_markers_when_a_write_fails(
+    tmp_path, monkeypatch
+):
+    """A marker write failing midway must roll back the already-written
+    markers to their exact old bodies and fail loudly — never strand some
+    wrappers on the new profile name while the credential is on the old."""
+    import codehelper.services.secrets as secrets
+    import codehelper.services.wrappers as wrappers_mod
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "bai", _SECRET_TOKEN, "work")
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude",
+            provider="bai",
+            model="claude-sonnet-4-6",
+            alias="glm-work",
+            profile_name="work",
+        ),
+        token=_SECRET_TOKEN,
+    )
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="codex",
+            provider="bai",
+            model="gpt-5.5",
+            alias="glm-work-codex",
+            profile_name="work",
+        ),
+        token=_SECRET_TOKEN,
+    )
+
+    real_atomic_write = wrappers_mod.atomic_write
+    writes = {"n": 0}
+
+    def flaky_write(path, body, mode=None):
+        writes["n"] += 1
+        if writes["n"] == 2:  # the second marker write blows up
+            raise OSError("disk full")
+        return real_atomic_write(path, body, mode=mode)
+
+    monkeypatch.setattr(wrappers_mod, "atomic_write", flaky_write)
+
+    with pytest.raises(CodeHelperError, match="rolled back"):
+        rename_provider_profile(paths, "bai", "work", "personal")
+
+    for alias in ("glm-work", "glm-work-codex"):
+        assert profile_from_installed(paths, alias) == "work"
+        assert _SECRET_TOKEN in script_text(paths, alias)
+    assert secrets.credential_for(paths, "bai", "work") == _SECRET_TOKEN
+
+
+@pytest.mark.integration
+def test_rename_provider_profile_fails_loud_when_the_credential_move_degrades(
+    tmp_path, monkeypatch
+):
+    """secrets.rename_profile degrades a credential-write OSError to a
+    warning — the cascade must detect the key did not move, roll the markers
+    back, and raise instead of reporting success."""
+    import codehelper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "bai", _SECRET_TOKEN, "work")
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude",
+            provider="bai",
+            model="claude-sonnet-4-6",
+            alias="glm-work",
+            profile_name="work",
+        ),
+        token=_SECRET_TOKEN,
+    )
+    monkeypatch.setattr(
+        secrets, "rename_profile", lambda *a, **k: None
+    )  # the degraded write: nothing moved, nothing raised
+
+    with pytest.raises(CodeHelperError, match="credential"):
+        rename_provider_profile(paths, "bai", "work", "personal")
+
+    assert profile_from_installed(paths, "glm-work") == "work"
+    assert secrets.credential_for(paths, "bai", "work") == _SECRET_TOKEN
+    assert secrets.credential_for(paths, "bai", "personal") == ""
+
+
+@pytest.mark.integration
+def test_rename_provider_profile_rolls_back_when_the_credential_rename_refuses(
+    tmp_path, monkeypatch
+):
+    """Two renames racing for one destination name: the loser's credential
+    rename raises after its markers were already written — the markers must
+    roll back so nothing points at a profile that was never moved."""
+    import codehelper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "bai", _SECRET_TOKEN, "work")
+    for alias in ("glm-work", "glm-work-codex"):
+        install_wrapper(
+            paths,
+            build_spec(
+                agent="claude" if alias == "glm-work" else "codex",
+                provider="bai",
+                model="claude-sonnet-4-6" if alias == "glm-work" else "gpt-5.5",
+                alias=alias,
+                profile_name="work",
+            ),
+            token=_SECRET_TOKEN,
+        )
+
+    def refusing_rename(_paths, _provider, _old, _new):
+        raise CodeHelperError("profile 'personal' already exists for provider 'bai'")
+
+    monkeypatch.setattr(secrets, "rename_profile", refusing_rename)
+
+    with pytest.raises(CodeHelperError, match="rolled back"):
+        rename_provider_profile(paths, "bai", "work", "personal")
+
+    for alias in ("glm-work", "glm-work-codex"):
+        assert profile_from_installed(paths, alias) == "work"
+        assert _SECRET_TOKEN in script_text(paths, alias)
+    assert secrets.credential_for(paths, "bai", "work") == _SECRET_TOKEN
+
+
+@pytest.mark.integration
+def test_rename_provider_profile_pointer_failure_raises_with_context(
+    tmp_path, monkeypatch
+):
+    """A failed active-pointer write must abort with the house-style
+    contextual error (remove_wrapper posture): raise with what happened, no
+    rollback — the committed rename is correct and every pointer reader
+    degrades to None on a stale name."""
+    import codehelper.services.secrets as secrets
+    import codehelper.services.state as state_mod
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "bai", _SECRET_TOKEN, "work")
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude",
+            provider="bai",
+            model="claude-sonnet-4-6",
+            alias="glm-work",
+            profile_name="work",
+        ),
+        token=_SECRET_TOKEN,
+    )
+    state_mod.set_active_selection(paths, "bai", "work")
+
+    def _boom(*_a, **_kw):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(state_mod, "set_active_selection", _boom)
+
+    with pytest.raises(CodeHelperError, match="failed to update the active pointer"):
+        rename_provider_profile(paths, "bai", "work", "personal")
+
+    # The rename itself is committed; only the pointer is stale (recoverable).
+    assert profile_from_installed(paths, "glm-work") == "personal"
+    assert secrets.credential_for(paths, "bai", "personal") == _SECRET_TOKEN
+
+
+@pytest.mark.integration
+def test_rename_provider_profile_repoints_installed_markers(tmp_path):
+    """The cascade: cache key, every wrapper marker naming the profile (and
+    the codex companion's), and the active-selection pointer all move
+    together; tokens stay byte-identical."""
+    import codehelper.services.secrets as secrets
+    from codehelper.services.state import (
+        active_selection,
+        set_active_selection,
+    )
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "bai", _SECRET_TOKEN, "work")
+    anthropic = build_spec(
+        agent="claude",
+        provider="bai",
+        model="claude-sonnet-4-6",
+        alias="glm-work",
+        profile_name="work",
+    )
+    install_wrapper(paths, anthropic, token=_SECRET_TOKEN)
+    codex = build_spec(
+        agent="codex",
+        provider="bai",
+        model="gpt-5.5",
+        alias="glm-work-codex",
+        profile_name="work",
+    )
+    install_wrapper(paths, codex, token=_SECRET_TOKEN)
+    set_active_selection(paths, "bai", "work")
+
+    moved = rename_provider_profile(paths, "bai", "work", "personal")
+
+    assert moved == 2
+    assert secrets.credential_for(paths, "bai", "work") == ""
+    assert secrets.credential_for(paths, "bai", "personal") == _SECRET_TOKEN
+    for alias in ("glm-work", "glm-work-codex"):
+        assert profile_from_installed(paths, alias) == "personal"
+        assert _SECRET_TOKEN in script_text(paths, alias)
+    marker = script_text(paths, "glm-work").split("\n")[1]
+    assert "profile=personal" in marker
+    companion = paths.codex_config_for("glm-work-codex").read_text(encoding="utf-8")
+    assert "profile=personal" in companion.split("\n")[0]
+    assert active_selection(paths) == ("bai", "personal")
+
+
+@pytest.mark.unit
+def test_rename_provider_profile_refusals(tmp_path):
+    import codehelper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "zai", _SECRET_TOKEN, "work")
+    secrets.save_credential(paths, "zai", _SECRET_TOKEN, "other")
+
+    with pytest.raises(CodeHelperError, match="unknown profile"):
+        rename_provider_profile(paths, "zai", "nope", "x")
+    with pytest.raises(CodeHelperError, match="identical"):
+        rename_provider_profile(paths, "zai", "work", "work")
+    with pytest.raises(CodeHelperError):
+        rename_provider_profile(paths, "zai", "work", "other")  # collision
+
+
+@pytest.mark.integration
+def test_rename_provider_profile_marker_roundtrips_spaces_and_commas(tmp_path):
+    """Marker values are URL-quoted (safe='._-'), so a profile name with a
+    space or comma round-trips — there is deliberately no charset gate."""
+    import codehelper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "zai", _SECRET_TOKEN, "my work, v1")
+    anthropic = build_spec(
+        agent="claude",
+        provider="zai",
+        model="glm-5.3",
+        alias="glm-named",
+        profile_name="my work, v1",
+    )
+    install_wrapper(paths, anthropic, token=_SECRET_TOKEN)
+
+    assert rename_provider_profile(paths, "zai", "my work, v1", "my work, v2")
+
+    assert profile_from_installed(paths, "glm-named") == "my work, v2"
+    assert secrets.credential_for(paths, "zai", "my work, v2") == _SECRET_TOKEN
+
+
+@pytest.mark.integration
+def test_rename_provider_profile_dry_run_writes_nothing(tmp_path):
+    import codehelper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "zai", _SECRET_TOKEN, "work")
+    anthropic = build_spec(
+        agent="claude",
+        provider="zai",
+        model="glm-5.3",
+        alias="glm-work",
+        profile_name="work",
+    )
+    install_wrapper(paths, anthropic, token=_SECRET_TOKEN)
+
+    assert rename_provider_profile(paths, "zai", "work", "personal", dry_run=True)
+
+    assert secrets.credential_for(paths, "zai", "work") == _SECRET_TOKEN
+    assert profile_from_installed(paths, "glm-work") == "work"

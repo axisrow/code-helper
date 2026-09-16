@@ -47,6 +47,7 @@ from codehelper.cli.requests import (
     EnableRequest,
     ProxyRequest,
     RemoveRequest,
+    RenameRequest,
     SetDefaultRequest,
     SwitchRequest,
 )
@@ -97,7 +98,6 @@ from codehelper.services.secrets import (
     invalidate_cached_credential,
     profile_names,
     profile_rows,
-    rename_profile,
     render_token,
     token_for_discovery,
     valid_active_profile,
@@ -119,6 +119,8 @@ from codehelper.services.wrappers import (
     list_wrappers,
     removal_discards_only_secret,
     remove_wrapper,
+    rename_provider_profile,
+    rename_wrapper,
     spec_from_installed,
     token_from_installed,
     wrappers_for_provider,
@@ -529,7 +531,7 @@ def _add_resolve_provider(req, paths):
     return agent, provider
 
 
-def _add_list_models_or_none(req, paths, agent, provider, profile_name):
+def _add_list_models_or_none(req, paths, _agent, provider, profile_name):
     """Run ``--list-models`` if requested, printing models and returning 0.
 
     Returns ``None`` when ``--list-models`` was not requested, so the caller
@@ -551,7 +553,7 @@ def _add_list_models_or_none(req, paths, agent, provider, profile_name):
     return 0
 
 
-def _add_resolve_spec(req, paths, agent, provider, profile_name):
+def _add_resolve_spec(req, _paths, agent, provider, profile_name):
     """Build the ``WrapperSpec`` — constructor path.
 
     Resolves compatibility BEFORE anything interactive: a bad pairing must
@@ -748,9 +750,10 @@ def _add_install_and_cache(spec, req, paths, token, resolved, profile_name):
         resolved is not None
         and req.profile_rename_from
         and req.profile_rename_to
+        and req.profile_rename_from != req.profile_rename_to
         and not dry_run
     ):
-        rename_profile(
+        rename_provider_profile(
             paths,
             spec.provider.name,
             req.profile_rename_from,
@@ -1120,8 +1123,13 @@ def _handle_edit_token(args: argparse.Namespace | EditTokenRequest) -> int:
         source=SOURCE_PROMPT,
         dry_run=dry_run,
     )
-    if profile_rename_from and profile_rename_to and not dry_run:
-        rename_profile(
+    if (
+        profile_rename_from
+        and profile_rename_to
+        and profile_rename_from != profile_rename_to
+        and not dry_run
+    ):
+        rename_provider_profile(
             paths,
             spec.provider.name,
             profile_rename_from,
@@ -1164,6 +1172,35 @@ def _handle_remove(args: argparse.Namespace | RemoveRequest) -> int:
         force=req.force,
         confirm=_confirm_remove,
     )
+    return 0
+
+
+def _handle_rename(args: argparse.Namespace | RenameRequest) -> int:
+    """Rename a wrapper alias or a token profile (issue #95).
+
+    Thin shell over the two service operations; the profile kind carries the
+    wrapper-marker cascade, so `rename profile` is the complete move — the
+    same one `e` performs from the TUI.
+    """
+
+    req = (
+        args if isinstance(args, RenameRequest) else RenameRequest.from_namespace(args)
+    )
+    paths = Paths.default()
+    if req.kind == "wrapper":
+        rename_wrapper(paths, req.name, req.new_name, dry_run=req.dry_run)
+        return 0
+    provider = get_provider_for_legacy_read(req.provider or "")
+    _refuse_disabled_provider(provider, paths)
+    re_pointed = rename_provider_profile(
+        paths,
+        provider.name,
+        req.name,
+        req.new_name,
+        dry_run=req.dry_run,
+    )
+    if req.dry_run and re_pointed:
+        print(f"would re-point {re_pointed} installed wrapper(s)")
     return 0
 
 
@@ -1944,6 +1981,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="remove an unmanaged wrapper file too",
     )
     p_remove.set_defaults(func=_handle_remove)
+
+    p_rename = subparsers.add_parser(
+        "rename",
+        help="rename a wrapper alias, or a token profile (installed wrappers follow)",
+        parents=[sub_flags],
+    )
+    p_rename.add_argument(
+        "kind",
+        choices=["wrapper", "profile"],
+        help="what to rename",
+    )
+    p_rename.add_argument(
+        "first",
+        nargs="?",
+        default=None,
+        help="wrapper: the old alias · profile: the provider",
+    )
+    p_rename.add_argument(
+        "second",
+        nargs="?",
+        default=None,
+        help="wrapper: the new alias · profile: the old profile name",
+    )
+    p_rename.add_argument(
+        "third",
+        nargs="?",
+        default=None,
+        help="profile only: the new profile name",
+    )
+    p_rename.set_defaults(func=_handle_rename)
 
     p_disable = subparsers.add_parser(
         "disable",

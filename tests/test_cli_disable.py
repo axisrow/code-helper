@@ -98,12 +98,12 @@ def test_disable_with_no_wrappers_still_writes_state(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_disable_refuses_native(tmp_path):
+def test_disable_refuses_native():
     assert main(["disable", "native", "--yes"]) == 1
 
 
 @pytest.mark.integration
-def test_disable_refuses_an_already_disabled_provider(tmp_path):
+def test_disable_refuses_an_already_disabled_provider():
     main(["disable", "ollama-direct", "--yes"])
     assert main(["disable", "ollama", "--yes"]) == 1  # legacy spelling, same provider
 
@@ -152,7 +152,7 @@ def test_enable_lifts_the_disable_and_does_not_restore_wrappers(tmp_path, capsys
 
 
 @pytest.mark.integration
-def test_enable_a_not_disabled_provider_refuses(tmp_path):
+def test_enable_a_not_disabled_provider_refuses():
     assert main(["enable", "ollama-direct"]) == 1
 
 
@@ -162,7 +162,7 @@ def test_enable_a_not_disabled_provider_refuses(tmp_path):
 
 
 @pytest.mark.integration
-def test_add_refuses_a_disabled_preset_and_provider(tmp_path, capsys):
+def test_add_refuses_a_disabled_preset_and_provider(capsys):
     main(["disable", "ollama-direct", "--yes"])
     assert main(["add", "deepseek-ollama", "--dry-run"]) == 1
     assert "disabled" in capsys.readouterr().err
@@ -185,14 +185,14 @@ def test_add_refuses_a_disabled_preset_and_provider(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_switch_refuses_a_disabled_provider(tmp_path, capsys):
+def test_switch_refuses_a_disabled_provider(capsys):
     main(["disable", "ollama-direct", "--yes"])
     assert main(["switch", "ollama-direct", "--model", "qwen3.5:9b", "--force"]) == 1
     assert "disabled" in capsys.readouterr().err
 
 
 @pytest.mark.integration
-def test_list_providers_shows_the_disabled_tag(tmp_path, capsys):
+def test_list_providers_shows_the_disabled_tag(capsys):
     main(["disable", "ollama-direct", "--yes"])
     main(["list", "providers"])
     out = capsys.readouterr().out
@@ -201,7 +201,7 @@ def test_list_providers_shows_the_disabled_tag(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_tokens_hides_a_disabled_providers_rows(tmp_path, capsys):
+def test_tokens_hides_a_disabled_providers_rows(tmp_path):
     from codehelper.cli.parser import _token_view_rows
     from codehelper.services.secrets import save_credential
 
@@ -216,7 +216,7 @@ def test_tokens_hides_a_disabled_providers_rows(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_enable_makes_add_work_again(tmp_path):
+def test_enable_makes_add_work_again():
     main(["disable", "ollama-direct", "--yes"])
     main(["enable", "ollama-direct"])
     # Wrappers are NOT restored (see the test above) — but `add` works again.
@@ -328,9 +328,11 @@ def test_disable_proceeds_when_the_token_is_cached(tmp_path):
 
 
 def _switch_request(**overrides):
+    from typing import Any
+
     from codehelper.cli.requests import SwitchRequest
 
-    fields = dict(
+    fields: dict[str, Any] = dict(
         provider=None,
         from_wrapper=None,
         model=None,
@@ -417,7 +419,7 @@ def test_edit_token_picker_hides_a_disabled_providers_wrappers(tmp_path, monkeyp
     save_credential(paths, "zai", "sk-a")  # so disable passes the only-copy guard
     captured: dict = {}
 
-    def _capture(items, **kwargs):
+    def _capture(items, **_kwargs):
         captured["values"] = [item[0] for item in items if isinstance(item, tuple)]
         raise menu.MenuCancelled(False)  # soft cancel — picker's own back gesture
 
@@ -433,7 +435,7 @@ def test_edit_token_picker_hides_a_disabled_providers_wrappers(tmp_path, monkeyp
 
 
 @pytest.mark.integration
-def test_enable_dry_run_refuses_a_not_disabled_provider(tmp_path, capsys):
+def test_enable_dry_run_refuses_a_not_disabled_provider(capsys):
     """A dry run must never promise what the real run refuses — disable's
     dry run already refuses exactly what the real run would refuse."""
     assert main(["enable", "litellm", "--dry-run"]) == 1
