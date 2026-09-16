@@ -2578,6 +2578,46 @@ def test_delete_on_the_proxy_row_is_inert(monkeypatch):
     assert main(["tui"]) == 0
 
 
+@pytest.mark.integration
+def test_delete_on_an_agent_chipset_row_is_inert(monkeypatch):
+    """Same contract as the proxy row: a chipset row owns no wrapper file, so
+    `d` there must not dispatch a removal for a wrapper literally named
+    `agent:claude` — the dispatch a user hit as "invalid wrapper name"."""
+    seen = []
+
+    def _spy_remove(*args, **kwargs):
+        seen.append(args)
+        return 0
+
+    monkeypatch.setattr("codehelper.cli.parser._handle_remove", _spy_remove)
+    # Row 1 is the claude chipset row — no DOWNs needed.
+    _real_menu_keys(monkeypatch, ["d", "CANCEL"])
+
+    assert main(["tui"]) == 0
+    assert seen == []
+
+
+@pytest.mark.integration
+def test_delete_on_a_wrapper_row_still_dispatches(monkeypatch):
+    """The inertness above must not swallow real removals: `d` on a wrapper
+    row dispatches `_handle_remove` with that row's alias."""
+    seen = []
+
+    def _spy_remove(*args, **kwargs):
+        seen.append(args)
+        return 0
+
+    monkeypatch.setattr("codehelper.cli.parser._handle_remove", _spy_remove)
+    # Row 5 is the first preset/wrapper row: agent:claude, agent:codex,
+    # proxy, + add agent, then deepseek-ollama.
+    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "DOWN", "DOWN", "d", "CANCEL"])
+
+    assert main(["tui"]) == 0
+    assert len(seen) == 1
+    (req,) = seen[0]
+    assert req.name == "deepseek-ollama"
+
+
 @pytest.mark.unit
 def test_codex_chip_readback_distinguishes_two_models_on_one_provider():
     """Two codex wrappers sharing a provider but naming DIFFERENT models must
