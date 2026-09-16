@@ -158,3 +158,45 @@ def test_edit_token_hard_cancel_propagates(tmp_path, monkeypatch):
 
     paths = Paths.from_home(tmp_path)
     assert not paths.script_for("glm").exists()
+
+
+@pytest.mark.integration
+def test_edit_token_same_name_rename_is_a_quiet_noop(tmp_path, monkeypatch):
+    """The interactive rename decision can legitimately answer the current
+    profile's own name — the bare rename no-ops that by contract, and the
+    cascade guard in the handler must too (issue #95 review round 1)."""
+    import codehelper.services.secrets as secrets
+    import codehelper.services.wrappers as wrappers_mod
+    from codehelper.cli.parser import _handle_edit_token
+    from codehelper.cli.requests import EditTokenRequest
+    from codehelper.services.spec import build_spec
+    from codehelper.services.wrappers import install_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude",
+            provider="zai",
+            model="glm-5.3",
+            alias="glm",
+            profile_name="work",
+        ),
+        token="sk-old",
+    )
+
+    def _spy_cascade(*_a, **_kw):
+        raise AssertionError("identical names must not reach the cascade")
+
+    monkeypatch.setattr(wrappers_mod, "rename_provider_profile", _spy_cascade)
+    req = EditTokenRequest(
+        name="glm",
+        profile="work",
+        profile_token="sk-new",
+        profile_rename_from="work",
+        profile_rename_to="work",
+        dry_run=False,
+        debug=False,
+    )
+    assert _handle_edit_token(req) == 0
+    assert secrets.credential_for(paths, "zai", "work") == "sk-new"

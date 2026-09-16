@@ -750,6 +750,7 @@ def _add_install_and_cache(spec, req, paths, token, resolved, profile_name):
         resolved is not None
         and req.profile_rename_from
         and req.profile_rename_to
+        and req.profile_rename_from != req.profile_rename_to
         and not dry_run
     ):
         rename_provider_profile(
@@ -1122,7 +1123,12 @@ def _handle_edit_token(args: argparse.Namespace | EditTokenRequest) -> int:
         source=SOURCE_PROMPT,
         dry_run=dry_run,
     )
-    if profile_rename_from and profile_rename_to and not dry_run:
+    if (
+        profile_rename_from
+        and profile_rename_to
+        and profile_rename_from != profile_rename_to
+        and not dry_run
+    ):
         rename_provider_profile(
             paths,
             spec.provider.name,

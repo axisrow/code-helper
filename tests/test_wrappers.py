@@ -3213,6 +3213,45 @@ def test_rename_provider_profile_fails_loud_when_the_credential_move_degrades(
 
 
 @pytest.mark.integration
+def test_rename_provider_profile_pointer_failure_raises_with_context(
+    tmp_path, monkeypatch
+):
+    """A failed active-pointer write must abort with the house-style
+    contextual error (remove_wrapper posture): raise with what happened, no
+    rollback — the committed rename is correct and every pointer reader
+    degrades to None on a stale name."""
+    import codehelper.services.secrets as secrets
+    import codehelper.services.state as state_mod
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "bai", _SECRET_TOKEN, "work")
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude",
+            provider="bai",
+            model="claude-sonnet-4-6",
+            alias="glm-work",
+            profile_name="work",
+        ),
+        token=_SECRET_TOKEN,
+    )
+    state_mod.set_active_selection(paths, "bai", "work")
+
+    def _boom(*_a, **_kw):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(state_mod, "set_active_selection", _boom)
+
+    with pytest.raises(CodeHelperError, match="failed to update the active pointer"):
+        rename_provider_profile(paths, "bai", "work", "personal")
+
+    # The rename itself is committed; only the pointer is stale (recoverable).
+    assert profile_from_installed(paths, "glm-work") == "personal"
+    assert secrets.credential_for(paths, "bai", "personal") == _SECRET_TOKEN
+
+
+@pytest.mark.integration
 def test_rename_provider_profile_repoints_installed_markers(tmp_path):
     """The cascade: cache key, every wrapper marker naming the profile (and
     the codex companion's), and the active-selection pointer all move

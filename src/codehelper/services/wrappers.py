@@ -1649,7 +1649,18 @@ def rename_provider_profile(
         and selection[0] in provider_storage_names(provider.name)
         and selection[1] == old_name
     ):
-        set_active_selection(paths, provider.name, new_name)
+        try:
+            set_active_selection(paths, provider.name, new_name)
+        except OSError as exc:
+            # The rename itself is committed (markers + credential key); the
+            # pointer is re-pickable UI state whose readers degrade to None —
+            # but a failure here must say so with context, the same posture
+            # remove_wrapper takes for its final pointer clear, instead of a
+            # raw OSError traceback over a finished rename.
+            raise CodeHelperError(
+                f"renamed profile {old_name} -> {new_name} but failed to "
+                f"update the active pointer: {exc}"
+            ) from exc
 
     print(f"renamed profile {old_name} -> {new_name}")
     return len(targets)
