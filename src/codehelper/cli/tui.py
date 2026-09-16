@@ -1389,6 +1389,7 @@ class TuiSession:
                 new_name = self._read_text(f"New name for {old_name}: ")
                 if not new_name or new_name == old_name:
                     continue
+                # silent: same no-double-echo contract as the wrapper rename.
                 self._run(
                     _handle_rename,
                     RenameRequest(
@@ -1399,8 +1400,11 @@ class TuiSession:
                         dry_run=getattr(self.args, "dry_run", False),
                         debug=getattr(self.args, "debug", False),
                     ),
+                    silent=True,
                 )
                 names = list(profile_names(paths, provider))
+                if new_name in names:
+                    self._notify(f"renamed profile {old_name} -> {new_name}")
                 continue
             set_active_selection(paths, provider, choice)
             return
@@ -2044,6 +2048,8 @@ class TuiSession:
         new_name = self._read_text(f"New name for {alias}: ")
         if not new_name or new_name == alias:
             return
+        # silent: the tee would otherwise show the service transcript live AND
+        # replay it in the notify pause — the doubled output a live run hit.
         self._run(
             _handle_rename,
             RenameRequest(
@@ -2054,7 +2060,10 @@ class TuiSession:
                 dry_run=getattr(self.args, "dry_run", False),
                 debug=getattr(self.args, "debug", False),
             ),
+            silent=True,
         )
+        if is_installed(paths, new_name):
+            self._notify(f"renamed wrapper {alias} -> {new_name}")
 
     def _apply_chip(self, agent_name: str) -> None:
         """Apply the highlighted chip of ``agent_name`` (Enter on its row).

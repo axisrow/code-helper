@@ -1527,8 +1527,11 @@ def rename_wrapper(
 
     from codehelper.services.state import set_default_wrapper
 
-    for agent_name in agents_to_repoint:
-        set_default_wrapper(paths, agent_name, new_alias)
+    if not dry_run:
+        # Dry-run is "never writes anything" — the pointers included: repointing
+        # them here would aim defaults at a wrapper that is never created.
+        for agent_name in agents_to_repoint:
+            set_default_wrapper(paths, agent_name, new_alias)
 
     try:
         remove_wrapper(paths, old_alias, dry_run=dry_run)
@@ -1586,7 +1589,7 @@ def rename_provider_profile(
 
     old_quoted = quote(old_name, safe="._-")
     new_quoted = quote(new_name, safe="._-")
-    rewrites: list[tuple[Path, str]] = []
+    rewrites: list[tuple[Path, str, str]] = []
     for name in targets:
         files = [paths.script_for(name)]
         spec = spec_from_installed(paths, name)
@@ -1595,25 +1598,48 @@ def rename_provider_profile(
             if companion.exists() and _ownership_marker_only(companion):
                 files.append(companion)
         for path in files:
-            body = path.read_text(encoding="utf-8")
-            new_body = _marker_with_repointed_profile(body, old_quoted, new_quoted)
+            old_body = path.read_text(encoding="utf-8")
+            new_body = _marker_with_repointed_profile(old_body, old_quoted, new_quoted)
             if new_body is None:
                 raise CodeHelperError(
                     f"cannot re-point {path}: no profile={old_quoted} in its marker"
                 )
-            rewrites.append((path, new_body))
+            rewrites.append((path, old_body, new_body))
 
     if dry_run:
-        for path, _ in rewrites:
+        for path, _, _ in rewrites:
             print(f"would update profile marker in {path}")
         print(f"would rename profile {old_name} -> {new_name}")
         return len(targets)
 
-    for path, new_body in rewrites:
-        atomic_write(path, new_body)
-        print(f"re-pointed {path}")
+    # Markers first, with rollback: a failed write midway restores the exact
+    # old bodies, so a partial rename can never strand wrappers on a profile
+    # the credential key has not moved to (a cycle-review finding — the first
+    # cut wrote markers straight through).
+    committed: list[tuple[Path, str]] = []
+    try:
+        for path, old_body, new_body in rewrites:
+            atomic_write(path, new_body)
+            committed.append((path, old_body))
+            print(f"re-pointed {path}")
+    except OSError as exc:
+        for path, old_body in reversed(committed):
+            atomic_write(path, old_body)
+        raise CodeHelperError(
+            f"profile rename failed midway — rolled back {len(committed)} "
+            f"marker write(s): {exc}"
+        ) from exc
 
     rename_profile(paths, provider.name, old_name, new_name)
+    if new_name not in profile_names(paths, provider.name):
+        # rename_profile downgrades a credential-write OSError to a warning;
+        # a key that never moved must fail the verb, not fake success.
+        for path, old_body in reversed(committed):
+            atomic_write(path, old_body)
+        raise CodeHelperError(
+            f"profile rename failed: the credential key did not move to "
+            f"{new_name!r} — markers rolled back"
+        )
 
     from codehelper.services.state import active_selection, set_active_selection
 
