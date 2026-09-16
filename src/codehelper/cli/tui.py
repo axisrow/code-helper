@@ -2076,11 +2076,17 @@ class TuiSession:
                     "TOKEN": self._token_action,
                     "e": self._token_action,
                     "t": self._token_action,
-                    # The proxy row owns no file, so `d` there must be inert
-                    # rather than looking for a wrapper literally named
-                    # `proxy:` — same guard `_focused_chip` applies to `t`.
+                    # Chipset rows (agents, proxy) and the two action rows own
+                    # no wrapper file, so `d` there must be inert rather than
+                    # looking for a wrapper literally named `proxy:` or
+                    # `agent:claude` — same guard `_focused_chip` applies to
+                    # `t`. Only a row from `_wrapper_rows` is a real alias.
                     "d": lambda alias: (
-                        None if alias == _PROXY_ROW else f"remove:{alias}"
+                        None
+                        if alias == _PROXY_ROW
+                        or alias.startswith(_AGENT_ROW)
+                        or alias in (_ADD_AGENT, _ADD_WRAPPER)
+                        else f"remove:{alias}"
                     ),
                     # Left/Right (and Shift+Tab, the same move backwards) only
                     # ever reposition the chip cursor and return None, so the
