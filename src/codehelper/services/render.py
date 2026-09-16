@@ -140,6 +140,10 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     # Google's documented window for the gemini-litellm preset's model
     # (ai.google.dev/gemini-api/docs/latest-model).
     "gemini-3.7-flash": 1_000_000,
+    # B.AI's documented window for gpt-6-astra (docs.b.ai; 1,050,000 input /
+    # 128,000 output) — the catalog's first non-1M value: windows are
+    # per-model data, never a shared assumption.
+    "gpt-6-astra": 1_050_000,
 }
 
 
@@ -210,6 +214,17 @@ def _render_anthropic_env(spec: WrapperSpec, token: str) -> str:
     """
     q = _shell_single_quote
     tiers = spec.tier_models
+    if tiers is None:
+        # Only the ANTHROPIC_ENV renderer dispatches here, and build_spec
+        # materializes uniform tiers for that shape (spec.build_spec) — the
+        # same invariant resolve_switch_patch guards explicitly. Spelled out
+        # so a future shape/registry change fails as a domain error here
+        # instead of an AttributeError mid-render.
+        raise CodeHelperError(
+            f"wrapper {spec.name!r} has no tier models — the anthropic-env "
+            "shape always carries them; build_spec should have materialized "
+            "uniform tiers"
+        )
     env = {
         "ANTHROPIC_BASE_URL": anthropic_base_url(spec.provider.base_url),
         "ANTHROPIC_AUTH_TOKEN": token,

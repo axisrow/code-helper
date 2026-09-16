@@ -103,6 +103,8 @@ def test_registry_has_builtin_providers():
         "gemini",
         "deepseek",
         "deepseek-openai",
+        "bai",
+        "freellmapi",
         "native",
     }
 
@@ -172,6 +174,54 @@ def test_deepseek_openai_is_openai_only_and_uses_documented_conventions():
     assert ds.token_env_var == "DEEPSEEK_API_KEY"
     assert ds.model_list_api is ModelListAPI.OPENAI_V1
     assert ds.wire_api == "responses"
+
+
+@pytest.mark.unit
+def test_bai_is_a_fixed_host_serving_both_protocols():
+    """Portrait of B.AI: one documented host (https://api.b.ai) serves both
+    surfaces — the litellm shape set, but FIXED-addressed, so --base-url is
+    refused. Bare root (NOT is_openai_root): the renderer appends /v1/ for
+    the TOML profile and discovery normalizes to /v1/models."""
+    bai = get_provider("bai")
+    assert bai.shapes == {
+        ConfigShape.ANTHROPIC_ENV,
+        ConfigShape.OPENAI_TOML,
+        ConfigShape.ANTHROPIC_SETTINGS,
+    }
+    assert bai.base_url == "https://api.b.ai"
+    assert bai.base_url_policy is BaseUrlPolicy.FIXED
+    assert bai.base_url_is_openai_root is False
+    assert bai.auth == "secret"
+    assert bai.token_env_var == "BAI_API_KEY"
+    assert bai.model_list_api is ModelListAPI.OPENAI_V1
+    # No model_list_url: the bare root already normalizes to /v1/models.
+    assert bai.model_list_url == ""
+    assert bai.wire_api == "responses"
+    # Responses-API-only models must not leak into the shape-agnostic
+    # known_models fallback — they cannot serve the claude pairings it
+    # would be offered for.
+    assert "gpt-6-astra" not in bai.known_models
+
+
+@pytest.mark.unit
+def test_freellmapi_is_a_local_fixed_host_serving_both_protocols():
+    """Portrait of the local FreeLLMAPI proxy: bai's shape set at a fixed
+    loopback address — /v1/messages drives claude, /v1/responses and
+    /v1/models feed codex (verified against its /v1/openapi.json)."""
+    proxy = get_provider("freellmapi")
+    assert proxy.shapes == {
+        ConfigShape.ANTHROPIC_ENV,
+        ConfigShape.OPENAI_TOML,
+        ConfigShape.ANTHROPIC_SETTINGS,
+    }
+    assert proxy.base_url == "http://127.0.0.1:3002"
+    assert proxy.base_url_policy is BaseUrlPolicy.FIXED
+    assert proxy.base_url_is_openai_root is False
+    assert proxy.auth == "secret"
+    assert proxy.token_env_var == "FREELLMAPI_API_KEY"
+    assert proxy.model_list_api is ModelListAPI.OPENAI_V1
+    assert proxy.model_list_url == ""
+    assert proxy.wire_api == "responses"
 
 
 @pytest.mark.unit
@@ -376,6 +426,8 @@ def test_compatible_providers_for_claude():
         "zai",
         "litellm",
         "deepseek",
+        "bai",
+        "freellmapi",
     }
 
 
@@ -387,6 +439,8 @@ def test_compatible_providers_for_codex_excludes_zai_and_suspended():
         "ollama-direct",
         "litellm",
         "deepseek-openai",
+        "bai",
+        "freellmapi",
     }
 
 
@@ -835,8 +889,12 @@ def test_anthropic_settings_shape_on_no_agent():
         ("claude", "zai", ConfigShape.ANTHROPIC_ENV),
         ("claude", "ollama-direct", ConfigShape.ANTHROPIC_ENV),
         ("claude", "litellm", ConfigShape.ANTHROPIC_ENV),
+        ("claude", "bai", ConfigShape.ANTHROPIC_ENV),
+        ("claude", "freellmapi", ConfigShape.ANTHROPIC_ENV),
         ("codex", "ollama-direct", ConfigShape.OPENAI_TOML),
         ("codex", "litellm", ConfigShape.OPENAI_TOML),
+        ("codex", "bai", ConfigShape.OPENAI_TOML),
+        ("codex", "freellmapi", ConfigShape.OPENAI_TOML),
         # ("codex", "gemini", ...) removed with #74: the pairing is suspended,
         # resolve_shape raises instead of handing back OPENAI_TOML.
     ],
@@ -867,6 +925,8 @@ def test_switchable_providers_includes_native_and_the_settings_providers():
         "zai",
         "litellm",
         "deepseek",
+        "bai",
+        "freellmapi",
         "native",
     }
 

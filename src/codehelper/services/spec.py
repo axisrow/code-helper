@@ -366,6 +366,23 @@ PRESETS: tuple[Preset, ...] = (
         base_url=_LITELLM_PROXY_URL,
         description=f"Claude Code → {_GEMINI_MODEL} via the LiteLLM proxy",
     ),
+    Preset(
+        alias="bai",
+        agent="claude",
+        provider="bai",
+        shape=ConfigShape.ANTHROPIC_ENV,
+        # The current B.AI free-promo workhorse (dashboard "Limited-Time Free";
+        # verified through /v1/messages) as the default — the paid claude tier
+        # is one --model override away. Promos rotate; re-curate when they do.
+        model="qwen3.8-flash",
+        tier_models=TierModels.uniform("qwen3.8-flash"),
+        # subagent_model stays None (the glm-preset convention). base_url
+        # stays empty — mandatory for a FIXED-address provider (the bai
+        # registry entry carries the only documented host; --base-url is
+        # refused), the mirror image of the gemini-litellm preset, which
+        # exists precisely to carry one.
+        description="Claude Code → B.AI",
+    ),
 )
 
 

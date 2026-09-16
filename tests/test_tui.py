@@ -1382,11 +1382,11 @@ def test_wrapper_named_add_agent_is_selectable_from_main_screen(monkeypatch):
             alias="add-agent",
         ),
     )
-    # The `add-agent` wrapper is the 9th selectable row: the two agent chipset
+    # The `add-agent` wrapper is the 10th selectable row: the two agent chipset
     # rows, the proxy row, the `+ add agent` action row, then the
-    # deepseek-ollama/glm/glm-ollama/gemini-litellm presets. Eight DOWNs reach
-    # it; Enter must set it as default, not open add-agent.
-    _real_menu_keys(monkeypatch, ["DOWN"] * 8 + ["ENTER", "CANCEL"])
+    # deepseek-ollama/glm/glm-ollama/gemini-litellm/bai presets. Nine DOWNs
+    # reach it; Enter must set it as default, not open add-agent.
+    _real_menu_keys(monkeypatch, ["DOWN"] * 9 + ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
     assert default_wrapper(paths, "claude") == "add-agent"
 
@@ -1410,11 +1410,11 @@ def test_wrapper_named_add_wrapper_is_selectable_from_main_screen(monkeypatch):
             alias="add-wrapper",
         ),
     )
-    # The `add-wrapper` wrapper is the 9th selectable row (two agent chipset
+    # The `add-wrapper` wrapper is the 10th selectable row (two agent chipset
     # rows, the proxy row, the `+ add agent` action row, then the
-    # deepseek-ollama/glm/glm-ollama/gemini-litellm presets). Eight DOWNs reach
-    # it; Enter must set it as default, not open the add flow.
-    _real_menu_keys(monkeypatch, ["DOWN"] * 8 + ["ENTER", "CANCEL"])
+    # deepseek-ollama/glm/glm-ollama/gemini-litellm/bai presets). Nine DOWNs
+    # reach it; Enter must set it as default, not open the add flow.
+    _real_menu_keys(monkeypatch, ["DOWN"] * 9 + ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
     assert default_wrapper(paths, "claude") == "add-wrapper"
 
@@ -1942,9 +1942,9 @@ def test_enter_applies_the_second_wrapper_sharing_a_provider_with_the_first(
         "_apply_switch_wrapper",
         lambda self, spec: seen.append(spec.name),
     )
-    # Presets are first, then ad-hoc chips alphabetically; the gemini-litellm
-    # preset chip sits between glm-ollama and the ad-hoc glm-air.
-    _real_menu_keys(monkeypatch, ["RIGHT"] * 5 + ["ENTER", "CANCEL"])
+    # Presets are first, then ad-hoc chips alphabetically; the bai preset chip
+    # sits between gemini-litellm and the ad-hoc glm-air.
+    _real_menu_keys(monkeypatch, ["RIGHT"] * 6 + ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
     assert seen == ["glm-air"]

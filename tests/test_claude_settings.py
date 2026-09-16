@@ -251,6 +251,25 @@ def test_managed_keys_match_renderer():
     assert exported == set(MANAGED_ENV_KEYS)
 
 
+@pytest.mark.unit
+def test_renderer_refuses_an_anthropic_env_spec_without_tiers():
+    """The renderer-side twin of test_resolve_switch_patch_missing_model_refused:
+    build_spec materializes uniform tiers for ANTHROPIC_ENV, so the renderer's
+    own raise is unreachable through the front doors — pinned so a future
+    second spec constructor that skips it fails here as a domain error,
+    not as an AttributeError mid-render."""
+    spec = WrapperSpec(
+        alias="x",
+        agent=get_agent("claude"),
+        provider=ZAI,
+        shape=ConfigShape.ANTHROPIC_ENV,
+        model="glm-5.2",
+        tier_models=None,
+    )
+    with pytest.raises(CodeHelperError, match="no tier models"):
+        _render_anthropic_env(spec, "sk-x")
+
+
 # --------------------------------------------------------------------------- #
 # patch_settings — pure
 # --------------------------------------------------------------------------- #

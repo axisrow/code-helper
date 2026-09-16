@@ -265,6 +265,21 @@ def test_add_gemini_litellm_base_url_overrides_the_preset(tmp_path, monkeypatch)
 
 
 @pytest.mark.integration
+def test_add_bai_uses_the_registry_url_and_preset_model(tmp_path, monkeypatch):
+    """The bai preset carries no URL (the provider's address is FIXED registry
+    data): the rendered wrapper points at the documented host verbatim."""
+    monkeypatch.setenv("BAI_API_KEY", "sk-test")
+    assert main(["add", "bai", "--context-window", "none"]) == 0
+    body = _body(tmp_path, "bai")
+    assert "export ANTHROPIC_BASE_URL='https://api.b.ai'" in body
+    assert "qwen3.8-flash" in body
+    # The env-sourced token lands embedded (the ANTHROPIC_ENV renderer resolves
+    # it at build time) — the BAI_API_KEY name itself only ships in codex
+    # profiles, where the TOML env_key needs the variable.
+    assert "export ANTHROPIC_AUTH_TOKEN='sk-test'" in body
+
+
+@pytest.mark.integration
 def test_add_preset_base_url_never_injects_the_active_profile(tmp_path, monkeypatch):
     """The implicit active-profile injection is for the provider's OWN default
     endpoint only — the exact rule the constructor path already enforces
