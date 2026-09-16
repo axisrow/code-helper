@@ -49,6 +49,31 @@ def test_edit_token_can_rotate_a_named_profile(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_edit_token_token_stdin_rotates_and_caches(tmp_path, monkeypatch):
+    """Issue #92: the headless rotation path — stdin instead of getpass, the
+    same SOURCE_PROMPT cache write-back."""
+    import io
+    import sys
+
+    import codehelper.services.secrets as secrets
+
+    monkeypatch.setenv("ZAI_API_KEY", _OLD_TOKEN)
+    assert main(["add", "glm"]) == 0
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+
+    def _explode(_prompt: str) -> str:
+        raise AssertionError("must not prompt when --token-stdin supplies the token")
+
+    monkeypatch.setattr("getpass.getpass", _explode)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_NEW_TOKEN + "\n"))
+    assert main(["edit-token", "glm", "--token-stdin"]) == 0
+
+    paths = Paths.from_home(tmp_path)
+    assert secrets.credential_for(paths, "zai") == _NEW_TOKEN
+    assert _NEW_TOKEN in paths.script_for("glm").read_text(encoding="utf-8")
+
+
+@pytest.mark.integration
 def test_edit_token_unknown_name_exits_1(tmp_path, capsys):
     code = main(["edit-token", "nope"])
     assert code == 1

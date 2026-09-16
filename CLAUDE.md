@@ -35,7 +35,7 @@ Guidance for Claude Code when working in this repository.
 | Service | `services/codex_default.py` | `set-default` — patches `~/.codex/config.toml` in place; `current_default` reads back what is applied, `clear_default` removes the managed region (codex's "native") |
 | Service | `services/claude_settings.py` | `switch` — live-patches `~/.claude/settings.json`'s `env` block so an already-running `claude` picks up a new backend on its next prompt, no restart |
 | Service | `services/proxy.py` | `proxy` — on/off toggle, address and `NO_PROXY` for the proxy keys in `~/.claude/settings.json`; second owner of that file, disjoint keys from `claude_settings`. `set_proxy_state` holds the verb→address resolution and the save-before-blank ordering, so the CLI handler and all TUI entry points share one state machine |
-| Service | `services/secrets.py` | token resolution: env → cached profile → prompt |
+| Service | `services/secrets.py` | token resolution: env → cached profile → prompt; `--token-stdin` provisions the cache headlessly |
 | Service | `services/paths.py` | frozen `Paths` dataclass, pure path arithmetic off `home` |
 | Service | `services/state.py` | active token-profile pointer, default-wrapper map, saved proxy address (`state.json`); every writer serialized by `_locked_update` |
 | Backend | `backends/_atomic.py` | only code that touches the filesystem (atomic write) |

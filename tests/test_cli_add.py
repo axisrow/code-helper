@@ -1016,6 +1016,71 @@ def test_add_caches_a_prompt_typed_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_add_token_stdin_installs_and_caches(tmp_path, monkeypatch):
+    """Issue #92: a piped token rides the pre-typed path — installed AND
+    cached, with the hidden prompt never reached."""
+    import io
+    import sys
+
+    import codehelper.services.secrets as secrets
+
+    monkeypatch.delenv("BAI_API_KEY", raising=False)
+
+    def _explode(_prompt: str) -> str:
+        raise AssertionError("must not prompt when --token-stdin supplies the token")
+
+    monkeypatch.setattr("getpass.getpass", _explode)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("sk-stdin\n"))
+
+    assert main(["add", "bai", "--context-window", "none", "--token-stdin"]) == 0
+
+    assert "sk-stdin" in _body(tmp_path, "bai")
+    assert secrets.credential_for(Paths.from_home(tmp_path), "bai") == "sk-stdin"
+
+
+@pytest.mark.integration
+def test_add_token_stdin_refuses_a_tty(tmp_path, monkeypatch, capsys):
+    """On a terminal the flag must fail fast, never echo-read: the interactive
+    path is the hidden prompt (the _confirm-family isatty precedent)."""
+    import sys
+
+    class _Tty:
+        def isatty(self):
+            return True
+
+        def readline(self):
+            raise AssertionError("stdin must not be read on a TTY")
+
+    monkeypatch.setattr(sys, "stdin", _Tty())
+    code = main(["add", "bai", "--context-window", "none", "--token-stdin"])
+    assert code == 1
+    assert "--token-stdin" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_add_token_stdin_empty_stdin_rejected(tmp_path, monkeypatch):
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("\n"))
+    code = main(["add", "bai", "--context-window", "none", "--token-stdin"])
+    assert code == 1
+
+
+@pytest.mark.integration
+def test_add_token_stdin_dry_run_writes_nothing(tmp_path, monkeypatch):
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("sk-stdin\n"))
+    code = main(
+        ["--dry-run", "add", "bai", "--context-window", "none", "--token-stdin"]
+    )
+    assert code == 0
+    assert not Paths.from_home(tmp_path).credentials_file().exists()
+
+
+@pytest.mark.integration
 def test_add_uses_the_selected_profile_even_when_env_has_another_token(
     tmp_path, monkeypatch
 ):

@@ -456,6 +456,15 @@ already-open terminal otherwise writes a dead key that only surfaces as 401
 retries later. The env value is still what gets used; unset the variable to
 fall back to the cached profile.
 
+To provision the cache from a script (CI, dotfiles bootstrap), pipe the token
+on stdin: `printf %s "$BAI_API_KEY" | codehelper edit-token bai --profile
+default --token-stdin` (the same flag exists on `add`). It reads exactly one
+line, refuses on a terminal — the interactive path stays the hidden prompt —
+and the value never appears in argv, so `ps` and shell history never see it
+(the `gh auth login --with-token` / `docker login --password-stdin` pattern;
+`printf %s` rather than `echo` keeps the value out of the piping command's
+own argv).
+
 A named profile is **portable across a provider's addresses.** For a provider
 whose URL you supply yourself (`litellm`), the same `--profile work` reuses
 its cached key against whatever `--base-url` you give — the key is stored per
