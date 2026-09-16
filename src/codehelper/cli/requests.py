@@ -38,6 +38,7 @@ __all__ = [
     "EnableRequest",
     "ProxyRequest",
     "RemoveRequest",
+    "RenameRequest",
     "SetDefaultRequest",
     "SwitchRequest",
 ]
@@ -172,6 +173,62 @@ class RemoveRequest:
             force=bool(_g(args, "force", False)),
             debug=bool(_g(args, "debug", False)),
         )
+
+
+@dataclass(frozen=True)
+class RenameRequest:
+    """Inputs to ``_handle_rename`` (the ``rename`` subcommand and TUI ``e``).
+
+    Two kinds share the one verb, mirroring the two things a rename can mean
+    (issue #95): ``wrapper`` moves an installed wrapper to a new alias;
+    ``profile`` renames a provider's token profile AND re-points every
+    installed wrapper marker recording the old name — so ``provider`` is
+    required there and ``None`` for the wrapper kind. The positional mapping
+    is kind-shaped (``rename wrapper <old> <new>`` vs ``rename profile
+    <provider> <old> <new>``), checked here while the raw values are visible.
+    """
+
+    kind: str
+    provider: str | None
+    name: str
+    new_name: str
+    dry_run: bool
+    debug: bool
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> RenameRequest:
+        kind = _g(args, "kind")
+        first = _g(args, "first")
+        second = _g(args, "second")
+        third = _g(args, "third")
+        if kind == "wrapper":
+            if not (first and second):
+                raise CodeHelperError("rename wrapper takes <old> <new>")
+            if third:
+                raise CodeHelperError(
+                    "rename wrapper takes <old> <new> — to rename a profile: "
+                    "codehelper rename profile <provider> <old> <new>"
+                )
+            return cls(
+                kind=kind,
+                provider=None,
+                name=str(first),
+                new_name=str(second),
+                dry_run=bool(_g(args, "dry_run", False)),
+                debug=bool(_g(args, "debug", False)),
+            )
+        if kind == "profile":
+            if not (first and second and third):
+                raise CodeHelperError("rename profile takes <provider> <old> <new>")
+            return cls(
+                kind=kind,
+                provider=str(first),
+                name=str(second),
+                new_name=str(third),
+                dry_run=bool(_g(args, "dry_run", False)),
+                debug=bool(_g(args, "debug", False)),
+            )
+        raise CodeHelperError(f"unknown rename kind: {kind}")
 
 
 @dataclass(frozen=True)

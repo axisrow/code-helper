@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -1566,6 +1568,81 @@ def test_e_on_chip_row_targets_highlighted_wrapper():
     session._chip_index["claude"] = 3
     assert session._token_action("agent:claude") is None
     assert session._token_action("glm") == "token:glm"
+
+
+@pytest.mark.unit
+def test_e_renames_on_chip_row_and_is_inert_where_nothing_is_renameable():
+    """`e` mirrors `t`'s focused-chip resolution for rename (issue #95):
+    the highlighted chip on a chipset row, the row itself elsewhere."""
+    from codehelper.cli.tui import TuiSession
+
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    session._chips = {"claude": ["native", "deepseek-ollama", "glm", "+ add"]}
+    session._chip_index = {"claude": 2}
+
+    assert session._rename_action("agent:claude") == "rename:glm"
+    session._chip_index["claude"] = 0
+    assert session._rename_action("agent:claude") is None
+    session._chip_index["claude"] = 3
+    assert session._rename_action("agent:claude") is None
+    assert session._rename_action("glm") == "rename:glm"
+
+
+@pytest.mark.integration
+def test_on_rename_moves_the_wrapper(tmp_path, monkeypatch):
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+    from codehelper.services.wrappers import install_wrapper, is_installed
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token="sk-existing")
+
+    monkeypatch.setattr(menu, "read_line", lambda prompt="", **_kw: "glm2")
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    session._on_rename("glm")
+
+    assert is_installed(paths, "glm2")
+    assert not is_installed(paths, "glm")
+
+
+@pytest.mark.integration
+def test_profile_screen_e_renames(tmp_path, monkeypatch):
+    """`e` on the Profiles screen fires the profile rename; the renamed row
+    is what the next frame shows."""
+    import codehelper.cli.menu as menu
+    import codehelper.services.secrets as secrets
+    from codehelper.cli.tui import TuiSession
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "zai", "sk-old", "work")
+    monkeypatch.setattr(menu, "read_line", lambda prompt="", **_kw: "personal")
+
+    providers = iter(["zai"])
+
+    fired = {"done": False}
+
+    def _select(items, prompt="", **kwargs):
+        if prompt.startswith("Active profile for"):
+            on_key = kwargs.get("on_key")
+            assert on_key is not None and "e" in on_key
+            if not fired["done"]:
+                fired["done"] = True
+                return on_key["e"]("work")
+            return "__back__"
+        return next(providers)
+
+    monkeypatch.setattr(menu, "select_from_menu", _select)
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    session._run_profile_screen()
+
+    assert secrets.credential_for(paths, "zai", "personal") == "sk-old"
+    assert secrets.credential_for(paths, "zai", "work") == ""
 
 
 def _chip_rows(items, *, cursor_pair: int = 0, ansi: bool = True) -> dict[str, str]:
