@@ -498,7 +498,7 @@ def test_apply_switch_unreadable_file_refused_not_treated_as_missing(tmp_path):
 
 
 @pytest.mark.unit
-def test_apply_switch_dry_run_writes_nothing(tmp_path, capsys):
+def test_apply_switch_dry_run_writes_nothing(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write(paths, {"env": dict(_FOREIGN_ENV)})
     before = paths.claude_settings().read_bytes()

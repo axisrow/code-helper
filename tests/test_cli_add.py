@@ -105,25 +105,25 @@ def test_add_explicit_alias_wins(tmp_path):
 
 
 @pytest.mark.integration
-def test_add_agent_requires_model(tmp_path, capsys):
+def test_add_agent_requires_model(capsys):
     assert main(["add", "--agent", "codex", "--provider", "ollama-direct"]) == 1
     assert "--model is required" in capsys.readouterr().err
 
 
 @pytest.mark.integration
-def test_add_agent_and_provider_must_come_together(tmp_path, capsys):
+def test_add_agent_and_provider_must_come_together(capsys):
     assert main(["add", "--agent", "codex", "--model", "m"]) == 1
     assert "must be given together" in capsys.readouterr().err
 
 
 @pytest.mark.integration
-def test_preset_and_axes_are_mutually_exclusive(tmp_path, capsys):
+def test_preset_and_axes_are_mutually_exclusive(capsys):
     assert main(["add", "glm", "--agent", "codex", "--provider", "ollama-direct"]) == 1
     assert "not both" in capsys.readouterr().err
 
 
 @pytest.mark.integration
-def test_unknown_agent_exits_1(tmp_path, capsys):
+def test_unknown_agent_exits_1(capsys):
     assert (
         main(["add", "--agent", "nope", "--provider", "ollama-direct", "--model", "m"])
         == 1
@@ -132,7 +132,7 @@ def test_unknown_agent_exits_1(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_incompatible_pairing_is_refused(tmp_path, capsys):
+def test_incompatible_pairing_is_refused(capsys):
     """codex cannot speak the Anthropic protocol z.ai serves."""
     assert (
         main(["add", "--agent", "codex", "--provider", "zai", "--model", "glm-5-turbo"])
@@ -142,9 +142,7 @@ def test_incompatible_pairing_is_refused(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_suspended_gemini_refused_as_unknown_axes_not_a_broken_wrapper(
-    tmp_path, capsys
-):
+def test_suspended_gemini_refused_as_unknown_axes_not_a_broken_wrapper(capsys):
     """Issue #74: `codex × gemini` used to install a profile carrying
     `wire_api="chat"`, which current Codex hard-rejects at config load. The
     provider is now suspended, so the pairing must refuse through the NORMAL
@@ -159,7 +157,7 @@ def test_suspended_gemini_refused_as_unknown_axes_not_a_broken_wrapper(
 
 
 @pytest.mark.integration
-def test_launch_only_agent_incompatible_with_zai(tmp_path, capsys):
+def test_launch_only_agent_incompatible_with_zai(capsys):
     """A launch-only agent has no shape in common with a non-ollama provider,
     and the error's hint names `ollama` as what it DOES work with."""
     assert (
@@ -171,11 +169,11 @@ def test_launch_only_agent_incompatible_with_zai(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_incompatible_pairing_never_prompts_for_a_token(tmp_path, monkeypatch):
+def test_incompatible_pairing_never_prompts_for_a_token(monkeypatch):
     """Validation must happen BEFORE any interactive secret prompt."""
     import codehelper.services.secrets as secrets
 
-    def _explode(*a, **kw):  # pragma: no cover - must not run
+    def _explode(*_a, **_kw):  # pragma: no cover - must not run
         raise AssertionError("must not prompt for a token on an invalid combination")
 
     monkeypatch.setattr(secrets, "resolve_token", _explode)
@@ -191,7 +189,7 @@ def test_incompatible_pairing_never_prompts_for_a_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_add_litellm_claude_requires_base_url(tmp_path, capsys):
+def test_add_litellm_claude_requires_base_url(capsys):
     code = main(
         ["add", "--agent", "claude", "--provider", "litellm", "--model", "gpt-4o"]
     )
@@ -367,7 +365,7 @@ def test_add_preset_base_url_gate_accepts_an_overridable_provider(
 
 
 @pytest.mark.integration
-def test_add_preset_with_fixed_provider_still_rejects_base_url(tmp_path, capsys):
+def test_add_preset_with_fixed_provider_still_rejects_base_url(capsys):
     """The one-preset-override exception (issue #86) must not generalize:
     a preset whose provider carries its own registry address still rejects
     --base-url with the teaching message."""
@@ -376,7 +374,7 @@ def test_add_preset_with_fixed_provider_still_rejects_base_url(tmp_path, capsys)
 
 
 @pytest.mark.integration
-def test_add_base_url_with_an_unknown_preset_name_fails_clean(tmp_path, capsys):
+def test_add_base_url_with_an_unknown_preset_name_fails_clean(capsys):
     """The override exception's lookup is defensive: a name that is not a
     preset at all must fail with a domain error (either the flag message or
     the unknown-wrapper hint) — never a crash, never a silent accept."""
@@ -435,7 +433,7 @@ def test_add_litellm_codex_writes_env_key_and_export(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_add_base_url_on_a_fixed_provider_is_refused(tmp_path, capsys):
+def test_add_base_url_on_a_fixed_provider_is_refused(capsys):
     code = main(
         [
             "add",
@@ -456,14 +454,14 @@ def test_add_base_url_on_a_fixed_provider_is_refused(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_add_base_url_with_a_preset_is_refused(tmp_path, capsys):
+def test_add_base_url_with_a_preset_is_refused(capsys):
     code = main(["add", "deepseek-ollama", "--base-url", "http://x/v1"])
     assert code == 1
     assert "constructor form only" in capsys.readouterr().err
 
 
 @pytest.mark.integration
-def test_add_rejects_an_invalid_base_url_scheme(tmp_path, capsys):
+def test_add_rejects_an_invalid_base_url_scheme(capsys):
     code = main(
         [
             "add",
@@ -484,7 +482,7 @@ def test_add_rejects_an_invalid_base_url_scheme(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_add_rejects_an_empty_base_url(tmp_path, capsys):
+def test_add_rejects_an_empty_base_url(capsys):
     code = main(
         [
             "add",
@@ -572,9 +570,7 @@ def test_add_ollama_without_auth_flag_keeps_the_literal_default(tmp_path):
 
 
 @pytest.mark.integration
-def test_add_auth_secret_on_an_already_secret_provider_is_a_no_op(
-    tmp_path, monkeypatch
-):
+def test_add_auth_secret_on_an_already_secret_provider_is_a_no_op(monkeypatch):
     """zai is already auth='secret' and FIXED — --auth secret must not refuse
     there, since with_auth treats "already secret" as nothing to override
     (see test_fixed_auth_provider_already_secret_ignores_override_request in
@@ -602,14 +598,14 @@ def test_add_auth_secret_on_an_already_secret_provider_is_a_no_op(
 
 
 @pytest.mark.integration
-def test_add_auth_applies_to_the_constructor_form_only(tmp_path, capsys):
+def test_add_auth_applies_to_the_constructor_form_only(capsys):
     code = main(["add", "deepseek-ollama", "--auth", "secret"])
     assert code == 1
     assert "constructor form only" in capsys.readouterr().err
 
 
 @pytest.mark.integration
-def test_add_auth_rejects_an_unknown_value(tmp_path, capsys):
+def test_add_auth_rejects_an_unknown_value(capsys):
     # argparse's own `choices` gate rejects this before codehelper ever sees
     # it — SystemExit(2), the same as any other invalid-choice flag, not a
     # CodeHelperError main() would turn into exit code 1.
@@ -633,11 +629,11 @@ def test_add_auth_rejects_an_unknown_value(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_bad_base_url_never_prompts_for_a_token(tmp_path, monkeypatch):
+def test_bad_base_url_never_prompts_for_a_token(monkeypatch):
     """validate-before-prompt, pinned for the NEW validation channel."""
     import codehelper.services.secrets as secrets
 
-    def _explode(*a, **kw):  # pragma: no cover - must not run
+    def _explode(*_a, **_kw):  # pragma: no cover - must not run
         raise AssertionError("must not prompt for a token on an invalid base URL")
 
     monkeypatch.setattr(secrets, "resolve_token", _explode)
@@ -660,7 +656,7 @@ def test_bad_base_url_never_prompts_for_a_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_list_models_uses_the_runtime_base_url(tmp_path, monkeypatch, capsys):
+def test_list_models_uses_the_runtime_base_url(monkeypatch):
     """The substitution happens BEFORE --list-models, not just before build_spec.
 
     Also pins that the discovery token reaches ``list_models`` (from env here)
@@ -694,7 +690,7 @@ def test_list_models_uses_the_runtime_base_url(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.integration
-def test_bad_alias_is_rejected(tmp_path, capsys):
+def test_bad_alias_is_rejected(capsys):
     assert (
         main(
             [
@@ -717,7 +713,7 @@ def test_bad_alias_is_rejected(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_alias_may_not_shadow_an_agent_binary(tmp_path, capsys):
+def test_alias_may_not_shadow_an_agent_binary(capsys):
     """`--alias claude` would exec itself forever and clobber a real symlink."""
     assert (
         main(
@@ -816,7 +812,7 @@ def test_preset_still_installs_by_bare_name(tmp_path):
 
 
 @pytest.mark.integration
-def test_bare_agent_name_suggests_the_constructor(tmp_path, capsys):
+def test_bare_agent_name_suggests_the_constructor(capsys):
     """`add codex` is a likely mistake — teach the right form, don't just refuse."""
     assert main(["add", "codex"]) == 1
     err = capsys.readouterr().err
@@ -825,7 +821,7 @@ def test_bare_agent_name_suggests_the_constructor(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_unknown_name_that_is_not_an_agent(tmp_path, capsys):
+def test_unknown_name_that_is_not_an_agent(capsys):
     assert main(["add", "nope"]) == 1
     assert "unknown wrapper name" in capsys.readouterr().err
 
@@ -864,14 +860,14 @@ def test_force_overwrites_foreign_file(tmp_path):
 
 
 @pytest.mark.integration
-def test_list_agents(tmp_path, capsys):
+def test_list_agents(capsys):
     assert main(["list", "agents"]) == 0
     out = capsys.readouterr().out
     assert "claude" in out and "codex" in out
 
 
 @pytest.mark.integration
-def test_list_providers(tmp_path, capsys):
+def test_list_providers(capsys):
     assert main(["list", "providers"]) == 0
     out = capsys.readouterr().out
     assert "ollama-direct" in out and "zai" in out and "litellm" in out
@@ -879,7 +875,7 @@ def test_list_providers(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_list_providers_marks_the_suspended_entry(tmp_path, capsys):
+def test_list_providers_marks_the_suspended_entry(capsys):
     """gemini stays registered and visible (issue #74) but pairs with nothing
     BY DECISION — without the `(suspended)` tag its all-blank matrix column
     reads as a bug."""
@@ -890,7 +886,7 @@ def test_list_providers_marks_the_suspended_entry(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_list_matrix_shows_a_gap_for_incompatible_pairs(tmp_path, capsys):
+def test_list_matrix_shows_a_gap_for_incompatible_pairs(capsys):
     """The matrix is rendered via resolve_shape, so it cannot lie about `add`."""
     assert main(["list", "matrix"]) == 0
     lines = capsys.readouterr().out.splitlines()
@@ -901,7 +897,7 @@ def test_list_matrix_shows_a_gap_for_incompatible_pairs(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_list_matrix_includes_litellm_with_no_gap(tmp_path, capsys):
+def test_list_matrix_includes_litellm_with_no_gap(capsys):
     """litellm declares both shapes, so neither agent's row has a gap for it."""
     assert main(["list", "matrix"]) == 0
     lines = capsys.readouterr().out.splitlines()
@@ -915,7 +911,7 @@ def test_list_matrix_includes_litellm_with_no_gap(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_list_agents_includes_every_ollama_launch_integration(tmp_path, capsys):
+def test_list_agents_includes_every_ollama_launch_integration(capsys):
     """`list agents` shows all 15 registered agents, not just claude/codex."""
     assert main(["list", "agents"]) == 0
     out = capsys.readouterr().out
@@ -924,7 +920,7 @@ def test_list_agents_includes_every_ollama_launch_integration(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_list_matrix_launch_only_agent_row(tmp_path, capsys):
+def test_list_matrix_launch_only_agent_row(capsys):
     """A launch-only agent's row: ollama-launch for ollama, a gap elsewhere.
 
     `resolve_shape` renders this row, so it cannot disagree with what `add`
@@ -942,7 +938,7 @@ def test_list_matrix_launch_only_agent_row(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_list_shows_ad_hoc_wrappers(tmp_path, capsys):
+def test_list_shows_ad_hoc_wrappers(capsys):
     main(
         [
             "add",
@@ -970,7 +966,7 @@ def test_list_models_prints_and_writes_nothing(tmp_path, monkeypatch):
     from codehelper.services.models_api import ModelListResult
 
     monkeypatch.setattr(
-        api, "list_models", lambda p, **kw: ModelListResult(("a:1", "b:2"), "url")
+        api, "list_models", lambda _p, **_kw: ModelListResult(("a:1", "b:2"), "url")
     )
     assert (
         main(
@@ -991,7 +987,7 @@ def test_list_models_prints_and_writes_nothing(tmp_path, monkeypatch):
 def test_add_caches_a_prompt_typed_token(tmp_path, monkeypatch):
     import codehelper.services.secrets as secrets
 
-    def _fake_resolve_token(**kwargs):
+    def _fake_resolve_token(**_kwargs):
         return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
 
     monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token)
@@ -1039,7 +1035,7 @@ def test_add_token_stdin_installs_and_caches(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_add_token_stdin_refuses_a_tty(tmp_path, monkeypatch, capsys):
+def test_add_token_stdin_refuses_a_tty(monkeypatch, capsys):
     """On a terminal the flag must fail fast, never echo-read: the interactive
     path is the hidden prompt (the _confirm-family isatty precedent)."""
     import sys
@@ -1058,7 +1054,7 @@ def test_add_token_stdin_refuses_a_tty(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.integration
-def test_add_token_stdin_empty_stdin_rejected(tmp_path, monkeypatch):
+def test_add_token_stdin_empty_stdin_rejected(monkeypatch):
     import io
     import sys
 
@@ -1112,9 +1108,7 @@ def test_add_profile_caches_a_prompt_typed_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_profile_selects_the_default_alias_and_is_visible_in_list(
-    tmp_path, monkeypatch, capsys
-):
+def test_profile_selects_the_default_alias_and_is_visible_in_list(tmp_path, capsys):
     """A profile is durable wrapper metadata, not an invisible install input."""
     import codehelper.services.secrets as secrets
 
@@ -1215,7 +1209,7 @@ def test_add_env_sourced_install_invalidates_a_stale_cached_token(
     # Step 1: cache "old" via a prompt-typed install.
     real_resolve_token = secrets.resolve_token
 
-    def _fake_resolve_token_old(**kwargs):
+    def _fake_resolve_token_old(**_kwargs):
         return secrets.ResolvedToken("sk-old", secrets.SOURCE_PROMPT)
 
     monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token_old)
@@ -1241,7 +1235,7 @@ def test_add_env_sourced_install_invalidates_a_stale_cached_token(
     # "sk-old" is never resolved from a stale cache.
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
 
-    def _fake_resolve_token_new(**kwargs):
+    def _fake_resolve_token_new(**_kwargs):
         return secrets.ResolvedToken("sk-freshly-typed", secrets.SOURCE_PROMPT)
 
     monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token_new)
@@ -1311,7 +1305,7 @@ def test_add_does_not_cache_a_prompt_typed_token_when_the_install_is_refused(
         "#!/bin/bash\necho mine\n", encoding="utf-8"
     )
 
-    def _fake_resolve_token(**kwargs):
+    def _fake_resolve_token(**_kwargs):
         return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
 
     monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token)
@@ -1363,7 +1357,7 @@ def test_add_caches_a_prompt_typed_token_on_a_byte_identical_noop_reinstall(
         "none",
     ]
 
-    def _fake_resolve_token(**kwargs):
+    def _fake_resolve_token(**_kwargs):
         return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
 
     monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token)
@@ -1382,7 +1376,7 @@ def test_add_caches_a_prompt_typed_token_on_a_byte_identical_noop_reinstall(
 def test_add_dry_run_never_writes_the_credentials_file(tmp_path, monkeypatch):
     import codehelper.services.secrets as secrets
 
-    def _fake_resolve_token(**kwargs):
+    def _fake_resolve_token(**_kwargs):
         return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
 
     monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token)
@@ -1408,13 +1402,13 @@ def test_add_dry_run_never_writes_the_credentials_file(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_add_warns_when_bin_dir_is_not_on_path(tmp_path, monkeypatch, capsys):
+def test_add_warns_when_bin_dir_is_not_on_path(monkeypatch, capsys):
     """A real (non-dry-run) install warns on stderr when ``paths.bin_dir``
     isn't on ``PATH`` — otherwise the freshly-installed alias just gives
     ``command not found`` with no clue why."""
     import codehelper.services.secrets as secrets
 
-    def _fake_resolve_token(**kwargs):
+    def _fake_resolve_token(**_kwargs):
         return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
 
     monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token)
@@ -1442,13 +1436,13 @@ def test_add_warns_when_bin_dir_is_not_on_path(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.integration
-def test_add_dry_run_does_not_print_a_path_warning(tmp_path, monkeypatch, capsys):
+def test_add_dry_run_does_not_print_a_path_warning(monkeypatch, capsys):
     """``install_wrapper`` returns True under ``dry_run`` too ("would write"),
     so the PATH check must not fire off that truthy-but-nothing-written
     signal — a dry run must not warn about a file it never created."""
     import codehelper.services.secrets as secrets
 
-    def _fake_resolve_token(**kwargs):
+    def _fake_resolve_token(**_kwargs):
         return secrets.ResolvedToken("sk-typed", secrets.SOURCE_PROMPT)
 
     monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token)
@@ -1644,7 +1638,7 @@ def test_list_models_ignores_a_cached_token_for_a_runtime_address_provider(
 
     seen = {}
 
-    def _fake_list_models(provider, *, token=""):
+    def _fake_list_models(_provider, *, token=""):
         seen["token"] = token
         return models_api.ModelListResult(models=("m1",), source="fake")
 
@@ -1688,7 +1682,7 @@ def test_list_models_does_not_use_the_implicit_active_profile_for_a_custom_base_
 
     seen = {}
 
-    def _fake_list_models(provider, *, token=""):
+    def _fake_list_models(_provider, *, token=""):
         seen["token"] = token
         return models_api.ModelListResult(models=("m1",), source="fake")
 
@@ -1727,7 +1721,7 @@ def test_list_models_uses_a_named_profile_for_a_runtime_address_provider(
 
     seen = {}
 
-    def _fake_list_models(provider, *, token=""):
+    def _fake_list_models(_provider, *, token=""):
         seen["token"] = token
         return models_api.ModelListResult(models=("m1",), source="fake")
 
@@ -1908,7 +1902,7 @@ def test_list_shows_the_active_profile_header(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_list_omits_the_active_profile_header_when_unset(tmp_path, capsys):
+def test_list_omits_the_active_profile_header_when_unset(capsys):
     assert main(["list"]) == 0
     assert "Active profile:" not in capsys.readouterr().out
 
@@ -1989,7 +1983,7 @@ def test_add_unknown_model_prompts_once_and_records(tmp_path):
 
 
 @pytest.mark.integration
-def test_add_known_model_never_prompts_for_the_window(tmp_path):
+def test_add_known_model_never_prompts_for_the_window():
     """A catalog-known model is derived silently — no menu is reachable."""
     import unittest.mock as mock
 
@@ -2132,7 +2126,7 @@ def test_context_window_none_flag_suppresses_a_catalog_declaration(tmp_path):
 
 
 @pytest.mark.integration
-def test_window_prompt_comes_after_spec_validation(tmp_path, capsys):
+def test_window_prompt_comes_after_spec_validation(capsys):
     """A bad alias must error BEFORE any window menu — the ordering
     invariant: validate everything, then go interactive."""
     import unittest.mock as mock

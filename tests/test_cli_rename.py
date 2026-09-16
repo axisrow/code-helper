@@ -28,7 +28,7 @@ def test_rename_wrapper_moves_the_alias(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_rename_wrapper_collision_fails_clean(tmp_path, monkeypatch, capsys):
+def test_rename_wrapper_collision_fails_clean(monkeypatch, capsys):
     monkeypatch.setenv("ZAI_API_KEY", "sk-env")
     assert main(["add", "glm"]) == 0
 
@@ -68,7 +68,7 @@ def test_rename_profile_collision_fails_clean(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.integration
-def test_rename_profile_needs_three_args(tmp_path, capsys):
+def test_rename_profile_needs_three_args(capsys):
     assert main(["rename", "profile", "zai", "work"]) == 1
     assert "rename profile takes" in capsys.readouterr().err
 

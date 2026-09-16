@@ -60,7 +60,7 @@ def test_mask_escapes_control_characters():
 
 
 @pytest.mark.integration
-def test_tokens_masks_cached_values(tmp_path, capsys):
+def test_tokens_masks_cached_values(capsys):
     paths = Paths.default()
     save_credential(paths, "zai", _LONG_TOKEN)
 
@@ -72,7 +72,7 @@ def test_tokens_masks_cached_values(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_tokens_lists_every_profile_with_the_active_marker(tmp_path, capsys):
+def test_tokens_lists_every_profile_with_the_active_marker(capsys):
     paths = Paths.default()
     save_credential(paths, "zai", _LONG_TOKEN)
     save_credential(paths, "zai", "644d" + "b" * 40 + "58f1", "bemyownrobot")
@@ -90,7 +90,7 @@ def test_tokens_lists_every_profile_with_the_active_marker(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_tokens_marks_a_legacy_keyed_profile_active(tmp_path, capsys):
+def test_tokens_marks_a_legacy_keyed_profile_active(capsys):
     """The active-profile lookup understands RETIRED provider names (a token
     cached under the pre-rename key stays usable), so the viewer's marker
     must too — in BOTH rename combinations: the active selection may name
@@ -137,7 +137,7 @@ def test_tokens_marks_a_legacy_keyed_profile_active(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_tokens_collapses_a_rename_duplicate_to_the_runtime_entry(tmp_path, capsys):
+def test_tokens_collapses_a_rename_duplicate_to_the_runtime_entry(capsys):
     """The ROOT invariant the three review cycles converged on: the viewer
     shows what the RUNTIME resolves, not a re-derivation of it. With both
     the pre-rename and the current cache key on disk (a realistic upgrade
@@ -175,7 +175,7 @@ def test_tokens_collapses_a_rename_duplicate_to_the_runtime_entry(tmp_path, caps
 
 
 @pytest.mark.integration
-def test_tokens_shows_set_and_unset_env_vars(tmp_path, monkeypatch, capsys):
+def test_tokens_shows_set_and_unset_env_vars(monkeypatch, capsys):
     monkeypatch.setenv("LITELLM_API_KEY", "sk-litellm-zai-local")
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
 
@@ -191,7 +191,7 @@ def test_tokens_shows_set_and_unset_env_vars(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.integration
-def test_tokens_env_row_printed_once_for_shared_env_vars(tmp_path, monkeypatch, capsys):
+def test_tokens_env_row_printed_once_for_shared_env_vars(monkeypatch, capsys):
     """deepseek and deepseek-openai share DEEPSEEK_API_KEY — the row is about
     the VARIABLE, so it prints once, not once per provider. The env var is
     SET here: with neither a cache nor any env var the command exits early
@@ -205,9 +205,7 @@ def test_tokens_env_row_printed_once_for_shared_env_vars(tmp_path, monkeypatch, 
 
 
 @pytest.mark.integration
-def test_tokens_with_an_empty_store_reports_nothing_saved(
-    tmp_path, capsys, monkeypatch
-):
+def test_tokens_with_an_empty_store_reports_nothing_saved(capsys, monkeypatch):
     for var in ("LITELLM_API_KEY", "ZAI_API_KEY", "OLLAMA_API_KEY", "DEEPSEEK_API_KEY"):
         monkeypatch.delenv(var, raising=False)
 
@@ -223,7 +221,7 @@ def test_tokens_with_an_empty_store_reports_nothing_saved(
 
 
 @pytest.mark.integration
-def test_tokens_reveal_prints_full_values_and_warns(tmp_path, capsys):
+def test_tokens_reveal_prints_full_values_and_warns(capsys):
     paths = Paths.default()
     save_credential(paths, "zai", _LONG_TOKEN)
     capsys.readouterr()

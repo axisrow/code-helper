@@ -438,7 +438,7 @@ def test_select_from_menu_truncates_long_row_on_tty(monkeypatch):
     monkeypatch.setattr(
         shutil_module,
         "get_terminal_size",
-        lambda fallback=(80, 24): os.terminal_size((40, 24)),
+        lambda _fallback=(80, 24): os.terminal_size((40, 24)),
     )
     fake = _FakeTTY()
     monkeypatch.setattr(sys, "stdout", fake)
@@ -639,7 +639,7 @@ def test_select_from_menu_label_receives_selected_state(monkeypatch):
 def test_select_from_menu_label_gets_ansi_false_when_not_a_tty(monkeypatch):
     seen: list[bool] = []
 
-    def label(*, selected: bool, ansi: bool) -> str:
+    def label(*, selected: bool = False, ansi: bool = False) -> str:  # noqa: ARG001 — keyword-called by the menu
         seen.append(ansi)
         return "row"
 

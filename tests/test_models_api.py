@@ -51,7 +51,7 @@ def _fetch_returning(payload, *, record=None):
 
 
 def _fetch_raising(exc):
-    def _fetch(url, timeout, token):
+    def _fetch(_url, _timeout, _token):
         raise exc
 
     return _fetch
@@ -196,7 +196,7 @@ def test_json_but_not_an_object_reports_error():
 
 @pytest.mark.unit
 def test_api_none_short_circuits_without_fetching():
-    def _explode(url, timeout, token):  # pragma: no cover - must not run
+    def _explode(_url, _timeout, _token):  # pragma: no cover - must not run
         raise AssertionError("fetch must not be called when there is no list API")
 
     result = list_models(_NO_LIST, fetch=_explode)
@@ -325,7 +325,7 @@ def test_empty_base_url_is_reported_before_any_normalization_or_fetch():
     normalization — openai_base_url("") would otherwise turn it into a request
     against a bare "/v1/"."""
 
-    def _explode(url, timeout, token):  # pragma: no cover - must not run
+    def _explode(_url, _timeout, _token):  # pragma: no cover - must not run
         raise AssertionError("fetch must not be called with no base URL")
 
     provider = Provider(

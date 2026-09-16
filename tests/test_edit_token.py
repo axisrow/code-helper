@@ -74,7 +74,7 @@ def test_edit_token_token_stdin_rotates_and_caches(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_edit_token_unknown_name_exits_1(tmp_path, capsys):
+def test_edit_token_unknown_name_exits_1(capsys):
     code = main(["edit-token", "nope"])
     assert code == 1
     err = capsys.readouterr().err
@@ -82,7 +82,7 @@ def test_edit_token_unknown_name_exits_1(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_edit_token_literal_auth_wrapper_rejected(tmp_path, capsys):
+def test_edit_token_literal_auth_wrapper_rejected(capsys):
     code = main(["edit-token", "deepseek-ollama"])
     assert code == 1
     err = capsys.readouterr().err
@@ -91,7 +91,7 @@ def test_edit_token_literal_auth_wrapper_rejected(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_edit_token_empty_input_rejected(tmp_path, monkeypatch):
+def test_edit_token_empty_input_rejected(monkeypatch):
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "")
     code = main(["edit-token", "glm"])
     assert code == 1
@@ -112,7 +112,7 @@ def test_edit_token_no_name_uses_menu(tmp_path, monkeypatch):
     # `_read_key_raw` after import has no effect; patch select_from_menu
     # itself instead (its own key-parsing behavior is covered by test_menu.py).
     monkeypatch.setattr(
-        "codehelper.cli.menu.select_from_menu", lambda items, **_kw: "glm"
+        "codehelper.cli.menu.select_from_menu", lambda _items, **_kw: "glm"
     )
     monkeypatch.setattr("getpass.getpass", lambda _prompt: _NEW_TOKEN)
 
@@ -128,7 +128,7 @@ def test_edit_token_menu_cancelled_writes_nothing(tmp_path, monkeypatch, capsys)
     # Esc/q — a soft cancel — prints "cancelled" and returns 0, same as ever.
     from codehelper.cli.menu import MenuCancelled
 
-    def _cancel(items, **_kw):
+    def _cancel(_items, **_kw):
         raise MenuCancelled(hard=False)
 
     monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _cancel)
@@ -148,7 +148,7 @@ def test_edit_token_hard_cancel_propagates(tmp_path, monkeypatch):
     # so a TUI caller can distinguish "back" from "leave the whole TUI".
     from codehelper.cli.menu import MenuCancelled
 
-    def _cancel(items, **_kw):
+    def _cancel(_items, **_kw):
         raise MenuCancelled(hard=True)
 
     monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _cancel)

@@ -308,7 +308,7 @@ def test_model_step_falls_back_to_known_models_when_discovery_is_unavailable(
     prompt must say the list is known-not-discovered (Stage 3)."""
     seen_prompts: list[str] = []
 
-    def _select(items, *, prompt="", **_kwargs):
+    def _select(_items, *, prompt="", **_kwargs):
         text = prompt() if callable(prompt) else prompt
         seen_prompts.append(text)
         if str(text).startswith("Context window for"):
@@ -525,7 +525,7 @@ def test_a_without_row_context_asks_what_to_add_first(monkeypatch):
     monkeypatch.setattr(
         secrets,
         "resolve_token",
-        lambda **kwargs: secrets.ResolvedToken("sk-test", secrets.SOURCE_PROMPT),
+        lambda **_kwargs: secrets.ResolvedToken("sk-test", secrets.SOURCE_PROMPT),
     )
     assert main(["add", "glm", "--profile", "default"]) == 0
     seen: list[str] = []
@@ -586,7 +586,7 @@ def test_add_agent_action_row_registers_a_new_agent(monkeypatch):
     monkeypatch.setattr(
         "codehelper.cli.menu.read_line", lambda _prompt, **_kwargs: "myagent"
     )
-    monkeypatch.setattr(tui.TuiSession, "_notify", lambda self, text: None)
+    monkeypatch.setattr(tui.TuiSession, "_notify", lambda _self, _text: None)
 
     assert main(["tui"]) == 0
 
@@ -603,7 +603,7 @@ def test_add_wrapper_action_row_opens_the_unscoped_kind_picker(monkeypatch):
     seen: list[str] = []
     answers = iter(["__action:add-wrapper", "__back__", "quit"])
 
-    def _select(items, *, prompt, **kwargs):
+    def _select(_items, *, prompt, **_kwargs):
         text = prompt() if callable(prompt) else prompt
         seen.append(text)
         return next(answers)
@@ -1599,7 +1599,7 @@ def test_on_rename_moves_the_wrapper(tmp_path, monkeypatch):
     paths = Paths.from_home(tmp_path)
     install_wrapper(paths, "glm", token="sk-existing")
 
-    monkeypatch.setattr(menu, "read_line", lambda prompt="", **_kw: "glm2")
+    monkeypatch.setattr(menu, "read_line", lambda _prompt="", **_kw: "glm2")
     session = TuiSession(
         cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
     )
@@ -1619,13 +1619,13 @@ def test_profile_screen_e_renames(tmp_path, monkeypatch):
 
     paths = Paths.from_home(tmp_path)
     secrets.save_credential(paths, "zai", "sk-old", "work")
-    monkeypatch.setattr(menu, "read_line", lambda prompt="", **_kw: "personal")
+    monkeypatch.setattr(menu, "read_line", lambda _prompt="", **_kw: "personal")
 
     providers = iter(["zai"])
 
     fired = {"done": False}
 
-    def _select(items, prompt="", **kwargs):
+    def _select(_items, prompt="", **kwargs):
         if prompt.startswith("Active profile for"):
             on_key = kwargs.get("on_key")
             assert on_key is not None and "e" in on_key
@@ -1903,7 +1903,7 @@ def test_right_moves_the_chip_cursor_and_wraps(monkeypatch):
 
 
 @pytest.mark.integration
-def test_back_tab_moves_the_chip_cursor_like_left(monkeypatch):
+def test_back_tab_moves_the_chip_cursor_like_left():
     """Shift+Tab is the backwards twin of Left, not a second mechanism."""
     from codehelper.services.wrappers import install_wrapper
 
@@ -2009,7 +2009,7 @@ def test_enter_applies_the_second_wrapper_sharing_a_provider_with_the_first(
         tui._AGENT_BACKENDS,
         "claude",
         dataclasses.replace(
-            tui._AGENT_BACKENDS["claude"], read_applied=lambda paths: "zai"
+            tui._AGENT_BACKENDS["claude"], read_applied=lambda _paths: "zai"
         ),
     )
 
@@ -2017,7 +2017,7 @@ def test_enter_applies_the_second_wrapper_sharing_a_provider_with_the_first(
     monkeypatch.setattr(
         tui.TuiSession,
         "_apply_switch_wrapper",
-        lambda self, spec: seen.append(spec.name),
+        lambda _self, spec: seen.append(spec.name),
     )
     # Presets are first, then ad-hoc chips alphabetically; the bai preset chip
     # sits between gemini-litellm and the ad-hoc glm-air.
@@ -2055,7 +2055,7 @@ def test_enter_on_an_agent_row_applies_the_highlighted_chip(monkeypatch):
     monkeypatch.setattr(
         tui.TuiSession,
         "_apply_switch_wrapper",
-        lambda self, spec: seen.append(spec.name),
+        lambda _self, spec: seen.append(spec.name),
     )
     _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
@@ -2196,7 +2196,7 @@ def test_enter_on_an_already_applied_chip_does_not_rewrite(monkeypatch):
 
     applied = []
     monkeypatch.setattr(
-        tui.TuiSession, "_apply_switch_native", lambda self: applied.append("native")
+        tui.TuiSession, "_apply_switch_native", lambda _self: applied.append("native")
     )
     _real_menu_keys(monkeypatch, ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
@@ -2662,7 +2662,7 @@ def test_delete_on_an_agent_chipset_row_is_inert(monkeypatch):
     `agent:claude` — the dispatch a user hit as "invalid wrapper name"."""
     seen = []
 
-    def _spy_remove(*args, **kwargs):
+    def _spy_remove(*args, **_kwargs):
         seen.append(args)
         return 0
 
@@ -2680,7 +2680,7 @@ def test_delete_on_a_wrapper_row_still_dispatches(monkeypatch):
     row dispatches `_handle_remove` with that row's alias."""
     seen = []
 
-    def _spy_remove(*args, **kwargs):
+    def _spy_remove(*args, **_kwargs):
         seen.append(args)
         return 0
 
@@ -2871,7 +2871,7 @@ def test_enter_applies_a_chip_whose_token_differs_on_the_same_backend(monkeypatc
     monkeypatch.setattr(
         tui.TuiSession,
         "_apply_switch_wrapper",
-        lambda self, spec: seen.append(spec.name),
+        lambda _self, spec: seen.append(spec.name),
     )
     index = next(
         i
@@ -2941,7 +2941,7 @@ def test_literal_chips_not_applied_when_a_secret_wrapper_is_live(monkeypatch):
 
 
 @pytest.mark.integration
-def test_ctx_wrapper_chip_matches_only_itself(monkeypatch):
+def test_ctx_wrapper_chip_matches_only_itself():
     """CHIP HONESTY for the recorded window (issue #83, the #80/#81 class):
     a wrapper whose marker records ctx=1000000 shares provider AND tier
     models with a same-model catalog wrapper — the recorded window is the
@@ -3008,7 +3008,7 @@ def test_providers_submenu_dispatches_the_real_handlers(monkeypatch):
     seen: list[str] = []
     picks = iter(["ollama-direct", "__back__"])  # toggle once, then leave
 
-    def _select(items, *, prompt, **_kwargs):
+    def _select(_items, *, prompt, **_kwargs):
         text = prompt() if callable(prompt) else prompt
         seen.append(text)
         return next(picks)
@@ -3037,7 +3037,7 @@ def test_providers_submenu_toggles_back_to_enabled(monkeypatch):
     )
     picks = iter(["ollama-direct", "__back__"])  # toggle once, then leave
 
-    def _select(items, *, prompt, **_kwargs):
+    def _select(_items, *, prompt, **_kwargs):  # noqa: ARG001 — keyword-called by the screen
         return next(picks)
 
     monkeypatch.setattr(menu, "select_from_menu", _select)
@@ -3055,7 +3055,7 @@ def test_providers_submenu_hides_env_reset_and_tags_suspended(monkeypatch):
 
     captured: dict = {}
 
-    def _select(items, *, prompt, **_kwargs):
+    def _select(items, *, prompt, **_kwargs):  # noqa: ARG001 — keyword-called by the screen
         captured["rows"] = {
             value: label for value, label in items if isinstance(value, str)
         }

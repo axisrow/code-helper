@@ -556,7 +556,7 @@ def test_rotate_backups_archives_the_passed_in_content_not_a_fresh_disk_read(
 
 
 @pytest.mark.unit
-def test_set_default_refuses_outright_without_tomllib(tmp_path, monkeypatch):
+def test_set_default_refuses_outright_without_tomllib(monkeypatch):
     """Without ``tomllib`` importable, ``set-default`` must refuse outright
 
     with a clear message rather than silently degrading its verification —

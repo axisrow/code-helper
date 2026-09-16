@@ -114,7 +114,7 @@ def test_custom_input_is_validated_then_recorded(tmp_path):
     paths = _paths(tmp_path)
     answers = iter(["abc", "-5", "none"])
 
-    def _read(prompt):
+    def _read(_prompt):
         return next(answers)
 
     value = resolve_context_window(
@@ -132,7 +132,7 @@ def test_custom_input_is_validated_then_recorded(tmp_path):
 def test_custom_input_gives_up_after_three_bad_answers(tmp_path):
     paths = _paths(tmp_path)
 
-    def _read(prompt):
+    def _read(_prompt):
         return "garbage"
 
     with pytest.raises(CodeHelperError):
@@ -202,7 +202,7 @@ def test_menu_cancel_records_nothing(tmp_path):
     time — continuing silently would apply a value the user just declined."""
     paths = _paths(tmp_path)
 
-    def _cancel(items):
+    def _cancel(_items):
         raise MenuCancelled(hard=False)
 
     with pytest.raises(MenuCancelled):
@@ -297,7 +297,7 @@ def test_two_unknown_models_are_each_asked_once(tmp_path):
     paths = _paths(tmp_path)
     answers = iter(["1000000", "1000000"])
 
-    def _select(_items, *, prompt="", **_kwargs):
+    def _select(_items, *, _prompt="", **_kwargs):
         return next(answers)
 
     assert (

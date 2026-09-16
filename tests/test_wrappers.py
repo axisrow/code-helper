@@ -933,7 +933,7 @@ def test_cli_add_with_model_override(tmp_path):
 
 
 @pytest.mark.integration
-def test_cli_list_shows_registry(tmp_path, capsys):
+def test_cli_list_shows_registry(capsys):
     assert main(["list"]) == 0
     out = capsys.readouterr().out
     assert "deepseek-ollama" in out
@@ -941,7 +941,7 @@ def test_cli_list_shows_registry(tmp_path, capsys):
 
 
 @pytest.mark.integration
-def test_cli_unknown_wrapper_name_exits_1(tmp_path, capsys):
+def test_cli_unknown_wrapper_name_exits_1(capsys):
     code = main(["add", "nope"])
     assert code == 1
     err = capsys.readouterr().err
@@ -2390,7 +2390,7 @@ def test_remove_wrapper_asks_confirm_before_unlinking(tmp_path):
     assert paths.script_for(spec.alias) in seen
     assert paths.script_for(spec.alias).exists()
 
-    def accept(targets):
+    def accept(_targets):
         return True
 
     assert remove_wrapper(paths, spec.alias, confirm=accept) is True
@@ -2515,7 +2515,7 @@ def test_remove_wrapper_reports_but_does_not_undo_a_failed_default_clear(
     install_wrapper(paths, spec)
     set_default_wrapper(paths, "codex", spec.alias)
 
-    def flaky_write_state(paths_arg, state_dict):
+    def flaky_write_state(_paths_arg, _state_dict):
         raise OSError("simulated disk-full failure")
 
     monkeypatch.setattr(state, "_write_state", flaky_write_state)

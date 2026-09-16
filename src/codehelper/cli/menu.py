@@ -91,7 +91,7 @@ _TILDE_FINAL = {"1": "HOME", "4": "END", "5": "PAGE_UP", "6": "PAGE_DOWN"}
 # escape names and the Ctrl-A/Ctrl-E shortcuts resolve to the SAME move — the
 # line editor must not re-state "HOME means pos=0" twice.
 _MOVES: dict[str, Callable[[list[str], int], int]] = {
-    "LEFT": lambda chars, pos: max(0, pos - 1),
+    "LEFT": lambda _chars, pos: max(0, pos - 1),
     "RIGHT": lambda chars, pos: min(len(chars), pos + 1),
     "HOME": lambda _chars, _pos: 0,
     "END": lambda chars, _pos: len(chars),

@@ -531,7 +531,7 @@ def _add_resolve_provider(req, paths):
     return agent, provider
 
 
-def _add_list_models_or_none(req, paths, agent, provider, profile_name):
+def _add_list_models_or_none(req, paths, _agent, provider, profile_name):
     """Run ``--list-models`` if requested, printing models and returning 0.
 
     Returns ``None`` when ``--list-models`` was not requested, so the caller
@@ -553,7 +553,7 @@ def _add_list_models_or_none(req, paths, agent, provider, profile_name):
     return 0
 
 
-def _add_resolve_spec(req, paths, agent, provider, profile_name):
+def _add_resolve_spec(req, _paths, agent, provider, profile_name):
     """Build the ``WrapperSpec`` — constructor path.
 
     Resolves compatibility BEFORE anything interactive: a bad pairing must

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from typing import Any
 
 from codehelper.errors import CodeHelperError
 
@@ -44,8 +45,12 @@ __all__ = [
 ]
 
 
-def _g(args: argparse.Namespace, name: str, default: object = None) -> object:
+def _g(args: argparse.Namespace, name: str, default: object = None) -> Any:
     """``getattr`` with a stable default, for the ``from_namespace`` bridges.
+
+    ``Any`` on purpose: the bridges hand the value straight to typed
+    dataclass fields, and argparse's dynamic destinations cannot be typed
+    per-call without a cast at every site. The handlers own the validation.
 
     The TUI builds a ``Namespace`` itself and only fills the fields its flow
     uses, so an absent attribute is normal (not a bug) — exactly the contract
