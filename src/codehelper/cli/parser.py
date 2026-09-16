@@ -640,6 +640,34 @@ def _warn_env_cache_conflict(resolved, **axes) -> None:
         print(conflict, file=sys.stderr)
 
 
+def _token_stdin_value(args: argparse.Namespace | object) -> str | None:
+    """The ``--token-stdin`` value: exactly one line from stdin, or ``None``.
+
+    Headless provisioning (issue #92): the missing verb behind ``switch``'s
+    "cache one first" hint. Mirrors ``gh auth login --with-token`` /
+    ``docker login --password-stdin`` — a boolean flag reading one line, so
+    the secret never appears in argv (``ps``/history). Fails fast on a TTY:
+    the interactive path is the hidden ``getpass`` prompt, which never echoes,
+    and a terminal stdin read would. The returned value rides the request's
+    ``profile_token`` — i.e. ``SOURCE_PROMPT``, the only source the post-install
+    cache step persists.
+    """
+    if not getattr(args, "token_stdin", False):
+        return None
+    if sys.stdin.isatty():
+        raise CodeHelperError(
+            "--token-stdin reads one token line from stdin — pipe it in "
+            "(printf %s $TOKEN | codehelper …) or drop the flag to type it "
+            "at the hidden prompt"
+        )
+    value = sys.stdin.readline().rstrip("\r\n")
+    if not value:
+        raise CodeHelperError(
+            "no token received on stdin — --token-stdin reads exactly one line"
+        )
+    return value
+
+
 def _add_resolve_token(spec, req, paths, profile_name):
     """Resolve the token for ``spec``: pre-typed → env/cache/prompt → literal.
 
@@ -750,7 +778,10 @@ def _handle_add(args: argparse.Namespace | AddRequest) -> int:
     """
 
     paths = Paths.default()
+    stdin_token = _token_stdin_value(args)
     req = args if isinstance(args, AddRequest) else AddRequest.from_namespace(args)
+    if stdin_token is not None:
+        req = replace(req, profile_token=stdin_token)
     using_axes = req.agent is not None or req.provider is not None
 
     # Issue #23: an explicit --profile always wins; otherwise the CLI picks up
@@ -1018,11 +1049,14 @@ def _handle_edit_token(args: argparse.Namespace | EditTokenRequest) -> int:
     the cache tracks the rotation rather than going stale.
     """
 
+    stdin_token = _token_stdin_value(args)
     req = (
         args
         if isinstance(args, EditTokenRequest)
         else EditTokenRequest.from_namespace(args)
     )
+    if stdin_token is not None:
+        req = replace(req, profile_token=stdin_token)
 
     paths = Paths.default()
     dry_run = req.dry_run
@@ -1367,7 +1401,10 @@ def _switch_resolve_token(
         def _no_prompt(_prompt: str) -> str:
             raise CodeHelperError(
                 f"no {provider.name} token available for a non-interactive "
-                f"switch — set {provider.token_env_var} or cache one first"
+                "switch — set "
+                f"{provider.token_env_var}, or cache one first: "
+                "printf %s $TOKEN | codehelper edit-token <wrapper> "
+                "--profile default --token-stdin"
             )
 
         kwargs["getpass_fn"] = _no_prompt
@@ -1847,6 +1884,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="print the provider's models and exit (writes nothing)",
     )
+    p_add.add_argument(
+        "--token-stdin",
+        action="store_true",
+        default=False,
+        help="read the token from stdin (one line) instead of env/prompt; "
+        "the value is cached after the install",
+    )
     p_add.set_defaults(func=_handle_add)
 
     p_edit_token = subparsers.add_parser(
@@ -1864,6 +1908,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         default=None,
         help="token profile to update (default: default)",
+    )
+    p_edit_token.add_argument(
+        "--token-stdin",
+        action="store_true",
+        default=False,
+        help="read the new token from stdin (one line) instead of the hidden prompt",
     )
     p_edit_token.set_defaults(func=_handle_edit_token)
 
