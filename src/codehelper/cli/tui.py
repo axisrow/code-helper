@@ -379,26 +379,31 @@ class TuiSession:
             print(text)
         press_any_key("Press any key to continue...")
 
-    def _run(self, handler, request=None, *, silent: bool = False) -> bool:
-        """Dispatch a CLI handler/request and preserve its user-facing output.
+    def _run(
+        self, handler, request=None, *, silent: bool = False, live: bool = False
+    ) -> bool:
+        """Dispatch a CLI handler/request and show its output exactly once.
 
-        Tees stdout instead of fully redirecting it: some handlers (e.g.
-        ``set-default``'s ``_confirm_set_default``) print a preview and then
-        block on ``input()`` for a yes/no confirmation. A full
-        ``redirect_stdout`` buffers that preview into the capture and never
-        shows it before ``input()`` blocks, so the user would confirm a
-        destructive config write blind. Writing to both the real stdout and
-        the buffer keeps that output live while still letting ``_notify``
-        replay the full transcript afterwards so it survives the next
-        redraw.
+        Three output modes:
 
-        ``silent=True`` is the chip hot-apply mode: a claude switch chip is a
-        fully-resolved, ``force=True`` apply that never prompts, so there is
-        no live prompt to keep visible — stdout is captured without teeing,
-        and on SUCCESS it is neither replayed nor paused on. The chipset
-        redraw already reflects the new ``[applied]`` state, so a chip press
-        must be quiet (no ``wrote ...`` echo, no "Press any key"). An error
-        is still surfaced and paused on: a failed apply must never be silent.
+        - **default** — stdout is captured and, on success, replayed once by
+          ``_notify`` (transcript + pause). Correct for handlers that only
+          print: nothing appears until the finished transcript can be shown,
+          and it survives the next redraw.
+        - **live=True** — stdout is teed to the real terminal, for handlers
+          that print a prompt and then block on ``input()`` (set-default's
+          config confirm, remove's file list, add's foreign-overwrite
+          confirm): the prompt must be visible before the blocking read.
+          The transcript is therefore already on screen — success replays
+          nothing, ``_notify("")`` keeps just the pause.
+        - **silent=True** — capture without any display: the chip hot-apply
+          path, where the redraw itself reflects the new state. An error is
+          still surfaced and paused on; a failed apply must never be silent.
+
+        On an error the ``error:`` line is printed first; in default mode the
+        captured transcript is replayed after it (diagnostic), while in live
+        mode the transcript is already on screen from the tee and only the
+        pause is shown.
 
         Returns True iff the handler completed without an error — callers
         that synthesize their own success message must gate it on this, not
@@ -412,9 +417,9 @@ class TuiSession:
 
         buffer = io.StringIO()
         real_stdout = sys.stdout
-        # silent assumes a force=True apply that never prompts, so there is no
-        # live prompt to keep visible — capture without teeing.
-        sys.stdout = buffer if silent else _Tee(real_stdout, buffer)
+        # live tees (prompts must be visible mid-flow); default and silent
+        # capture only — the transcript is shown once, after the handler.
+        sys.stdout = _Tee(real_stdout, buffer) if live and not silent else buffer
         try:
             handler(self.args if request is None else request)
         except CodeHelperError as exc:
@@ -423,11 +428,19 @@ class TuiSession:
                 raise
             sys.stdout = real_stdout
             print(f"error: {exc}")
-            self._notify(buffer.getvalue().rstrip())
+            if live and not silent:
+                # live: the transcript is already on screen from the tee —
+                # replaying it here would show it twice (the #97 symptom on
+                # the error path). The pause alone keeps it readable.
+                self._notify("")
+            else:
+                self._notify(buffer.getvalue().rstrip())
             return False
         finally:
             sys.stdout = real_stdout
-        if not silent:
+        if live and not silent:
+            self._notify("")
+        elif not silent:
             self._notify(buffer.getvalue().rstrip())
         return True
 
@@ -820,6 +833,7 @@ class TuiSession:
                 force=False,
                 debug=getattr(self.args, "debug", False),
             ),
+            live=True,
         )
 
     def _apply_set_default_native(self) -> None:
@@ -845,6 +859,7 @@ class TuiSession:
                 confirm=_confirm_set_default,
             ),
             None,
+            live=True,
         )
 
     def _add_provider_choices(self, agent):
@@ -1036,6 +1051,9 @@ class TuiSession:
                 force=False,
                 debug=getattr(self.args, "debug", False),
             ),
+            # live: the foreign-overwrite confirm must be visible before the
+            # blocking read.
+            live=True,
         )
         return True
 
@@ -1966,7 +1984,7 @@ class TuiSession:
         self._run(
             _handle_proxy,
             self._proxy_request(action=_PROXY_ON if want_on else _PROXY_OFF),
-            silent=True,
+            silent=self._chip_silent(),
         )
 
     def _chip_move(self, value: str, delta: int) -> None:
@@ -2250,6 +2268,9 @@ class TuiSession:
                             force=False,
                             debug=getattr(self.args, "debug", False),
                         ),
+                        # live: the file-list confirm must be visible before
+                        # the blocking y/N read.
+                        live=True,
                     )
                 else:
                     # A wrapper alias — Enter makes it the default for its
