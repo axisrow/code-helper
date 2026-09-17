@@ -455,7 +455,7 @@ def test_litellm_uses_selected_profile_for_model_discovery(monkeypatch):
 
 
 @pytest.mark.integration
-def test_t_rotates_token_for_secret_wrapper_from_main_screen(monkeypatch):
+def test_t_rotates_token_for_secret_wrapper_from_main_screen(monkeypatch, capsys):
     """Issue #29: token rotation moved from the old List sub-screen to the `t`
     key on the main screen. With glm installed (secret), `t` on its row opens
     the profile picker and a new token is written — the same end-to-end result
@@ -465,6 +465,7 @@ def test_t_rotates_token_for_secret_wrapper_from_main_screen(monkeypatch):
     paths = Paths.default()
     secrets.save_credential(paths, "zai", "sk-old", "default")
     assert main(["add", "glm", "--profile", "default"]) == 0
+    capsys.readouterr()  # drop the add's own transcript — count only the TUI flow
     # Main screen rows: the two agent chipset rows (claude, codex), the proxy
     # chipset row, the `+ add agent` action row, then the wrapper list
     # [deepseek-ollama, glm, glm-ollama] under Section("claude"). Five DOWNs reach
@@ -479,6 +480,134 @@ def test_t_rotates_token_for_secret_wrapper_from_main_screen(monkeypatch):
     assert main(["tui"]) == 0
     assert secrets.credential_for(paths, "zai", "default") == "sk-new"
     assert "sk-new" in paths.script_for("glm").read_text()
+    # Issue #97: the transcript shows once (capture+replay), not twice
+    # (the old live tee plus replay).
+    out = capsys.readouterr().out
+    assert out.count("wrote /") == 1
+
+
+# --- issue #97: one transcript per action ------------------------------------
+
+
+@pytest.mark.unit
+def test_run_default_shows_the_transcript_once_and_pauses(capsys, monkeypatch):
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+
+    pauses = []
+    monkeypatch.setattr(menu, "press_any_key", lambda *_a: pauses.append(1))
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+
+    def handler(_req):
+        print("single-line")
+
+    assert session._run(handler, None) is True
+    out = capsys.readouterr().out
+    assert out.count("single-line") == 1
+    assert len(pauses) == 1
+
+
+@pytest.mark.unit
+def test_run_live_is_visible_midflow_and_never_replayed(capsys, monkeypatch):
+    """The live contract: the transcript is on the real terminal DURING the
+    handler (before any blocking read), and the success path does not replay
+    it — only the pause follows."""
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+
+    pauses = []
+    monkeypatch.setattr(menu, "press_any_key", lambda *_a: pauses.append(1))
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    seen = {}
+
+    def handler(_req):
+        print("prompt-line")
+        seen["during"] = capsys.readouterr().out  # what is visible right now
+
+    assert session._run(handler, None, live=True) is True
+
+    final = capsys.readouterr().out
+    assert "prompt-line" in seen["during"]  # tee: visible mid-flow
+    assert "prompt-line" not in final  # capture-only default would fail here
+    assert len(pauses) == 1  # the pause still happens, without a replay
+
+
+@pytest.mark.unit
+def test_run_silent_displays_nothing(capsys, monkeypatch):
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+
+    pauses = []
+    monkeypatch.setattr(menu, "press_any_key", lambda *_a: pauses.append(1))
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+
+    def handler(_req):
+        print("quiet-line")
+
+    assert session._run(handler, None, silent=True) is True
+    out = capsys.readouterr().out
+    assert "quiet-line" not in out
+    assert pauses == []  # silent: no pause either
+
+
+@pytest.mark.unit
+def test_run_default_error_shows_error_line_then_transcript(capsys, monkeypatch):
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+    from codehelper.errors import CodeHelperError
+
+    pauses = []
+    monkeypatch.setattr(menu, "press_any_key", lambda *_a: pauses.append(1))
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+
+    def handler(_req):
+        print("before failure")
+        raise CodeHelperError("boom")
+
+    assert session._run(handler, None) is False
+    out = capsys.readouterr().out
+    assert "error: boom" in out
+    assert out.count("before failure") == 1
+    assert out.index("error: boom") < out.index("before failure")
+    assert len(pauses) == 1
+
+
+@pytest.mark.unit
+def test_run_live_error_shows_everything_once(capsys, monkeypatch):
+    """Live error path: the transcript was already teed live, so after the
+    error line there is only the pause — no second showing of the
+    transcript (the #97 symptom, error-path edition)."""
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+    from codehelper.errors import CodeHelperError
+
+    pauses = []
+    monkeypatch.setattr(menu, "press_any_key", lambda *_a: pauses.append(1))
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    seen = {}
+
+    def handler(_req):
+        print("before failure")
+        seen["during"] = capsys.readouterr().out
+        raise CodeHelperError("boom")
+
+    assert session._run(handler, None, live=True) is False
+
+    final = capsys.readouterr().out
+    assert "error: boom" in final
+    assert "before failure" in seen["during"]  # shown live mid-handler
+    assert "before failure" not in final  # and not replayed
+    assert len(pauses) == 1
 
 
 @pytest.mark.integration
@@ -1607,6 +1736,29 @@ def test_on_rename_moves_the_wrapper(tmp_path, monkeypatch):
 
     assert is_installed(paths, "glm2")
     assert not is_installed(paths, "glm")
+
+
+@pytest.mark.integration
+def test_on_rename_shows_the_confirmation_exactly_once(tmp_path, monkeypatch, capsys):
+    """Issue #97, rename half of the acceptance criteria: the synthesized
+    confirmation is the only display and appears exactly once. Dropping the
+    handler's ``silent=True`` (tee + replay) would double the line — this
+    pin fails immediately on that regression."""
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+    from codehelper.services.wrappers import install_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token="sk-existing")
+
+    monkeypatch.setattr(menu, "read_line", lambda _prompt="", **_kw: "glm2")
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    session._on_rename("glm")
+
+    out = capsys.readouterr().out
+    assert out.count("renamed wrapper glm -> glm2") == 1
 
 
 @pytest.mark.integration
