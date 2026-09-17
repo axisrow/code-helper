@@ -78,6 +78,7 @@ from codehelper.services.model import (
     get_provider_for_legacy_read,
     is_provider_disabled,
     provider_storage_names,
+    refuse_disabled_provider,
     resolve_shape,
     with_auth,
     with_base_url,
@@ -128,22 +129,13 @@ from codehelper.services.wrappers import (
 
 
 def _refuse_disabled_provider(provider, paths) -> None:
-    """The ONE runtime-disable gate (issue #89): raise if ``provider`` is
-    disabled, with the ``enable`` hint every refusal site shares.
+    """The CLI-shaped delegate to :func:`model.refuse_disabled_provider`.
 
-    Called by every entry point that takes an explicit provider name or
-    resolves one for a NEW record (``add`` both paths, ``switch``,
-    ``set-default``) — a disabled provider must be refused BEFORE any
-    interactive step, per the "validate, then prompt" rule. Distinct from
-    "incompatible": the pairing is fine, the backend is retired — enable it
-    first. The TUI menus never offer a disabled provider, so only an
-    explicit name reaches this.
+    The message and the ``enable`` hint have ONE owner (issue #89; hoisted
+    by #100 so the service layer's ``edit_wrapper`` shares it) — this thin
+    wrapper only supplies the ``state.json`` lookup.
     """
-    if is_provider_disabled(provider, state.disabled_providers(paths)):
-        raise CodeHelperError(
-            f"provider {provider.name} is disabled — enable it first "
-            f"(`codehelper enable {provider.name}`)"
-        )
+    refuse_disabled_provider(provider, state.disabled_providers(paths))
 
 
 def _handle_list_axes(what: str) -> int:

@@ -69,6 +69,7 @@ __all__ = [
     "validate_agent_binary",
     "resolve_shape",
     "is_provider_disabled",
+    "refuse_disabled_provider",
     "active_providers",
     "compatible_providers",
     "switchable_providers",
@@ -1010,6 +1011,27 @@ def is_provider_disabled(provider: Provider, disabled: frozenset[str] | None) ->
     ``~/.claude/settings.json``) working untouched.
     """
     return disabled is not None and provider.name in disabled
+
+
+def refuse_disabled_provider(
+    provider: Provider, disabled: frozenset[str] | None
+) -> None:
+    """The ONE runtime-disable refusal (issue #89; hoisted to its shared home
+    by #100): raise if ``provider`` is disabled, with the ``enable`` hint
+    every refusal site shares.
+
+    The set is a parameter — this module stays IO-free exactly like
+    :func:`is_provider_disabled`. Called by every entry point that takes an
+    explicit provider name or resolves one for a NEW record, always BEFORE
+    any interactive step (the "validate, then prompt" rule). Distinct from
+    "incompatible": the pairing is fine, the backend is retired — enable it
+    first.
+    """
+    if is_provider_disabled(provider, disabled):
+        raise CodeHelperError(
+            f"provider {provider.name} is disabled — enable it first "
+            f"(`codehelper enable {provider.name}`)"
+        )
 
 
 def active_providers(disabled: frozenset[str] | None = None) -> list[Provider]:

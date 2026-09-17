@@ -32,7 +32,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
-from typing import NamedTuple
+from typing import Final, NamedTuple
 from urllib.parse import quote, unquote
 
 from codehelper.backends._atomic import atomic_write, read_text_or_none, remove_file
@@ -94,6 +94,8 @@ __all__ = [
     "remove_wrapper",
     "rename_wrapper",
     "rename_provider_profile",
+    "edit_wrapper",
+    "EditWrapperResult",
     "is_installed",
     "is_managed",
     "spec_from_installed",
@@ -1576,6 +1578,404 @@ def rename_wrapper(
             f"renamed to {new_alias} but the old file could not be removed: {exc}"
         ) from exc
     return True
+
+
+class _Unset:
+    """Sentinel type for "this axis was not touched" (issue #100).
+
+    Distinct from ``None``, which as an axis value means "clear it": the
+    three states ride the CLI flags directly (flag absent → keep, ``none``
+    → clear, a value → set) and must never collapse — a model-only edit
+    that arrived as ``effort=None`` would silently strip a recorded
+    ``effort=`` from every wrapper it touched.
+    """
+
+
+_UNSET: Final = _Unset()
+
+
+def _default_getpass(prompt: str) -> str:
+    """Lazy stand-in for :func:`getpass.getpass` — keeps ``getpass`` out of
+    this module's import-time surface (the state.py lazy-import idiom)."""
+    import getpass
+
+    return getpass.getpass(prompt)
+
+
+class EditWrapperResult(NamedTuple):
+    """What :func:`edit_wrapper` did.
+
+    ``changed`` names the axes whose final value differs from the old spec
+    (``provider``/``model``/``tiers``/``subagent``/``effort``/
+    ``context_window``), ``wrote`` is ``False`` also for a byte-identical
+    edit (the ``_decide`` SKIP analogue of an idempotent re-install).
+    """
+
+    old_spec: WrapperSpec
+    spec: WrapperSpec
+    changed: tuple[str, ...]
+    shape_changed: bool
+    wrote: bool
+
+
+def edit_wrapper(
+    paths: Paths,
+    alias: str,
+    *,
+    provider: str | None = None,
+    want_secret: bool | None = None,
+    model: str | None | _Unset = _UNSET,
+    tier_overrides: dict[str, str] | None | _Unset = _UNSET,
+    subagent_model: str | None | _Unset = _UNSET,
+    effort: str | None | _Unset = _UNSET,
+    context_window: int | None | _Unset = _UNSET,
+    base_url: str | None = None,
+    profile_name: str | None = None,
+    token: str | None = None,
+    getpass_fn: Callable[[str], str] = _default_getpass,
+    dry_run: bool = False,
+    force: bool = False,
+    confirm: Callable[[Path], bool] | None = None,
+) -> EditWrapperResult:
+    """Edit an installed wrapper's axes IN PLACE — the alias never moves.
+
+    The mechanism is a full re-render under a replaced spec, NOT a
+    ``dataclasses.replace`` of the reconstructed spec: a raw replace would
+    bypass every :func:`build_spec` gate (stale shape, the REQUIRED
+    base_url refusal, tier materialization), so the edited axes are merged
+    onto the recorded spec and the whole thing re-enters ``build_spec``,
+    exactly the way :func:`spec_from_installed` reconstructs. The alias is
+    unchanged, so the default-wrapper pointers stay valid and nothing here
+    repoints them (rename's steps 8-11 drop out).
+
+    Axis semantics — three states per axis, never collapsed:
+
+    - ``_UNSET`` (default) — untouched: the recorded value rides.
+    - ``None`` — clear it (for ``effort``/``subagent_model``: stop managing;
+      for ``tier_overrides``: reset to uniform; ``context_window=0`` is the
+      explicit "no declaration", reachable as ``--context-window none``).
+    - a value — set it. A model edit on an env-shaped wrapper RESETS all
+      tiers to uniform (and a set subagent rides along) — the
+      ``spec_from_preset`` ``--model`` parity; otherwise the carried tiers
+      would win in ``build_spec`` and the headline edit would be a silent
+      no-op.
+
+    A cross-shape provider edit is allowed wherever ``resolve_shape``
+    succeeds; axes the new shape cannot carry (tiers/subagent leaving the
+    env shape, effort leaving OPENAI_TOML) are auto-cleared and named in
+    the result, while an explicitly aimed value is refused.
+
+    The context window follows the recorded-data rule: an explicit answer
+    wins; untouched recorded data rides verbatim; a CHANGED covered model
+    set resets the answer and re-resolves — recorded answers are per-model
+    state, never carried to a different model. The interactive answer is
+    persisted by the resolver (per-model, reusable even if this edit later
+    fails) — only ``--dry-run`` is excluded, via ``interactive=False``.
+
+    Token order mirrors ``add``: a supplied ``token`` wins, then
+    ``token_from_installed`` recovery for a KEPT secret provider (never
+    prompts), then the ``env → cached profile → prompt`` chain. Dry-run
+    resolves non-interactively only and fails closed before ANY write when
+    the token cannot be found. A prompted token is cached after a
+    successful install (``cache_freshly_typed_token`` self-gates dry-run
+    and non-prompt sources).
+
+    Args:
+        provider: new provider name (a cross-provider switch), or None to
+            keep the recorded provider VERBATIM — it already carries the
+            file-wins recovered base_url and the recorded auth.
+        want_secret: auth override applied via ``model.with_auth`` (the
+            ``:secret`` twin of the add-flow provider picker).
+        tier_overrides: per-tier model replacements merged onto the
+            recorded tiers.
+        token: a caller-resolved credential (TUI pre-collected or
+            ``--token-stdin``); skips every resolver when given.
+        getpass_fn: injectable prompt source for the interactive token
+            chain (tests).
+
+    Raises:
+        CodeHelperError: unknown/unmanaged/unrecognisable wrapper, a
+            suspended provider behind it, a disabled provider being kept or
+            switched TO, an unusable axis value, an explicitly aimed axis
+            the target shape cannot carry, or an unresolvable token.
+    """
+    import os
+
+    from codehelper.services.context_window import resolve_context_window
+    from codehelper.services.model import (
+        get_provider,
+        refuse_disabled_provider,
+        resolve_shape,
+    )
+    from codehelper.services.secrets import (
+        DEFAULT_PROFILE,
+        ResolvedToken,
+        cache_freshly_typed_token,
+        credential_for,
+        resolve_token,
+    )
+    from codehelper.services.state import disabled_providers
+
+    # --- guards (the rename precedent) -----------------------------------
+    if not _is_usable_alias(alias):
+        raise CodeHelperError(f"invalid wrapper name: {alias}")
+    wrapper_path = paths.script_for(alias)
+    if not wrapper_path.exists():
+        raise CodeHelperError(f"wrapper not found: {wrapper_path}")
+    if not is_managed(paths, alias):
+        raise CodeHelperError(f"refusing to edit unmanaged file {wrapper_path}")
+    old = spec_from_installed(paths, alias)
+    if old is None:
+        # Distinguish a corrupt marker from a SUSPENDED provider: the marker
+        # parses fine, but the recorded pairing has no shape any more, so
+        # the reconstruction fails. rename's "not recognisable" wording
+        # would lie about a gemini-style wrapper (#74).
+        fields = _marker_fields(paths, alias)
+        suspended: Provider | None = None
+        if fields.get("provider"):
+            try:
+                candidate = get_provider_for_legacy_read(fields["provider"])
+            except CodeHelperError:
+                candidate = None
+            if candidate is not None and candidate.suspended:
+                suspended = candidate
+        if suspended is not None:
+            raise CodeHelperError(
+                f"provider {suspended.name} is suspended — edit is "
+                f"unavailable until it is unsuspended"
+            )
+        raise CodeHelperError(
+            f"cannot edit {wrapper_path}: its marker is not recognisable"
+        )
+
+    if base_url is not None and provider is None:
+        raise CodeHelperError("--base-url requires --provider")
+    if want_secret is not None and provider is None:
+        # The auth override is data applied to the provider object; with no
+        # provider axis in play the CLI never offers it, so an explicit
+        # combination that makes no sense refuses rather than half-apply.
+        raise CodeHelperError("--auth requires --provider")
+
+    # --- provider resolution ---------------------------------------------
+    switching = provider is not None and provider != old.provider.name
+    if provider is not None and switching:
+        provider_obj = get_provider(provider)
+    else:
+        provider_obj = old.provider
+    # The disable gate: the provider being KEPT is gated (in-place editing
+    # of a retired backend — enable first); the provider being switched TO
+    # is gated; a wrapper that outlived a disable may still be edited ONTO
+    # an enabled provider — the old provider is not consulted then.
+    refuse_disabled_provider(provider_obj, disabled_providers(paths))
+    if want_secret is not None:
+        provider_obj = with_auth(provider_obj, want_secret)
+    if base_url is not None:
+        provider_obj = with_base_url(provider_obj, base_url)
+
+    profile = (
+        profile_name if (switching or profile_name is not None) else old.profile_name
+    )
+
+    # --- shape choice ------------------------------------------------------
+    if switching:
+        preferred = (
+            old.shape if old.shape in (old.agent.shapes & provider_obj.shapes) else None
+        )
+    else:
+        preferred = old.shape
+    target_shape = resolve_shape(old.agent, provider_obj, preferred=preferred)
+    shape_changed = target_shape is not old.shape
+
+    # --- axis merges -------------------------------------------------------
+    model_edited = not isinstance(model, _Unset)
+    new_model = old.model if isinstance(model, _Unset) else (model or "")
+    tiers_edited = not isinstance(tier_overrides, _Unset)
+    subagent_edited = not isinstance(subagent_model, _Unset)
+    effort_edited = not isinstance(effort, _Unset)
+
+    if isinstance(tier_overrides, _Unset):
+        tiers = old.tier_models
+    elif tier_overrides is None:
+        tiers = None  # reset-to-uniform signal, resolved below
+    else:
+        unknown = set(tier_overrides) - {"haiku", "sonnet", "opus"}
+        if unknown:
+            raise CodeHelperError(f"unknown tier(s): {', '.join(sorted(unknown))}")
+        base = (
+            old.tier_models
+            if old.tier_models is not None
+            else TierModels.uniform(new_model)
+        )
+        tiers = replace(base, **tier_overrides)
+
+    subagent = (
+        old.subagent_model if isinstance(subagent_model, _Unset) else subagent_model
+    )
+    effort_value = old.effort if isinstance(effort, _Unset) else effort
+
+    if target_shape is ConfigShape.ANTHROPIC_ENV:
+        if model_edited:
+            # The uniform-reset rule (spec_from_preset --model parity): all
+            # three tiers and a set subagent follow the new model.
+            tiers = TierModels.uniform(new_model)
+            if subagent is not None and not subagent_edited:
+                subagent = new_model
+        if tiers is None:
+            tiers = TierModels.uniform(new_model)
+    else:
+        # Axes the target shape cannot carry: auto-drop what the old spec
+        # carried (the shape change is doing this, not the user), refuse
+        # what was explicitly aimed here. Both land in ``changed`` either
+        # way — the shape-change notice composes from that.
+        if tiers is not None:
+            if tiers_edited:
+                raise CodeHelperError("--tier applies to anthropic-env wrappers")
+            tiers = None
+        if subagent is not None:
+            if subagent_edited:
+                raise CodeHelperError(
+                    "--subagent-model applies to anthropic-env wrappers"
+                )
+            subagent = None
+    if effort_value is not None and target_shape is not ConfigShape.OPENAI_TOML:
+        if effort_edited:
+            pass  # build_spec's shape gate raises with its own message
+        else:
+            effort_value = None
+
+    # --- context window ----------------------------------------------------
+    if isinstance(context_window, _Unset):
+        # Recorded answers are per-MODEL data (state.json keys on the model):
+        # a changed covered set resets the answer and re-resolves below;
+        # an untouched set keeps the recorded answer verbatim — re-running
+        # the resolver would drop a recorded explicit answer for a
+        # catalog-known model (the #82 rule).
+        window_set_changed = (
+            model_edited or tiers_edited or subagent_edited or shape_changed
+        )
+        ctx_value: int | None = None if window_set_changed else old.context_window
+        ctx_reresolve = window_set_changed
+    else:
+        ctx_value = context_window
+        ctx_reresolve = False
+
+    new_spec = build_spec(
+        agent=old.agent,
+        provider=provider_obj,
+        model=new_model,
+        alias=alias,
+        shape=preferred,
+        tier_models=tiers,
+        subagent_model=subagent,
+        profile_name=profile,
+        context_window=ctx_value,
+        effort=effort_value,
+    )
+    if ctx_reresolve:
+        resolved_ctx = resolve_context_window(
+            paths, new_spec.window_models, interactive=not dry_run
+        )
+        if resolved_ctx is not None:
+            new_spec = replace(new_spec, context_window=resolved_ctx)
+
+    # --- token (LAST: a bad combination must never prompt for a secret) ----
+    resolved: ResolvedToken | None = None
+    if new_spec.auth != "secret":
+        token_value = new_spec.auth_value
+    elif token is not None:
+        if not token:
+            raise CodeHelperError("no token entered — aborting")
+        token_value = token
+    elif not switching:
+        recovered = token_from_installed(paths, alias, new_spec.provider.name)
+        if recovered:
+            token_value = recovered
+        elif dry_run:
+            token_value = (
+                credential_for(
+                    paths, new_spec.provider.name, profile or DEFAULT_PROFILE
+                )
+                or os.environ.get(new_spec.token_env_var)
+                or ""
+            )
+        else:
+            resolved = resolve_token(
+                env_var=new_spec.token_env_var,
+                prompt=f"{new_spec.provider.name} token ({new_spec.token_env_var}): ",
+                paths=paths,
+                provider_name=new_spec.provider.name,
+                profile_name=profile,
+                base_url_policy=provider_obj.base_url_policy,
+                getpass_fn=getpass_fn,
+            )
+            token_value = resolved.value
+    elif dry_run:
+        token_value = (
+            credential_for(paths, new_spec.provider.name, profile or DEFAULT_PROFILE)
+            or os.environ.get(new_spec.token_env_var)
+            or ""
+        )
+    else:
+        resolved = resolve_token(
+            env_var=new_spec.token_env_var,
+            prompt=f"{new_spec.provider.name} token ({new_spec.token_env_var}): ",
+            paths=paths,
+            provider_name=new_spec.provider.name,
+            profile_name=profile,
+            base_url_policy=provider_obj.base_url_policy,
+            getpass_fn=getpass_fn,
+        )
+        token_value = resolved.value
+    if new_spec.auth == "secret" and not token_value:
+        raise CodeHelperError(
+            f"cannot resolve a token non-interactively under --dry-run — "
+            f"set {new_spec.token_env_var} or pass --token-stdin"
+        )
+
+    # --- install at the SAME alias -----------------------------------------
+    # install_wrapper writes the companion FIRST and the on-PATH wrapper
+    # LAST, so an interrupted edit leaves the OLD wrapper authoritative and
+    # a retry converges without extra guards — that ordering is this verb's
+    # retry story (the analogue of rename's adopt-identical-destination
+    # guard); do not reorder the plan.
+    wrote = install_wrapper(
+        paths,
+        new_spec,
+        token=token_value,
+        dry_run=dry_run,
+        force=force,
+        confirm=confirm,
+    )
+    if resolved is not None:
+        cache_freshly_typed_token(
+            paths,
+            new_spec.provider.name,
+            token_value,
+            profile_name=profile or DEFAULT_PROFILE,
+            source=resolved.source,
+            dry_run=dry_run,
+        )
+
+    changed: list[str] = []
+    if provider_obj != old.provider:
+        changed.append("provider")
+    if new_spec.model != old.model:
+        changed.append("model")
+    if new_spec.tier_models != old.tier_models:
+        changed.append("tiers")
+    if new_spec.subagent_model != old.subagent_model:
+        changed.append("subagent")
+    if new_spec.effort != old.effort:
+        changed.append("effort")
+    if new_spec.context_window != old.context_window:
+        changed.append("context_window")
+    return EditWrapperResult(
+        old_spec=old,
+        spec=new_spec,
+        changed=tuple(changed),
+        shape_changed=shape_changed,
+        wrote=wrote,
+    )
 
 
 def rename_provider_profile(
