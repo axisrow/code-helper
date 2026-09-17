@@ -90,9 +90,13 @@ def _marker(spec: WrapperSpec) -> str:
     # a catalog-derived window is re-derivable, and recording it would churn
     # every already-installed known-model wrapper's marker (the #82 rule).
     ctx = f", ctx={spec.context_window}" if spec.context_window is not None else ""
+    # effort continues the same append-only rule (issue #100): conditional,
+    # after ctx, so a pre-#100 marker's bytes never move. Only ever set for
+    # the OPENAI_TOML shape — build_spec refuses it everywhere else.
+    effort = f", effort={spec.effort}" if spec.effort else ""
     return (
         f"{MARKER_PREFIX} (agent={spec.agent.name}, "
-        f"provider={spec.provider.name}, shape={spec.shape.value}{auth}{profile}{ctx})"
+        f"provider={spec.provider.name}, shape={spec.shape.value}{auth}{profile}{ctx}{effort})"
     )
 
 
@@ -490,6 +494,12 @@ def openai_toml_body(spec: WrapperSpec) -> str:
     ]
     if (window := _declared_window(spec)) is not None:
         lines.append(f"model_context_window = {window}\n")
+    # Conditional, emitted with the other optional declarations (issue #100):
+    # an effort-less profile must stay byte-identical to the pre-#100 output,
+    # so the ownership guard's byte comparison keeps matching installed
+    # wrappers that never carried the key.
+    if spec.effort is not None:
+        lines.append(f'model_reasoning_effort = "{toml_string(spec.effort)}"\n')
     lines += [
         "\n",
         f"[model_providers.{table}]\n",

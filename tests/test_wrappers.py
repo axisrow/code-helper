@@ -41,6 +41,7 @@ from codehelper.services.spec import (
 from codehelper.services.wrappers import (
     WRAPPERS,
     discover_managed,
+    edit_wrapper,
     get_spec,
     install_wrapper,
     is_installed,
@@ -2846,6 +2847,153 @@ def test_spec_from_installed_returns_none_on_a_negative_ctx(tmp_path):
     assert spec_from_installed(paths, "mystery") is None
 
 
+# --------------------------------------------------------------------------- #
+# effort — the reasoning-effort axis for the OPENAI_TOML shape (issue #100)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_marker_records_effort_only_when_set():
+    """``effort=`` appears ONLY for a set value — and rides LAST, after
+    ``ctx=``, so every pre-#100 marker keeps its exact bytes."""
+    spec = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+        effort="high",
+    )
+    assert _marker(spec).endswith("effort=high)")
+
+    plain = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+    )
+    assert "effort=" not in _marker(plain)
+
+
+@pytest.mark.unit
+def test_render_without_effort_is_byte_identical():
+    """The #82 golden rule, restated for #100: an effort-less codex wrapper
+    renders EXACTLY the pre-#100 body — no SKIP-path churn for anything
+    already installed."""
+    plain = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+    )
+    explicit_none = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+        effort=None,
+    )
+    assert openai_toml_body(plain) == openai_toml_body(explicit_none)
+    assert render_script(plain, _LITERAL_TOKEN) == render_script(
+        explicit_none, _LITERAL_TOKEN
+    )
+
+
+@pytest.mark.unit
+def test_openai_toml_body_writes_model_reasoning_effort_when_set():
+    """The companion profile carries ``model_reasoning_effort`` when — and
+    only when — the spec records an effort; clearing it removes the key
+    again (our field, our cleanup)."""
+    spec = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+        effort="high",
+    )
+    body = openai_toml_body(spec)
+    assert 'model_reasoning_effort = "high"' in body
+
+    cleared = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+        effort=None,
+    )
+    assert "model_reasoning_effort" not in openai_toml_body(cleared)
+
+
+@pytest.mark.unit
+def test_build_spec_refuses_an_unknown_effort():
+    """Codex hard-rejects unknown ``model_reasoning_effort`` values at config
+    deserialization, so an unlisted value must fail here — before anything
+    is rendered (the ``wire_api`` precedent)."""
+    with pytest.raises(CodeHelperError, match="unusable reasoning effort"):
+        build_spec(
+            agent="codex",
+            provider="ollama-direct",
+            model="glm-5.2:cloud",
+            alias="glm-codex",
+            effort="maximum",
+        )
+
+
+@pytest.mark.unit
+def test_build_spec_refuses_effort_outside_the_toml_shape():
+    """effort is an OPENAI_TOML-only axis: no other shape has a surface to
+    declare it on. A shape check — claude × ollama-direct resolves to the
+    env shape and must refuse."""
+    with pytest.raises(CodeHelperError, match="openai-toml"):
+        build_spec(
+            agent="claude",
+            provider="ollama-direct",
+            model="glm-5.3",
+            alias="glm-claude",
+            effort="high",
+        )
+
+
+@pytest.mark.integration
+def test_spec_from_installed_honors_a_recorded_effort(tmp_path):
+    """A wrapper whose marker records effort= comes back with that effort —
+    the chipset and the edit flow consume this reconstruction."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+        effort="high",
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+
+    recovered = spec_from_installed(paths, "glm-codex")
+    assert recovered is not None
+    assert recovered.effort == "high"
+
+
+@pytest.mark.integration
+def test_spec_from_installed_returns_none_on_garbage_effort(tmp_path):
+    """An effort value this build no longer lists fails CLOSED — None, the
+    same answer as any other unrecognised marker value (the ctx= bucket)."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+        effort="high",
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+    script = paths.script_for("glm-codex")
+    script.write_text(
+        script.read_text(encoding="utf-8").replace("effort=high", "effort=maximum"),
+        encoding="utf-8",
+    )
+
+    assert spec_from_installed(paths, "glm-codex") is None
+
+
 @pytest.mark.integration
 def test_add_launch_shape_unknown_model_prompts_and_declares(tmp_path):
     """Review round 3 (PR #84): single-model shapes (OLLAMA_LAUNCH) emit a
@@ -3403,3 +3551,548 @@ def test_rename_provider_profile_dry_run_writes_nothing(tmp_path):
 
     assert secrets.credential_for(paths, "zai", "work") == _SECRET_TOKEN
     assert profile_from_installed(paths, "glm-work") == "work"
+
+
+# --------------------------------------------------------------------------- #
+# edit_wrapper — edit an installed wrapper's axes in place (issue #100)
+# --------------------------------------------------------------------------- #
+
+
+def _no_prompt(_prompt: str) -> str:
+    """A getpass stand-in that fails the test if the edit ever prompts."""
+    raise AssertionError("edit_wrapper must not prompt here")
+
+
+@pytest.mark.integration
+def test_edit_model_in_place_resets_tiers_and_subagent(tmp_path, monkeypatch):
+    """The uniform-reset rule (spec_from_preset --model parity): editing the
+    model of an env-shaped wrapper rewrites ALL three tier exports and a set
+    subagent — carried tiers winning in build_spec would make the headline
+    edit a silent no-op. Same-provider token recovery means NO prompt."""
+    monkeypatch.setattr("getpass.getpass", _no_prompt)
+    # The covered model set changes → the recorded ctx resets and
+    # re-resolves; the menu answer ("0": no declaration) must never prompt.
+    monkeypatch.setattr(
+        "codehelper.cli.menu.select_from_menu", lambda _items, **_kw: "0"
+    )
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="zai",
+        model="glm-5.3",
+        alias="glm",
+        subagent_model="glm-5.3",
+    )
+    install_wrapper(paths, spec, token=_SECRET_TOKEN)
+
+    result = edit_wrapper(paths, "glm", model="mystery-3b")
+
+    assert result.wrote
+    assert "model" in result.changed
+    assert "subagent" in result.changed
+    assert result.spec.tier_models == TierModels.uniform("mystery-3b")
+    assert result.spec.subagent_model == "mystery-3b"
+    body = paths.script_for("glm").read_text(encoding="utf-8")
+    assert body.count("export ANTHROPIC_DEFAULT_HAIKU_MODEL='mystery-3b'") == 1
+    assert body.count("export ANTHROPIC_DEFAULT_SONNET_MODEL='mystery-3b'") == 1
+    assert body.count("export ANTHROPIC_DEFAULT_OPUS_MODEL='mystery-3b'") == 1
+    assert "export CLAUDE_CODE_SUBAGENT_MODEL='mystery-3b'" in body
+
+
+@pytest.mark.integration
+def test_edit_single_tier_merges_onto_the_recorded_tiers(tmp_path, monkeypatch):
+    """A per-tier override merges field-wise; the wrapper's single model (the
+    sonnet tier) is unchanged, so ``changed`` names only the tier axis."""
+    monkeypatch.setattr(
+        "codehelper.cli.menu.select_from_menu", lambda _items, **_kw: "0"
+    )
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="zai",
+        model="glm-5.3",
+        alias="glm",
+    )
+    install_wrapper(paths, spec, token=_SECRET_TOKEN)
+
+    result = edit_wrapper(paths, "glm", tier_overrides={"haiku": "mystery-3b"})
+
+    assert result.changed == ("tiers",)
+    assert result.spec.tier_models == TierModels(
+        haiku="mystery-3b", sonnet="glm-5.3", opus="glm-5.3"
+    )
+    body = paths.script_for("glm").read_text(encoding="utf-8")
+    assert "export ANTHROPIC_DEFAULT_HAIKU_MODEL='mystery-3b'" in body
+    assert "export ANTHROPIC_DEFAULT_SONNET_MODEL='glm-5.3'" in body
+
+
+@pytest.mark.integration
+def test_edit_mixed_tiers_suppress_window_and_recorded_ctx(tmp_path, monkeypatch):
+    """A mixed-tier result suppresses the window declaration per the
+    existing rule — and the recorded ctx= answer for the OLD model set is
+    NOT carried to the new one: the covered set changed, the answer resets
+    (recorded answers are per-model data)."""
+    # mystery-3b is catalog-unknown: the reset re-resolve asks once; "0" is
+    # a real answer that then DISAGREES with glm-5.3's catalog 1M — the
+    # mixed set honestly declares nothing.
+    monkeypatch.setattr(
+        "codehelper.cli.menu.select_from_menu", lambda _items, **_kw: "0"
+    )
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery",
+        context_window=750_000,
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+
+    result = edit_wrapper(paths, "mystery", tier_overrides={"haiku": "glm-5.3"})
+
+    body = paths.script_for("mystery").read_text(encoding="utf-8")
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in body
+    assert "ctx=" not in body
+    assert result.spec.context_window is None
+
+
+@pytest.mark.integration
+def test_edit_explicit_context_window_wins(tmp_path):
+    """An explicitly given window always wins — including over a reset."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="mystery-3b",
+        alias="mystery",
+        context_window=750_000,
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+
+    result = edit_wrapper(
+        paths,
+        "mystery",
+        tier_overrides={"haiku": "glm-5.3"},
+        context_window=250_000,
+    )
+
+    assert result.spec.context_window == 250_000
+    body = paths.script_for("mystery").read_text(encoding="utf-8")
+    assert "export CLAUDE_CODE_MAX_CONTEXT_TOKENS='250000'" in body
+
+
+@pytest.mark.integration
+def test_edit_untouched_axes_keep_their_recorded_values(tmp_path, monkeypatch):
+    """The sentinel pin: a model-only edit preserves a recorded effort AND a
+    recorded ctx — an absent flag must never mean "clear". Both models are
+    catalog-known, so the reset re-resolve is a pure-catalog tie (no ask,
+    no explicit ctx written)."""
+    monkeypatch.setattr("getpass.getpass", _no_prompt)
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+        effort="high",
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+
+    result = edit_wrapper(paths, "glm-codex", model="glm-5.3")
+
+    assert result.changed == ("model",)
+    assert result.spec.effort == "high"
+    body = paths.codex_config_for("glm-codex").read_text(encoding="utf-8")
+    assert 'model_reasoning_effort = "high"' in body
+    assert 'model = "glm-5.3"' in body
+
+
+@pytest.mark.integration
+def test_edit_effort_round_trip_on_a_toml_wrapper(tmp_path):
+    """effort= rides the marker and model_reasoning_effort the companion;
+    clearing removes both (our field, our cleanup)."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+
+    result = edit_wrapper(paths, "glm-codex", effort="high")
+
+    assert result.changed == ("effort",)
+    body = paths.script_for("glm-codex").read_text(encoding="utf-8")
+    assert "effort=high)" in body
+    assert 'model_reasoning_effort = "high"' in paths.codex_config_for(
+        "glm-codex"
+    ).read_text(encoding="utf-8")
+
+    cleared = edit_wrapper(paths, "glm-codex", effort=None)
+
+    assert cleared.changed == ("effort",)
+    body = paths.script_for("glm-codex").read_text(encoding="utf-8")
+    assert "effort=" not in body
+    assert "model_reasoning_effort" not in paths.codex_config_for(
+        "glm-codex"
+    ).read_text(encoding="utf-8")
+
+
+@pytest.mark.integration
+def test_edit_refuses_subagent_outside_the_env_shape(tmp_path):
+    """``--subagent-model`` on a non-env target is refused: the axis would
+    never render and only silently corrupt the window derivation."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+
+    with pytest.raises(CodeHelperError, match="anthropic-env"):
+        edit_wrapper(paths, "glm-codex", subagent_model="sub-m")
+
+
+@pytest.mark.integration
+def test_edit_provider_change_uses_the_supplied_token(tmp_path):
+    """A provider switch resolves the credential through the same channel as
+    add; the old provider's recovered token is never carried across."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+
+    with pytest.raises(CodeHelperError):
+        # codex × zai share no shape — refused before anything interactive.
+        edit_wrapper(paths, "glm-codex", provider="zai")
+
+    claude = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="glm-5.3",
+        alias="glm-claude",
+    )
+    install_wrapper(paths, claude, token=_LITERAL_TOKEN)
+    result = edit_wrapper(paths, "glm-claude", provider="zai", token=_SECRET_TOKEN)
+
+    assert result.changed == ("provider",)
+    assert result.spec.provider.name == "zai"
+    body = paths.script_for("glm-claude").read_text(encoding="utf-8")
+    assert _SECRET_TOKEN in body
+    assert "provider=zai" in body
+
+
+@pytest.mark.integration
+def test_edit_provider_change_unresolvable_token_writes_nothing(tmp_path, monkeypatch):
+    """No env token, no cache, an empty prompt → CodeHelperError and the
+    wrapper on disk is byte-identical (fail closed BEFORE any write)."""
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    import codehelper.services.secrets as secrets_module
+
+    real_resolve_token = secrets_module.resolve_token
+
+    def _empty_prompt(*args, **kwargs):
+        kwargs["getpass_fn"] = lambda _p: ""
+        return real_resolve_token(*args, **kwargs)
+
+    monkeypatch.setattr("codehelper.services.secrets.resolve_token", _empty_prompt)
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+    claude = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="glm-5.3",
+        alias="glm-claude",
+    )
+    install_wrapper(paths, claude, token=_LITERAL_TOKEN)
+    before = paths.script_for("glm-claude").read_text(encoding="utf-8")
+
+    with pytest.raises(CodeHelperError):
+        edit_wrapper(paths, "glm-claude", provider="zai")
+
+    assert paths.script_for("glm-claude").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.integration
+def test_edit_dry_run_writes_nothing_and_fails_closed_on_a_secret_switch(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    monkeypatch.setattr("getpass.getpass", _no_prompt)
+    paths = Paths.from_home(tmp_path)
+    claude = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="glm-5.3",
+        alias="glm-claude",
+    )
+    install_wrapper(paths, claude, token=_LITERAL_TOKEN)
+    before = paths.script_for("glm-claude").read_text(encoding="utf-8")
+
+    with pytest.raises(CodeHelperError, match="non-interactively"):
+        edit_wrapper(paths, "glm-claude", provider="zai", dry_run=True)
+
+    assert paths.script_for("glm-claude").read_text(encoding="utf-8") == before
+
+    preview = edit_wrapper(paths, "glm-claude", model="mystery-3b", dry_run=True)
+
+    assert preview.wrote  # "would write" — but:
+    assert paths.script_for("glm-claude").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.integration
+def test_edit_cross_shape_rederive_is_surfaced(tmp_path):
+    """A claude wrapper installed as `ollama launch`, edited onto zai:
+    resolve_shape re-derives the env shape — mechanism change reported,
+    tiers synthesized uniform (the issue's stated default)."""
+    paths = Paths.from_home(tmp_path)
+    launch = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="glm-5.3",
+        alias="glm-claude",
+        shape=ConfigShape.OLLAMA_LAUNCH,
+    )
+    install_wrapper(paths, launch, token=_LITERAL_TOKEN)
+
+    result = edit_wrapper(paths, "glm-claude", provider="zai", token=_SECRET_TOKEN)
+
+    assert result.shape_changed
+    assert result.spec.shape is ConfigShape.ANTHROPIC_ENV
+    assert result.spec.tier_models == TierModels.uniform("glm-5.3")
+    assert "export ANTHROPIC_AUTH_TOKEN=" in paths.script_for("glm-claude").read_text(
+        encoding="utf-8"
+    )
+
+
+@pytest.mark.integration
+def test_edit_to_a_different_profile_resolves_that_profiles_token(
+    tmp_path, monkeypatch
+):
+    """A --profile change must NOT keep the old embedded token: the marker
+    names the new profile, so the body must authenticate with ITS token
+    (the wrong-tenant bug class Codex's adversarial review flagged)."""
+    import codehelper.services.secrets as secrets
+
+    monkeypatch.setattr("getpass.getpass", _no_prompt)
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "zai", "sk-one", "work1")
+    secrets.save_credential(paths, "zai", "sk-two", "work2")
+    spec = build_spec(
+        agent="claude",
+        provider="zai",
+        model="glm-5.3",
+        alias="glm",
+        profile_name="work1",
+    )
+    install_wrapper(paths, spec, token="sk-one")
+
+    result = edit_wrapper(paths, "glm", profile_name="work2")
+
+    assert result.spec.profile_name == "work2"
+    body = paths.script_for("glm").read_text(encoding="utf-8")
+    assert "sk-two" in body
+    assert "sk-one" not in body
+
+
+@pytest.mark.integration
+def test_edit_to_a_missing_profile_fails_closed(tmp_path, monkeypatch):
+    """An unknown --profile cannot fall back to the old embedded token: with
+    no cache entry and no prompt answer, the edit refuses and the wrapper is
+    byte-untouched."""
+    import codehelper.services.secrets as secrets
+
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+
+    def _empty_prompt(*args, **kwargs):
+        kwargs["getpass_fn"] = lambda _p: ""
+        return real_resolve_token(*args, **kwargs)
+
+    real_resolve_token = secrets.resolve_token
+    monkeypatch.setattr("codehelper.services.secrets.resolve_token", _empty_prompt)
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "zai", "sk-one", "work1")
+    spec = build_spec(
+        agent="claude",
+        provider="zai",
+        model="glm-5.3",
+        alias="glm",
+        profile_name="work1",
+    )
+    install_wrapper(paths, spec, token="sk-one")
+    before = paths.script_for("glm").read_text(encoding="utf-8")
+
+    with pytest.raises(CodeHelperError):
+        edit_wrapper(paths, "glm", profile_name="ghost")
+
+    assert paths.script_for("glm").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.integration
+def test_edit_supplied_token_is_cached_under_the_target_profile(tmp_path):
+    """--profile + a supplied token persist the credential under THAT
+    profile (add's --token-stdin parity) — the next edit/rotation finds it."""
+    import codehelper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="zai",
+        model="glm-5.3",
+        alias="glm",
+        profile_name="work1",
+    )
+    install_wrapper(paths, spec, token="sk-one")
+
+    edit_wrapper(paths, "glm", profile_name="work2", token="sk-two")
+
+    assert secrets.credential_for(paths, "zai", "work2") == "sk-two"
+    body = paths.script_for("glm").read_text(encoding="utf-8")
+    assert "sk-two" in body
+
+
+@pytest.mark.integration
+def test_edit_model_with_tier_overrides_composes(tmp_path, monkeypatch):
+    """A model edit plus explicit per-field overrides COMPOSE: uniform on the
+    new model, then the override on top — never a silent drop (the TUI's
+    model and tier rows are independent and can be drafted in one pass)."""
+    # mystery-3b is catalog-unknown: the ctx re-resolve asks once, "0" answers.
+    monkeypatch.setattr(
+        "codehelper.cli.menu.select_from_menu", lambda _items, **_kw: "0"
+    )
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="zai",
+        model="glm-5.3",
+        alias="glm",
+    )
+    install_wrapper(paths, spec, token="sk-one")
+
+    result = edit_wrapper(
+        paths, "glm", model="mystery-3b", tier_overrides={"haiku": "glm-5.2:cloud"}
+    )
+
+    assert result.spec.tier_models == TierModels(
+        haiku="glm-5.2:cloud", sonnet="mystery-3b", opus="mystery-3b"
+    )
+
+
+@pytest.mark.integration
+def test_edit_byte_identical_edit_reports_no_changes(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+
+    result = edit_wrapper(paths, "glm-codex", model="glm-5.2:cloud")
+
+    assert result.changed == ()
+    assert not result.wrote
+
+
+@pytest.mark.integration
+def test_edit_own_provider_disabled_gate(tmp_path, monkeypatch):
+    """The kept provider is gated (in-place editing of a retired backend);
+    a wrapper that outlived a disable can still be edited ONTO an enabled
+    provider."""
+    monkeypatch.setattr(
+        "codehelper.services.state.disabled_providers",
+        lambda _paths: frozenset({"ollama-direct"}),
+    )
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+
+    with pytest.raises(CodeHelperError, match="disabled — enable it first"):
+        edit_wrapper(paths, "glm-codex", model="other-m")
+
+    # codex × zai share no shape, so the switch-onward case needs a claude
+    # wrapper instead.
+    claude = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="glm-5.3",
+        alias="glm-claude",
+    )
+    install_wrapper(paths, claude, token=_LITERAL_TOKEN)
+    result = edit_wrapper(paths, "glm-claude", provider="zai", token=_SECRET_TOKEN)
+    assert result.spec.provider.name == "zai"
+
+
+@pytest.mark.integration
+def test_edit_a_suspended_provider_wrapper_gets_an_honest_message(tmp_path):
+    """A marker naming a suspended provider (gemini, #74) reconstructs to
+    None — the refusal must say WHY, not claim the marker is unreadable."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+    script = paths.script_for("glm-codex")
+    script.write_text(
+        script.read_text(encoding="utf-8").replace(
+            "provider=ollama-direct", "provider=gemini"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CodeHelperError, match="suspended"):
+        edit_wrapper(paths, "glm-codex", model="other-m")
+
+
+@pytest.mark.integration
+def test_edit_foreign_companion_refuses_then_confirms(tmp_path):
+    """A foreign file at the companion slot refuses with confirm=None (the
+    non-interactive fail-fast) and writes once confirmed. The foreign file
+    must still parse a model — the wrapper's model LIVES in the companion —
+    but carries no ownership marker, which is what the install guard keys
+    off."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+    companion = paths.codex_config_for("glm-codex")
+    companion.write_text('model = "foreign-m"\n', encoding="utf-8")
+    # The explicit context_window skips the interactive re-resolve — the
+    # point here is the foreign-file guard, not the window question.
+    kwargs = {"model": "other-m", "context_window": 0}
+
+    with pytest.raises(CodeHelperError):
+        edit_wrapper(paths, "glm-codex", **kwargs)
+
+    result = edit_wrapper(paths, "glm-codex", confirm=lambda _p: True, **kwargs)
+
+    assert result.wrote
+    assert 'model = "other-m"' in companion.read_text(encoding="utf-8")
+
+
+@pytest.mark.integration
+def test_edit_retry_converges_after_an_interrupted_companion_write(
+    tmp_path, monkeypatch
+):
+    """install_wrapper writes the companion FIRST and the wrapper LAST, so
+    the interrupted half-state (new companion, old wrapper) converges on a
+    retry — that ordering is this verb's retry story; do not reorder it."""
+    monkeypatch.setattr(
+        "codehelper.cli.menu.select_from_menu", lambda _items, **_kw: "0"
+    )
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+    interrupted = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="other-m",
+        alias="glm-codex",
+    )
+    from codehelper.backends._atomic import atomic_write
+
+    atomic_write(
+        paths.codex_config_for("glm-codex"),
+        openai_toml_body(interrupted),
+        mode=0o600,
+    )
+
+    result = edit_wrapper(paths, "glm-codex", model="other-m")
+
+    assert result.wrote
+    assert 'model = "other-m"' in paths.codex_config_for("glm-codex").read_text(
+        encoding="utf-8"
+    )
+    assert "exec codex --profile 'glm-codex'" in paths.script_for(
+        "glm-codex"
+    ).read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_edit_refuses_missing_and_unmanaged_targets(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    with pytest.raises(CodeHelperError, match="wrapper not found"):
+        edit_wrapper(paths, "ghost")
+
+    foreign = paths.script_for("foreign")
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    with pytest.raises(CodeHelperError, match="unmanaged"):
+        edit_wrapper(paths, "foreign")

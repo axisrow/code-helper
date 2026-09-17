@@ -31,17 +31,20 @@ from dataclasses import dataclass
 from typing import Any
 
 from codehelper.errors import CodeHelperError
+from codehelper.services.wrappers import UNSET, Unset
 
 __all__ = [
     "AddRequest",
     "DisableRequest",
     "EditTokenRequest",
+    "EditWrapperRequest",
     "EnableRequest",
     "ProxyRequest",
     "RemoveRequest",
     "RenameRequest",
     "SetDefaultRequest",
     "SwitchRequest",
+    "UNSET",
 ]
 
 
@@ -234,6 +237,79 @@ class RenameRequest:
                 debug=bool(_g(args, "debug", False)),
             )
         raise CodeHelperError(f"unknown rename kind: {kind}")
+
+
+def _tiers_from_flags(raw: list[str] | None) -> dict[str, str] | Unset:
+    """Parse accumulated ``--tier TIER=MODEL`` flags into a per-field dict.
+
+    Absent flags are :data:`UNSET` (keep every tier as recorded) — ``None``
+    is reserved for the TUI's explicit "back to uniform" choice.
+    """
+    if not raw:
+        return UNSET
+    overrides: dict[str, str] = {}
+    for item in raw:
+        key, sep, value = item.partition("=")
+        if not sep or not key.strip() or not value.strip():
+            raise CodeHelperError(f"--tier expects TIER=MODEL, got {item!r}")
+        overrides[key.strip()] = value.strip()
+    return overrides
+
+
+@dataclass(frozen=True)
+class EditWrapperRequest:
+    """Inputs to ``_handle_edit_wrapper`` (the ``edit`` subcommand and the
+    TUI's edit screen, issue #100).
+
+    Every editable axis is three-state (:class:`Unset` keep / ``None``
+    clear / a value set) so an edit can never strip a recorded answer it
+    was not asked about. ``tier_overrides`` is per-field: the TUI's tier
+    picker hands one key at a time, ``--tier TIER=MODEL`` accumulates, and
+    ``None`` is the "back to uniform" choice. ``context_window`` rides RAW
+    (an int from the TUI, ``"none"``/digits from the CLI) — the handler
+    owns :func:`parser._parse_context_window`, as ``add`` does.
+    """
+
+    alias: str
+    provider: str | None = None
+    auth: str | None = None
+    model: str | None | Unset = UNSET
+    tier_overrides: dict[str, str] | None | Unset = UNSET
+    subagent_model: str | None | Unset = UNSET
+    effort: str | None | Unset = UNSET
+    context_window: int | str | None | Unset = UNSET
+    base_url: str | None = None
+    profile: str | None = None
+    token: str | None = None
+    dry_run: bool = False
+    force: bool = False
+    debug: bool = False
+
+    @classmethod
+    def from_namespace(cls, args: argparse.Namespace) -> EditWrapperRequest:
+        model = _g(args, "model", UNSET)
+        tiers = _tiers_from_flags(_g(args, "tier", None))
+        effort = _g(args, "effort", UNSET)
+        if isinstance(effort, str) and effort == "none":
+            effort = None
+        subagent = _g(args, "subagent_model", UNSET)
+        if isinstance(subagent, str) and subagent == "none":
+            subagent = None
+        return cls(
+            alias=str(_g(args, "name")),
+            provider=_g(args, "provider"),
+            auth=_g(args, "auth"),
+            model=model,
+            tier_overrides=tiers,
+            subagent_model=subagent,
+            effort=effort,
+            context_window=_g(args, "context_window", UNSET),
+            base_url=_g(args, "base_url"),
+            profile=_g(args, "profile"),
+            dry_run=bool(_g(args, "dry_run", False)),
+            force=bool(_g(args, "force", False)),
+            debug=bool(_g(args, "debug", False)),
+        )
 
 
 @dataclass(frozen=True)

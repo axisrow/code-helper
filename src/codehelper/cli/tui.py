@@ -201,7 +201,7 @@ def _hint(
         # here). `p` is named too — bound in run()'s keys, pinned against
         # `_translate_char`, never before hinted.
         hint = (
-            f"↑↓ row · ←→ chip · Enter apply · a add · e rename · t token · d delete\n"
+            f"↑↓ row · ←→ chip · Enter apply · a add · e edit · t token · d delete\n"
             f"s settings · p profiles · ? · Esc {exit_word}"
         )
     else:
@@ -2039,23 +2039,33 @@ class TuiSession:
         highlighted backend to its real preset/wrapper alias first; native
         and the trailing add chip have no token to edit.
         """
+        if value in (_ADD_AGENT, _ADD_WRAPPER):
+            # Same guard `d` carries: the action rows name no wrapper, so a
+            # focused-value leak here would look up a wrapper literally
+            # named "+ add wrapper".
+            return None
         chip = self._focused_chip(value)
         if chip is None:
             return None
         return f"token:{self._chip_name(chip)}"
 
-    def _rename_action(self, value: str) -> str | None:
-        """Return the rename action for the focused row/chip (issue #95).
+    def _edit_action(self, value: str) -> str | None:
+        """Return the edit action for the focused row/chip (issue #100).
 
         Same focused-chip resolution as :meth:`_token_action` — chipset rows
-        and action rows own nothing renameable, so they stay inert there.
+        and action rows own nothing editable, so they stay inert there. The
+        `e` verb is now the FULL editor (model/tiers/provider/effort, with
+        rename as a row inside); the Profiles screen keeps its own local `e`
+        for profile renames.
         """
+        if value in (_ADD_AGENT, _ADD_WRAPPER):
+            return None
         chip = self._focused_chip(value)
         if chip is None:
             return None
-        return f"rename:{self._chip_name(chip)}"
+        return f"edit:{self._chip_name(chip)}"
 
-    def _on_rename(self, alias: str) -> None:
+    def _on_rename(self, alias: str) -> bool:
         """`e` on a wrapper row: move the wrapper to a new alias (issue #95)."""
         from codehelper.cli.parser import _handle_rename
         from codehelper.cli.requests import RenameRequest
@@ -2065,13 +2075,13 @@ class TuiSession:
         paths = Paths.default()
         if not is_installed(paths, alias):
             self._notify("Wrapper not installed — use Add first.")
-            return
+            return False
         if not is_managed(paths, alias):
             self._notify("Refusing to rename an unmanaged wrapper file.")
-            return
+            return False
         new_name = self._read_text(f"New name for {alias}: ")
         if not new_name or new_name == alias:
-            return
+            return False
         # silent: the tee would otherwise show the service transcript live AND
         # replay it in the notify pause — the doubled output a live run hit.
         # The confirmation is gated on the handler's RESULT, not on the target
@@ -2091,6 +2101,327 @@ class TuiSession:
         )
         if renamed:
             self._notify(f"renamed wrapper {alias} -> {new_name}")
+        return renamed
+
+    # --- the edit screen (issue #100) ------------------------------------
+
+    def _run_edit(self, alias: str) -> None:
+        """`e` on a wrapper row or highlighted chip: the edit screen."""
+        from codehelper.services.paths import Paths
+        from codehelper.services.wrappers import is_installed, is_managed
+
+        paths = Paths.default()
+        if not is_installed(paths, alias):
+            self._notify("Wrapper not installed — use Add first.")
+            return
+        if not is_managed(paths, alias):
+            self._notify("Refusing to edit an unmanaged wrapper file.")
+            return
+        self._run_edit_screen(alias)
+
+    def _run_edit_screen(self, alias: str) -> None:
+        """One row per editable axis; Enter opens that axis's picker.
+
+        Which rows exist is shape-driven data (:data:`_EDIT_AXES`). The draft
+        is screen-local and the labels read ONLY the draft — the label rule:
+        menu re-evaluates labels on every redraw frame, so a label doing I/O
+        would re-read the file per frame. One ``spec_from_installed`` per
+        screen ENTRY is the whole I/O budget.
+        """
+        from codehelper.services.paths import Paths
+        from codehelper.services.wrappers import UNSET, Unset, spec_from_installed
+
+        spec = spec_from_installed(Paths.default(), alias)
+        if spec is None:
+            self._notify(f"Cannot edit {alias}: its marker is not recognisable.")
+            return
+        axes = [axis for axis in _EDIT_AXES.get(spec.shape, ()) if axis.applies(spec)]
+        if not axes:
+            self._notify(f"No editable axes for a {spec.shape.value} wrapper.")
+            return
+        draft: dict[str, object] = {
+            # Every axis starts UNSET ("keep the recorded value") — None would
+            # mean "clear"/"switch to nothing", which is never a starting point.
+            "provider": UNSET,
+            "auth": UNSET,
+            "base_url": UNSET,
+            "model": UNSET,
+            "tiers": UNSET,
+            "subagent": UNSET,
+            "effort": UNSET,
+            "ctx": UNSET,
+        }
+        while True:
+            drafted = [
+                axis
+                for axis in axes
+                if axis.key != "rename"
+                and not isinstance(draft[self._edit_draft_key(axis.key)], Unset)
+            ]
+            items = [
+                (axis.key, self._edit_axis_label(axis, spec, draft)) for axis in axes
+            ]
+            plural = "es" if len(drafted) != 1 else ""
+            apply_label = (
+                f"( apply — {len(drafted)} axis{plural} changed )"
+                if drafted
+                else "( apply )"
+            )
+            items.extend([("__apply__", apply_label), (_BACK, "Back")])
+            choice = self._pick(items, f"Edit wrapper {alias}:")
+            if choice == _BACK:
+                return
+            if choice == "__apply__":
+                if drafted and self._apply_edit(alias, draft):
+                    return
+                continue
+            axis = next(a for a in axes if a.key == choice)
+            getattr(self, axis.pick)(spec, draft)
+            if draft.get("closed"):
+                return
+
+    @staticmethod
+    def _edit_draft_key(key: str) -> str:
+        """Tier-family rows share the ONE ``tiers`` draft value (``None`` =
+        back to uniform, a dict = per-field overrides); the rest map 1:1."""
+        return "tiers" if key in ("haiku", "sonnet", "opus", "uniform") else key
+
+    @staticmethod
+    def _edit_axis_label(axis, spec, draft) -> str:
+        """``"model: glm-5.3 -> glm-5.2:cloud"`` — reads ONLY the draft."""
+        from codehelper.services.wrappers import Unset
+
+        if axis.key == "rename":
+            return "rename — move the wrapper to a new alias"
+        key = TuiSession._edit_draft_key(axis.key)
+        current = TuiSession._edit_current_value(axis.key, spec)
+        value = draft[key]
+        if isinstance(value, Unset):
+            return f"{axis.label}: {current}"
+        if key == "tiers":
+            if value is None:
+                return f"{axis.label}: {current} -> uniform"
+            shown = (
+                value.get(axis.key, current)
+                if axis.key != "uniform"
+                else "mixed (per-tier)"
+            )
+            return f"{axis.label}: {current} -> {shown}"
+        shown = "none (suppressed)" if axis.key == "ctx" and value == 0 else str(value)
+        return f"{axis.label}: {current} -> {shown}"
+
+    @staticmethod
+    def _edit_current_value(key: str, spec) -> str:
+        if key == "provider":
+            return spec.provider.name
+        if key == "model":
+            return spec.model
+        if key in ("haiku", "sonnet", "opus"):
+            return getattr(spec.tier_models, key) if spec.tier_models else "—"
+        if key == "uniform":
+            return "per-tier" if spec.tier_models is not None else "uniform"
+        if key == "subagent":
+            return spec.subagent_model or "—"
+        if key == "effort":
+            return spec.effort or "—"
+        if key == "ctx":
+            if spec.context_window is None:
+                return "catalog / unset"
+            return (
+                "none (suppressed)"
+                if spec.context_window == 0
+                else str(spec.context_window)
+            )
+        return "—"
+
+    def _edit_provider_view(self, spec, draft):
+        """The provider object + profile the pickers should see: the drafted
+        provider (auth/URL applied) when one was picked, else the recorded
+        one — so a model/tier pick after a provider change discovers against
+        the NEW endpoint."""
+        from codehelper.services.model import get_provider, with_auth, with_base_url
+        from codehelper.services.wrappers import Unset
+
+        if isinstance(draft["provider"], Unset):
+            return spec.provider, spec.profile_name
+        obj = with_auth(
+            get_provider(draft["provider"]), want_secret=draft["auth"] == "secret"
+        )
+        if draft["base_url"]:
+            obj = with_base_url(obj, draft["base_url"])
+        return obj, None
+
+    def _apply_edit(self, alias: str, draft) -> bool:
+        """Dispatch the drafted edit; True when the screen should close.
+
+        ``silent=self._chip_silent()`` — the ``_run`` rule for chip-grade
+        applies: a dry run must surface its preview, a real write is already
+        reflected by the redraw. The applied-hint is gated on the POST-edit
+        readback, not on ``wrote``: an effort-only codex edit stays applied
+        and the hint must not claim otherwise.
+        """
+        from codehelper.cli.parser import _handle_edit_wrapper
+        from codehelper.cli.requests import EditWrapperRequest
+
+        was_applied = self._edit_was_applied(alias)
+        from codehelper.services.wrappers import Unset
+
+        req = EditWrapperRequest(
+            alias=alias,
+            provider=None
+            if isinstance(draft["provider"], Unset)
+            else draft["provider"],
+            auth=None if isinstance(draft["auth"], Unset) else draft["auth"],
+            model=draft["model"],
+            tier_overrides=draft["tiers"],
+            subagent_model=draft["subagent"],
+            effort=draft["effort"],
+            context_window=draft["ctx"],
+            base_url=None
+            if isinstance(draft["base_url"], Unset)
+            else draft["base_url"],
+            dry_run=getattr(self.args, "dry_run", False),
+            debug=getattr(self.args, "debug", False),
+        )
+        wrote = self._run(_handle_edit_wrapper, req, silent=self._chip_silent())
+        if not wrote:
+            return False
+        now_applied = self._edit_was_applied(alias)
+        if (
+            was_applied is not None
+            and was_applied[1]
+            and now_applied is not None
+            and not now_applied[1]
+        ):
+            self._notify(
+                f"edited {alias} — it is no longer applied; Enter the chip to re-apply."
+            )
+        return True
+
+    def _edit_was_applied(self, alias: str) -> tuple[str, bool] | None:
+        """``(agent, applied?)`` for ``alias`` — None without a backend row.
+
+        The chip predicate consumes a FRESH spec (re-read from the file) and
+        :meth:`_refresh_active_label` re-caches the live-config readback, so
+        calling this before AND after the apply measures the real delta.
+        """
+        from codehelper.services.paths import Paths
+        from codehelper.services.wrappers import spec_from_installed
+
+        spec = spec_from_installed(Paths.default(), alias)
+        if spec is None or spec.agent.name not in _AGENT_BACKENDS:
+            return None
+        self._refresh_active_label()
+        return spec.agent.name, self._chip_is_applied(spec.agent.name, spec)
+
+    def _pick_edit_provider(self, spec, draft) -> None:
+        chosen = self._choose_add_provider(spec.agent)
+        if chosen in (_BACK, None):
+            return
+        provider, want_secret, typed_url = chosen
+        draft["provider"] = provider.name
+        draft["auth"] = "secret" if want_secret else "literal"
+        draft["base_url"] = typed_url or None
+
+    def _pick_edit_model(self, spec, draft) -> None:
+        provider_obj, profile = self._edit_provider_view(spec, draft)
+        model = self._choose_add_model(provider_obj, profile, None, spec.agent.name)
+        if model not in (_BACK, None):
+            draft["model"] = model
+
+    def _pick_edit_tier(self, spec, draft, tier: str) -> None:
+        provider_obj, profile = self._edit_provider_view(spec, draft)
+        model = self._choose_add_model(
+            provider_obj, profile, None, f"{spec.agent.name} {tier}"
+        )
+        if model in (_BACK, None):
+            return
+        tiers = draft["tiers"]
+        if isinstance(tiers, dict):
+            tiers[tier] = model
+        else:
+            draft["tiers"] = {tier: model}
+
+    def _pick_edit_haiku(self, spec, draft) -> None:
+        self._pick_edit_tier(spec, draft, "haiku")
+
+    def _pick_edit_sonnet(self, spec, draft) -> None:
+        self._pick_edit_tier(spec, draft, "sonnet")
+
+    def _pick_edit_opus(self, spec, draft) -> None:
+        self._pick_edit_tier(spec, draft, "opus")
+
+    def _pick_edit_uniform(self, spec, draft) -> None:
+        """Back to uniform tiers: the model axis carries the value."""
+        draft["tiers"] = None
+
+    def _pick_edit_subagent(self, spec, draft) -> None:
+        from codehelper.services.models_api import list_models
+        from codehelper.services.paths import Paths
+        from codehelper.services.secrets import token_for_discovery
+
+        provider_obj, profile = self._edit_provider_view(spec, draft)
+        token = token_for_discovery(Paths.default(), provider_obj, profile_name=profile)
+        result = list_models(provider_obj, token=token)
+        models = result.models or (provider_obj.known_models if not result.ok else [])
+        items: list[tuple[str, str]] = [
+            ("__unset__", "( unset — no separate subagent model )")
+        ]
+        items.extend((m, m) for m in models)
+        items.extend([("__custom__", "Enter model manually"), (_BACK, "Back")])
+        choice = self._pick(items, f"Subagent model for {provider_obj.name}:")
+        if choice == "__unset__":
+            draft["subagent"] = None
+        elif choice == "__custom__":
+            typed = self._read_text("Subagent model: ")
+            if typed:
+                draft["subagent"] = typed
+        elif choice not in (_BACK, None):
+            draft["subagent"] = choice
+
+    def _pick_edit_effort(self, spec, draft) -> None:
+        from codehelper.services.spec import REASONING_EFFORTS
+
+        items: list[tuple[str, str]] = [
+            ("__clear__", "( clear — stop managing effort )")
+        ]
+        items.extend((e, e) for e in REASONING_EFFORTS)
+        items.append((_BACK, "Back"))
+        choice = self._pick(items, "Reasoning effort (codex wrappers):")
+        if choice == "__clear__":
+            draft["effort"] = None
+        elif choice not in (_BACK, None):
+            draft["effort"] = choice
+
+    def _pick_edit_ctx(self, spec, draft) -> None:
+        from codehelper.cli.parser import _parse_context_window
+        from codehelper.errors import CodeHelperError
+
+        items = [
+            ("0", "no declaration — the agent's native fallback"),
+            ("1000000", "1,000,000 tokens (1M)"),
+            ("2000000", "2,000,000 tokens (2M)"),
+            ("__custom__", "custom…"),
+            (_BACK, "Back"),
+        ]
+        choice = self._pick(items, "Context window:")
+        if choice in (_BACK, None):
+            return
+        if choice == "__custom__":
+            typed = self._read_text("Context window in tokens (or 'none'): ")
+            if not typed:
+                return
+            try:
+                draft["ctx"] = _parse_context_window(typed)
+            except CodeHelperError as exc:
+                self._notify(f"error: {exc}")
+            return
+        draft["ctx"] = _parse_context_window(choice)
+
+    def _pick_edit_rename(self, spec, draft) -> None:
+        if self._on_rename(spec.alias):
+            # The alias moved — this screen's spec is stale; close it.
+            draft["closed"] = True
 
     def _apply_chip(self, agent_name: str) -> None:
         """Apply the highlighted chip of ``agent_name`` (Enter on its row).
@@ -2143,7 +2474,7 @@ class TuiSession:
     def _show_help(self) -> None:
         from codehelper.cli.menu import press_any_key
 
-        print("a add (agent row: scoped to it) · t token · e rename · d delete")
+        print("a add (agent row: scoped to it) · t token · e edit · d delete")
         print("+ add agent: new CLI integration · + add wrapper: any agent")
         print("p profiles · s settings (proxy, stored tokens)")
         print("←→ + Enter on the + add chip: same as a")
@@ -2181,7 +2512,7 @@ class TuiSession:
                     "?": lambda _alias: _HELP,
                     "TOKEN": self._token_action,
                     "t": self._token_action,
-                    "e": self._rename_action,
+                    "e": self._edit_action,
                     # Chipset rows (agents, proxy) and the two action rows own
                     # no wrapper file, so `d` there must be inert rather than
                     # looking for a wrapper literally named `proxy:` or
@@ -2252,8 +2583,8 @@ class TuiSession:
                     self._show_help()
                 elif choice.startswith("token:"):
                     self._on_token(choice.removeprefix("token:"))
-                elif choice.startswith("rename:"):
-                    self._on_rename(choice.removeprefix("rename:"))
+                elif choice.startswith("edit:"):
+                    self._run_edit(choice.removeprefix("edit:"))
                 elif choice.startswith("remove:"):
                     from codehelper.cli.parser import _handle_remove
                     from codehelper.cli.requests import RemoveRequest
@@ -2370,3 +2701,94 @@ def _register_agent_backends() -> None:
 
 
 _register_agent_backends()
+
+
+@dataclass(frozen=True)
+class _EditAxis:
+    """One editable axis row of the `e` edit screen (issue #100).
+
+    Which rows exist is SHAPE-driven data — never an ``if agent.name == ...``
+    branch — and ``pick`` is a METHOD NAME resolved via ``getattr`` at press
+    time (the ``_AGENT_BACKENDS`` convention, so patching the method takes
+    effect). An ollama-launch wrapper therefore gets no tier/subagent/effort
+    rows at all: its shape cannot render them — the same honest degradation
+    the chipset row implements for launch-only agents.
+    """
+
+    key: str
+    label: str
+    applies: Callable[[object], bool]
+    pick: str
+
+
+_EDIT_AXES: dict[object, tuple[_EditAxis, ...]] = {}
+
+
+def _register_edit_axes() -> None:
+    """Populate :data:`_EDIT_AXES` — the same lazy-import shape as
+    :func:`_register_agent_backends` (this module is imported on every run,
+    including ``--help``)."""
+    from codehelper.services.model import ConfigShape
+
+    def _always(_spec: object) -> bool:
+        return True
+
+    def _has_recorded_tiers(spec: object) -> bool:
+        # "back to uniform" is meaningful only when tiers differ today.
+        return getattr(spec, "tier_models", None) is not None
+
+    def _launch_ctx(spec: object) -> bool:
+        # The ctx declaration rides the env (and TOML) sinks; a launch
+        # wrapper declares it only when the AGENT itself has an env-capable
+        # provider surface — data off agent.shapes, never a name check.
+        from codehelper.services.model import ConfigShape as _CS
+
+        agent = spec.agent
+        return _CS.ANTHROPIC_ENV in agent.shapes
+
+    _EDIT_AXES.update(
+        {
+            ConfigShape.ANTHROPIC_ENV: (
+                _EditAxis("provider", "provider", _always, "_pick_edit_provider"),
+                _EditAxis("model", "model", _always, "_pick_edit_model"),
+                _EditAxis("haiku", "haiku", _always, "_pick_edit_haiku"),
+                _EditAxis("sonnet", "sonnet", _always, "_pick_edit_sonnet"),
+                _EditAxis("opus", "opus", _always, "_pick_edit_opus"),
+                _EditAxis(
+                    "uniform", "tiers", _has_recorded_tiers, "_pick_edit_uniform"
+                ),
+                _EditAxis("subagent", "subagent", _always, "_pick_edit_subagent"),
+                _EditAxis("ctx", "ctx", _always, "_pick_edit_ctx"),
+                _EditAxis("rename", "rename", _always, "_pick_edit_rename"),
+            ),
+            ConfigShape.OPENAI_TOML: (
+                _EditAxis("provider", "provider", _always, "_pick_edit_provider"),
+                _EditAxis("model", "model", _always, "_pick_edit_model"),
+                _EditAxis("effort", "effort", _always, "_pick_edit_effort"),
+                _EditAxis("ctx", "ctx", _always, "_pick_edit_ctx"),
+                _EditAxis("rename", "rename", _always, "_pick_edit_rename"),
+            ),
+            ConfigShape.OLLAMA_LAUNCH: (
+                _EditAxis("provider", "provider", _always, "_pick_edit_provider"),
+                _EditAxis("model", "model", _always, "_pick_edit_model"),
+                _EditAxis("ctx", "ctx", _launch_ctx, "_pick_edit_ctx"),
+                _EditAxis("rename", "rename", _always, "_pick_edit_rename"),
+            ),
+        }
+    )
+    # A method name is only as safe as its spelling: resolve every pick now,
+    # at import, so a typo is an immediate ImportError rather than an
+    # AttributeError the first time someone presses Enter on that row.
+    missing = sorted(
+        {
+            axis.pick
+            for axes in _EDIT_AXES.values()
+            for axis in axes
+            if not callable(getattr(TuiSession, axis.pick, None))
+        }
+    )
+    if missing:
+        raise AttributeError(f"TuiSession has no edit-axis pick methods: {missing}")
+
+
+_register_edit_axes()

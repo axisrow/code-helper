@@ -1700,10 +1700,17 @@ def test_e_on_chip_row_targets_highlighted_wrapper():
 
 
 @pytest.mark.unit
-def test_e_renames_on_chip_row_and_is_inert_where_nothing_is_renameable():
-    """`e` mirrors `t`'s focused-chip resolution for rename (issue #95):
-    the highlighted chip on a chipset row, the row itself elsewhere."""
-    from codehelper.cli.tui import TuiSession
+def test_e_edits_on_chip_row_and_is_inert_where_nothing_is_editable():
+    """`e` mirrors `t`'s focused-chip resolution for the edit screen
+    (issue #100): the highlighted chip on a chipset row, the row itself
+    elsewhere — and the two action rows stay inert, the same guard `d`
+    carries, so no code path ever looks up a wrapper literally named
+    "+ add wrapper"."""
+    from codehelper.cli.tui import (
+        _ADD_AGENT,
+        _ADD_WRAPPER,
+        TuiSession,
+    )
 
     session = TuiSession(
         cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
@@ -1711,12 +1718,16 @@ def test_e_renames_on_chip_row_and_is_inert_where_nothing_is_renameable():
     session._chips = {"claude": ["native", "deepseek-ollama", "glm", "+ add"]}
     session._chip_index = {"claude": 2}
 
-    assert session._rename_action("agent:claude") == "rename:glm"
+    assert session._edit_action("agent:claude") == "edit:glm"
     session._chip_index["claude"] = 0
-    assert session._rename_action("agent:claude") is None
+    assert session._edit_action("agent:claude") is None
     session._chip_index["claude"] = 3
-    assert session._rename_action("agent:claude") is None
-    assert session._rename_action("glm") == "rename:glm"
+    assert session._edit_action("agent:claude") is None
+    assert session._edit_action("glm") == "edit:glm"
+    assert session._edit_action(_ADD_AGENT) is None
+    assert session._edit_action(_ADD_WRAPPER) is None
+    assert session._token_action(_ADD_AGENT) is None
+    assert session._token_action(_ADD_WRAPPER) is None
 
 
 @pytest.mark.integration
@@ -1834,6 +1845,203 @@ def test_profile_screen_e_renames(tmp_path, monkeypatch):
 
     assert secrets.credential_for(paths, "zai", "personal") == "sk-old"
     assert secrets.credential_for(paths, "zai", "work") == ""
+
+
+# --- issue #100: the `e` edit screen -----------------------------------------
+
+
+@pytest.mark.integration
+def test_edit_screen_rows_follow_the_shape(tmp_path, monkeypatch):
+    """Which rows exist is _EDIT_AXES data keyed by shape: an env wrapper
+    gets the three tier slots + subagent + uniform; a codex wrapper gets
+    effort; a launch wrapper gets the minimum. No name branches anywhere —
+    the shape decides."""
+    from codehelper.cli.tui import _BACK, TuiSession
+    from codehelper.services.model import ConfigShape
+    from codehelper.services.spec import build_spec as _bs
+    from codehelper.services.wrappers import install_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(
+        paths,
+        _bs(agent="claude", provider="zai", model="glm-5.3", alias="glm-cl"),
+        token="sk-x",
+    )
+    install_wrapper(
+        paths,
+        _bs(
+            agent="codex",
+            provider="ollama-direct",
+            model="glm-5.2:cloud",
+            alias="codex-m",
+        ),
+        token="",
+    )
+    install_wrapper(
+        paths,
+        _bs(
+            agent="claude",
+            provider="ollama-direct",
+            model="glm-5.3",
+            alias="glm-l",
+            shape=ConfigShape.OLLAMA_LAUNCH,
+        ),
+        token="",
+    )
+
+    def _rows(alias):
+        session = TuiSession(
+            cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+        )
+        seen: list[str] = []
+
+        def _fake_pick(_self, items, prompt, **kwargs):
+            seen.extend(
+                entry[0]
+                for entry in items
+                if isinstance(entry, tuple) and entry[0] != _BACK
+            )
+            return _BACK
+
+        # TuiSession has __slots__, so patch the CLASS method, not the instance.
+        monkeypatch.setattr(TuiSession, "_pick", _fake_pick)
+        session._run_edit_screen(alias)
+        return seen
+
+    env = _rows("glm-cl")
+    for key in (
+        "provider",
+        "model",
+        "haiku",
+        "sonnet",
+        "opus",
+        "uniform",
+        "subagent",
+        "ctx",
+        "rename",
+    ):
+        assert key in env, f"env wrapper missing row {key!r}"
+
+    toml = _rows("codex-m")
+    assert "effort" in toml
+    assert "haiku" not in toml and "subagent" not in toml
+
+    launch = _rows("glm-l")
+    assert "haiku" not in launch and "effort" not in launch
+    assert "subagent" not in launch
+    # claude HAS an env-capable surface, so the launch wrapper still offers ctx
+    assert "ctx" in launch
+
+
+@pytest.mark.integration
+def test_edit_screen_reads_the_spec_once(tmp_path, monkeypatch):
+    """The label rule: labels re-evaluate every redraw frame, so the screen
+    reads the file ONCE at entry and everything else comes from the draft."""
+    import codehelper.services.wrappers as wrappers_module
+    from codehelper.cli.tui import _BACK, TuiSession
+    from codehelper.services.spec import build_spec
+    from codehelper.services.wrappers import install_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="codex",
+            provider="ollama-direct",
+            model="glm-5.2:cloud",
+            alias="codex-m",
+        ),
+        token="",
+    )
+    calls = {"n": 0}
+    real = wrappers_module.spec_from_installed
+
+    def _counting(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+
+    monkeypatch.setattr("codehelper.services.wrappers.spec_from_installed", _counting)
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+
+    def _fake_pick(_self, items, prompt, **kwargs):
+        return _BACK
+
+    # TuiSession has __slots__, so patch the CLASS method, not the instance.
+    monkeypatch.setattr(TuiSession, "_pick", _fake_pick)
+    session._run_edit_screen("codex-m")
+
+    assert calls["n"] == 1
+
+
+@pytest.mark.integration
+def test_chip_readback_drops_after_a_model_edit(monkeypatch):
+    """The ✓ is computed from the FILE: editing an applied wrapper's model
+    drops it honestly — the chipset rebuild reads the new spec, the live env
+    no longer matches, and Enter re-applies."""
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    first, _second = _install_zai_pair(
+        "glm-acc1", "token-aaaa", "glm-acc2", "token-bbbb"
+    )
+    _apply_live(first, "token-aaaa")
+    session = _claude_session()
+    assert session._chip_is_applied("claude", first) is True
+
+    from codehelper.services.wrappers import edit_wrapper
+
+    edit_wrapper(Paths.default(), "glm-acc1", model="mystery-3b", context_window=0)
+
+    session = _claude_session()
+    assert session._chip_is_applied("claude", _chip_named(session, "glm-acc1")) is False
+    assert session._chip_is_applied("claude", _chip_named(session, "glm-acc2")) is False
+
+
+@pytest.mark.integration
+def test_codex_chip_stays_applied_after_an_effort_only_edit():
+    """An effort-only codex edit keeps the ✓: the codex predicate compares
+    provider AND model, and set-default never managed effort — the recorded
+    #83 scope. The applied-hint must therefore stay silent here."""
+    from codehelper.cli.tui import TuiSession
+    from codehelper.services.codex_default import apply_set_default
+    from codehelper.services.model import get_agent, get_provider
+    from codehelper.services.spec import build_spec
+    from codehelper.services.wrappers import edit_wrapper, install_wrapper
+
+    applied = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="deepseek-v4-flash:0731-cloud",
+        alias="codex-eff",
+    )
+    install_wrapper(Paths.default(), applied, token="")
+    Paths.default().codex_main_config().parent.mkdir(parents=True, exist_ok=True)
+    apply_set_default(
+        Paths.default(),
+        agent=get_agent("codex"),
+        provider=get_provider("ollama-direct"),
+        model="deepseek-v4-flash:0731-cloud",
+        force=True,
+    )
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    session._refresh_active_label()
+    chip = next(
+        c for c in session._chips["codex"] if getattr(c, "name", None) == "codex-eff"
+    )
+    assert session._chip_is_applied("codex", chip) is True
+
+    edit_wrapper(Paths.default(), "codex-eff", effort="high")
+
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    session._refresh_active_label()
+    chip = next(
+        c for c in session._chips["codex"] if getattr(c, "name", None) == "codex-eff"
+    )
+    assert session._chip_is_applied("codex", chip) is True
 
 
 def _chip_rows(items, *, cursor_pair: int = 0, ansi: bool = True) -> dict[str, str]:

@@ -41,11 +41,20 @@ from codehelper.services.model import (
 )
 from codehelper.services.naming import validate_alias
 
+#: Reasoning-effort values current Codex accepts in ``model_reasoning_effort``
+#: (issue #100). The ONLY extension point: a new value lands here, and the
+#: marker regex (``[^,()\s]+``) plus the TOML renderer need no edits. Codex
+#: hard-rejects unknown values at config deserialization (the ``wire_api``
+#: precedent, openai/codex#7782), so an unlisted value must be refused here —
+#: never rendered into a profile Codex would then refuse to load.
+REASONING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
+
 __all__ = [
     "WrapperSpec",
     "TierModels",
     "Preset",
     "PRESETS",
+    "REASONING_EFFORTS",
     "build_spec",
     "spec_from_preset",
     "get_preset",
@@ -97,6 +106,14 @@ class WrapperSpec:
     #: Like ``profile_name`` it is recorded data, not a derivation: it rides
     #: the wrapper marker (``ctx=``) so reconstruction never re-derives it.
     context_window: int | None = None
+    #: Reasoning effort for the OPENAI_TOML shape (issue #100): rendered as
+    #: ``model_reasoning_effort`` in the companion TOML profile and recorded
+    #: in the marker (``effort=``, after ``ctx=``) like every other explicit
+    #: answer. ``None`` means "not managed" — the renderer emits no key and
+    #: Codex keeps its own default (the ``ctx=`` sentinel convention). Only
+    #: ever non-None for an OPENAI_TOML spec: :func:`build_spec` refuses it
+    #: for every other shape.
+    effort: str | None = None
 
     @property
     def name(self) -> str:
@@ -190,6 +207,7 @@ def build_spec(
     description: str = "",
     profile_name: str | None = None,
     context_window: int | None = None,
+    effort: str | None = None,
 ) -> WrapperSpec:
     """Assemble a :class:`WrapperSpec` from the three axes. Pure, no IO.
 
@@ -237,7 +255,26 @@ def build_spec(
             f"declaration) or a token count in 1..10_000_000"
         )
 
+    # An unknown effort value refuses here, beside the window check (issue
+    # #100): Codex hard-rejects unknown ``model_reasoning_effort`` values at
+    # config deserialization (the ``wire_api`` precedent), so an unlisted
+    # value must fail before anything is rendered — which is also what makes
+    # a garbage ``effort=`` marker value fail spec_from_installed closed to
+    # None, the same answer as any other unrecognised marker value.
+    if effort is not None and effort not in REASONING_EFFORTS:
+        raise CodeHelperError(
+            f"unusable reasoning effort {effort!r}: expected one of "
+            f"{', '.join(REASONING_EFFORTS)}"
+        )
+
     chosen = resolve_shape(agent_obj, provider_obj, preferred=shape)
+
+    # effort is an OPENAI_TOML-only axis (issue #100): it lives in the
+    # companion TOML profile, and no other shape has a surface to declare it
+    # on. A shape check, never a provider/agent-name check — a future shape
+    # with a reasoning-effort surface joins by changing this one condition.
+    if effort is not None and chosen is not ConfigShape.OPENAI_TOML:
+        raise CodeHelperError("effort applies only to openai-toml wrappers (codex)")
 
     # There used to be a refusal here: OPENAI_TOML + auth == "secret" was
     # rejected outright, because the wrapper was a one-line
@@ -286,6 +323,7 @@ def build_spec(
         description=description,
         profile_name=profile_name,
         context_window=context_window,
+        effort=effort,
     )
 
 
