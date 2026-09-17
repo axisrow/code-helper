@@ -1739,6 +1739,29 @@ def test_on_rename_moves_the_wrapper(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_on_rename_shows_the_confirmation_exactly_once(tmp_path, monkeypatch, capsys):
+    """Issue #97, rename half of the acceptance criteria: the synthesized
+    confirmation is the only display and appears exactly once. Dropping the
+    handler's ``silent=True`` (tee + replay) would double the line — this
+    pin fails immediately on that regression."""
+    import codehelper.cli.menu as menu
+    from codehelper.cli.tui import TuiSession
+    from codehelper.services.wrappers import install_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token="sk-existing")
+
+    monkeypatch.setattr(menu, "read_line", lambda _prompt="", **_kw: "glm2")
+    session = TuiSession(
+        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
+    )
+    session._on_rename("glm")
+
+    out = capsys.readouterr().out
+    assert out.count("renamed wrapper glm -> glm2") == 1
+
+
+@pytest.mark.integration
 def test_on_rename_collision_reports_error_without_success(
     tmp_path, monkeypatch, capsys
 ):
