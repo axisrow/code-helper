@@ -3855,6 +3855,119 @@ def test_edit_cross_shape_rederive_is_surfaced(tmp_path):
 
 
 @pytest.mark.integration
+def test_edit_to_a_different_profile_resolves_that_profiles_token(
+    tmp_path, monkeypatch
+):
+    """A --profile change must NOT keep the old embedded token: the marker
+    names the new profile, so the body must authenticate with ITS token
+    (the wrong-tenant bug class Codex's adversarial review flagged)."""
+    import codehelper.services.secrets as secrets
+
+    monkeypatch.setattr("getpass.getpass", _no_prompt)
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "zai", "sk-one", "work1")
+    secrets.save_credential(paths, "zai", "sk-two", "work2")
+    spec = build_spec(
+        agent="claude",
+        provider="zai",
+        model="glm-5.3",
+        alias="glm",
+        profile_name="work1",
+    )
+    install_wrapper(paths, spec, token="sk-one")
+
+    result = edit_wrapper(paths, "glm", profile_name="work2")
+
+    assert result.spec.profile_name == "work2"
+    body = paths.script_for("glm").read_text(encoding="utf-8")
+    assert "sk-two" in body
+    assert "sk-one" not in body
+
+
+@pytest.mark.integration
+def test_edit_to_a_missing_profile_fails_closed(tmp_path, monkeypatch):
+    """An unknown --profile cannot fall back to the old embedded token: with
+    no cache entry and no prompt answer, the edit refuses and the wrapper is
+    byte-untouched."""
+    import codehelper.services.secrets as secrets
+
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+
+    def _empty_prompt(*args, **kwargs):
+        kwargs["getpass_fn"] = lambda _p: ""
+        return real_resolve_token(*args, **kwargs)
+
+    real_resolve_token = secrets.resolve_token
+    monkeypatch.setattr("codehelper.services.secrets.resolve_token", _empty_prompt)
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "zai", "sk-one", "work1")
+    spec = build_spec(
+        agent="claude",
+        provider="zai",
+        model="glm-5.3",
+        alias="glm",
+        profile_name="work1",
+    )
+    install_wrapper(paths, spec, token="sk-one")
+    before = paths.script_for("glm").read_text(encoding="utf-8")
+
+    with pytest.raises(CodeHelperError):
+        edit_wrapper(paths, "glm", profile_name="ghost")
+
+    assert paths.script_for("glm").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.integration
+def test_edit_supplied_token_is_cached_under_the_target_profile(tmp_path):
+    """--profile + a supplied token persist the credential under THAT
+    profile (add's --token-stdin parity) — the next edit/rotation finds it."""
+    import codehelper.services.secrets as secrets
+
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="zai",
+        model="glm-5.3",
+        alias="glm",
+        profile_name="work1",
+    )
+    install_wrapper(paths, spec, token="sk-one")
+
+    edit_wrapper(paths, "glm", profile_name="work2", token="sk-two")
+
+    assert secrets.credential_for(paths, "zai", "work2") == "sk-two"
+    body = paths.script_for("glm").read_text(encoding="utf-8")
+    assert "sk-two" in body
+
+
+@pytest.mark.integration
+def test_edit_model_with_tier_overrides_composes(tmp_path, monkeypatch):
+    """A model edit plus explicit per-field overrides COMPOSE: uniform on the
+    new model, then the override on top — never a silent drop (the TUI's
+    model and tier rows are independent and can be drafted in one pass)."""
+    # mystery-3b is catalog-unknown: the ctx re-resolve asks once, "0" answers.
+    monkeypatch.setattr(
+        "codehelper.cli.menu.select_from_menu", lambda _items, **_kw: "0"
+    )
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="zai",
+        model="glm-5.3",
+        alias="glm",
+    )
+    install_wrapper(paths, spec, token="sk-one")
+
+    result = edit_wrapper(
+        paths, "glm", model="mystery-3b", tier_overrides={"haiku": "glm-5.2:cloud"}
+    )
+
+    assert result.spec.tier_models == TierModels(
+        haiku="glm-5.2:cloud", sonnet="mystery-3b", opus="mystery-3b"
+    )
+
+
+@pytest.mark.integration
 def test_edit_byte_identical_edit_reports_no_changes(tmp_path):
     paths = Paths.from_home(tmp_path)
     install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)

@@ -1718,6 +1718,7 @@ def edit_wrapper(
     )
     from codehelper.services.secrets import (
         DEFAULT_PROFILE,
+        SOURCE_PROMPT,
         ResolvedToken,
         cache_freshly_typed_token,
         credential_for,
@@ -1831,6 +1832,11 @@ def edit_wrapper(
                 subagent = new_model
         if tiers is None:
             tiers = TierModels.uniform(new_model)
+        if isinstance(tier_overrides, dict):
+            # Explicit per-field overrides COMPOSE with the uniform reset
+            # instead of being silently discarded — the TUI's model and tier
+            # rows are independent and can be drafted in one pass.
+            tiers = replace(tiers, **tier_overrides)
     else:
         # Axes the target shape cannot carry: auto-drop what the old spec
         # carried (the shape change is doing this, not the user), refuse
@@ -1888,6 +1894,10 @@ def edit_wrapper(
             new_spec = replace(new_spec, context_window=resolved_ctx)
 
     # --- token (LAST: a bad combination must never prompt for a secret) ----
+    # A --profile change re-points the marker at a profile whose token must
+    # be resolved FRESH: reusing the embedded credential would authenticate
+    # with the old profile's credential under the new profile's name.
+    profile_changed = profile_name is not None and profile_name != old.profile_name
     resolved: ResolvedToken | None = None
     if new_spec.auth != "secret":
         token_value = new_spec.auth_value
@@ -1896,7 +1906,11 @@ def edit_wrapper(
             raise CodeHelperError("no token entered — aborting")
         token_value = token
     elif not switching:
-        recovered = token_from_installed(paths, alias, new_spec.provider.name)
+        recovered = (
+            token_from_installed(paths, alias, new_spec.provider.name)
+            if not profile_changed
+            else None
+        )
         if recovered:
             token_value = recovered
         elif dry_run:
@@ -1962,6 +1976,22 @@ def edit_wrapper(
             token_value,
             profile_name=profile or DEFAULT_PROFILE,
             source=resolved.source,
+            dry_run=dry_run,
+        )
+    elif (
+        token is not None
+        and new_spec.auth == "secret"
+        and (switching or profile_changed)
+    ):
+        # A supplied credential that re-targets the wrapper's profile (or
+        # provider) persists under THAT profile — the `--token-stdin` parity
+        # `add` has; the next rotation finds it instead of a stale entry.
+        cache_freshly_typed_token(
+            paths,
+            new_spec.provider.name,
+            token_value,
+            profile_name=profile or DEFAULT_PROFILE,
+            source=SOURCE_PROMPT,
             dry_run=dry_run,
         )
 
