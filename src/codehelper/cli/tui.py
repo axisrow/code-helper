@@ -2140,9 +2140,11 @@ class TuiSession:
             self._notify(f"No editable axes for a {spec.shape.value} wrapper.")
             return
         draft: dict[str, object] = {
-            "provider": None,
-            "auth": None,
-            "base_url": None,
+            # Every axis starts UNSET ("keep the recorded value") — None would
+            # mean "clear"/"switch to nothing", which is never a starting point.
+            "provider": UNSET,
+            "auth": UNSET,
+            "base_url": UNSET,
             "model": UNSET,
             "tiers": UNSET,
             "subagent": UNSET,
@@ -2238,8 +2240,9 @@ class TuiSession:
         one — so a model/tier pick after a provider change discovers against
         the NEW endpoint."""
         from codehelper.services.model import get_provider, with_auth, with_base_url
+        from codehelper.services.wrappers import Unset
 
-        if draft["provider"] is None:
+        if isinstance(draft["provider"], Unset):
             return spec.provider, spec.profile_name
         obj = with_auth(
             get_provider(draft["provider"]), want_secret=draft["auth"] == "secret"
@@ -2261,16 +2264,22 @@ class TuiSession:
         from codehelper.cli.requests import EditWrapperRequest
 
         was_applied = self._edit_was_applied(alias)
+        from codehelper.services.wrappers import Unset
+
         req = EditWrapperRequest(
             alias=alias,
-            provider=draft["provider"],
-            auth=draft["auth"],
+            provider=None
+            if isinstance(draft["provider"], Unset)
+            else draft["provider"],
+            auth=None if isinstance(draft["auth"], Unset) else draft["auth"],
             model=draft["model"],
             tier_overrides=draft["tiers"],
             subagent_model=draft["subagent"],
             effort=draft["effort"],
             context_window=draft["ctx"],
-            base_url=draft["base_url"],
+            base_url=None
+            if isinstance(draft["base_url"], Unset)
+            else draft["base_url"],
             dry_run=getattr(self.args, "dry_run", False),
             debug=getattr(self.args, "debug", False),
         )
@@ -2734,7 +2743,8 @@ def _register_edit_axes() -> None:
         # provider surface — data off agent.shapes, never a name check.
         from codehelper.services.model import ConfigShape as _CS
 
-        return _CS.ANTHROPIC_ENV in spec.agent.shapes
+        agent = spec.agent
+        return _CS.ANTHROPIC_ENV in agent.shapes
 
     _EDIT_AXES.update(
         {
