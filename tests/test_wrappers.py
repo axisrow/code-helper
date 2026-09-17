@@ -2846,6 +2846,153 @@ def test_spec_from_installed_returns_none_on_a_negative_ctx(tmp_path):
     assert spec_from_installed(paths, "mystery") is None
 
 
+# --------------------------------------------------------------------------- #
+# effort — the reasoning-effort axis for the OPENAI_TOML shape (issue #100)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_marker_records_effort_only_when_set():
+    """``effort=`` appears ONLY for a set value — and rides LAST, after
+    ``ctx=``, so every pre-#100 marker keeps its exact bytes."""
+    spec = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+        effort="high",
+    )
+    assert _marker(spec).endswith("effort=high)")
+
+    plain = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+    )
+    assert "effort=" not in _marker(plain)
+
+
+@pytest.mark.unit
+def test_render_without_effort_is_byte_identical():
+    """The #82 golden rule, restated for #100: an effort-less codex wrapper
+    renders EXACTLY the pre-#100 body — no SKIP-path churn for anything
+    already installed."""
+    plain = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+    )
+    explicit_none = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+        effort=None,
+    )
+    assert openai_toml_body(plain) == openai_toml_body(explicit_none)
+    assert render_script(plain, _LITERAL_TOKEN) == render_script(
+        explicit_none, _LITERAL_TOKEN
+    )
+
+
+@pytest.mark.unit
+def test_openai_toml_body_writes_model_reasoning_effort_when_set():
+    """The companion profile carries ``model_reasoning_effort`` when — and
+    only when — the spec records an effort; clearing it removes the key
+    again (our field, our cleanup)."""
+    spec = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+        effort="high",
+    )
+    body = openai_toml_body(spec)
+    assert 'model_reasoning_effort = "high"' in body
+
+    cleared = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+        effort=None,
+    )
+    assert "model_reasoning_effort" not in openai_toml_body(cleared)
+
+
+@pytest.mark.unit
+def test_build_spec_refuses_an_unknown_effort():
+    """Codex hard-rejects unknown ``model_reasoning_effort`` values at config
+    deserialization, so an unlisted value must fail here — before anything
+    is rendered (the ``wire_api`` precedent)."""
+    with pytest.raises(CodeHelperError, match="unusable reasoning effort"):
+        build_spec(
+            agent="codex",
+            provider="ollama-direct",
+            model="glm-5.2:cloud",
+            alias="glm-codex",
+            effort="maximum",
+        )
+
+
+@pytest.mark.unit
+def test_build_spec_refuses_effort_outside_the_toml_shape():
+    """effort is an OPENAI_TOML-only axis: no other shape has a surface to
+    declare it on. A shape check — claude × ollama-direct resolves to the
+    env shape and must refuse."""
+    with pytest.raises(CodeHelperError, match="openai-toml"):
+        build_spec(
+            agent="claude",
+            provider="ollama-direct",
+            model="glm-5.3",
+            alias="glm-claude",
+            effort="high",
+        )
+
+
+@pytest.mark.integration
+def test_spec_from_installed_honors_a_recorded_effort(tmp_path):
+    """A wrapper whose marker records effort= comes back with that effort —
+    the chipset and the edit flow consume this reconstruction."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+        effort="high",
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+
+    recovered = spec_from_installed(paths, "glm-codex")
+    assert recovered is not None
+    assert recovered.effort == "high"
+
+
+@pytest.mark.integration
+def test_spec_from_installed_returns_none_on_garbage_effort(tmp_path):
+    """An effort value this build no longer lists fails CLOSED — None, the
+    same answer as any other unrecognised marker value (the ctx= bucket)."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="codex",
+        provider="ollama-direct",
+        model="glm-5.2:cloud",
+        alias="glm-codex",
+        effort="high",
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+    script = paths.script_for("glm-codex")
+    script.write_text(
+        script.read_text(encoding="utf-8").replace("effort=high", "effort=maximum"),
+        encoding="utf-8",
+    )
+
+    assert spec_from_installed(paths, "glm-codex") is None
+
+
 @pytest.mark.integration
 def test_add_launch_shape_unknown_model_prompts_and_declares(tmp_path):
     """Review round 3 (PR #84): single-model shapes (OLLAMA_LAUNCH) emit a

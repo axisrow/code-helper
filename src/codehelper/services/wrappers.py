@@ -225,8 +225,8 @@ def _marker_fields_from(body: str) -> dict[str, str]:
     and the ``key=value`` regex — behind :func:`_marker_fields`,
     :func:`_ownership_marker_provider_is_secret`,
     :func:`_installed_provider_name`, and :func:`spec_from_installed`. The
-    regex has grown fields twice (``auth=`` #81, ``ctx=`` #83); the next one
-    happens here or nowhere. Empty dict when ``body`` carries no marker on
+    regex has grown fields three times (``auth=`` #81, ``ctx=`` #83,
+    ``effort=`` #100); the next one happens here or nowhere. Empty dict when ``body`` carries no marker on
     its first two lines.
     """
     marker = next(
@@ -478,6 +478,12 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
             # marker WITHOUT the field predates the recording — the catalog
             # derivation stands, the pre-#83 migration fallback.
             context_window=int(fields["ctx"]) if fields.get("ctx") else None,
+            # The RECORDED effort, same bucket as ctx (issue #100): a value
+            # this build no longer lists raises in build_spec and fails the
+            # whole reconstruction closed to None — an unrecognised marker
+            # value, not something to guess around. A marker WITHOUT the
+            # field predates the axis: "not managed" stands.
+            effort=fields.get("effort") or None,
         )
     except (CodeHelperError, ValueError):
         # A marker naming an agent/provider/shape this build no longer knows,
