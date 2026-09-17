@@ -289,10 +289,6 @@ class EditWrapperRequest:
     def from_namespace(cls, args: argparse.Namespace) -> EditWrapperRequest:
         model = _g(args, "model", UNSET)
         tiers = _tiers_from_flags(_g(args, "tier", None))
-        if not isinstance(model, Unset) and not isinstance(tiers, Unset):
-            raise CodeHelperError(
-                "--model and --tier are exclusive — one edit, one axis"
-            )
         effort = _g(args, "effort", UNSET)
         if isinstance(effort, str) and effort == "none":
             effort = None

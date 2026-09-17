@@ -1220,6 +1220,12 @@ def _handle_edit_wrapper(args: argparse.Namespace | EditWrapperRequest) -> int:
     if not result.changed:
         print(f"no changes: {req.alias}")
         return 0
+    if req.dry_run:
+        # The disclosure leads: "would edit" cannot be mistaken for a landed
+        # edit the way a trailing "nothing written" line could.
+        print(f"would edit {req.alias} ({', '.join(result.changed)})")
+        print("dry run — nothing written")
+        return 0
     print(f"edited {req.alias} ({', '.join(result.changed)})")
     if result.shape_changed:
         print(

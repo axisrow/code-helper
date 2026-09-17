@@ -50,11 +50,32 @@ def test_edit_single_tier(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.integration
-def test_edit_model_and_tier_are_exclusive(tmp_path, monkeypatch):
+def test_edit_model_and_tier_compose(tmp_path, monkeypatch):
+    """--model + --tier COMPOSE: uniform on the new model, then the override
+    on top — the CLI passes both through and the service composes."""
     monkeypatch.setenv("ZAI_API_KEY", "sk-env")
     assert main(["add", "glm"]) == 0
 
-    assert main(["edit", "glm", "--model", "glm-5.2:cloud", "--tier", "haiku=x"]) != 0
+    assert (
+        main(
+            [
+                "edit",
+                "glm",
+                "--model",
+                "mystery-3b",
+                "--tier",
+                "haiku=glm-5.2:cloud",
+                "--context-window",
+                "none",
+            ]
+        )
+        == 0
+    )
+
+    body = Paths.from_home(tmp_path).script_for("glm").read_text(encoding="utf-8")
+    assert "export ANTHROPIC_DEFAULT_HAIKU_MODEL='glm-5.2:cloud'" in body
+    assert "export ANTHROPIC_DEFAULT_SONNET_MODEL='mystery-3b'" in body
+    assert "export ANTHROPIC_DEFAULT_OPUS_MODEL='mystery-3b'" in body
 
 
 @pytest.mark.integration
@@ -265,7 +286,7 @@ def test_edit_dry_run_reports_and_writes_nothing(tmp_path, monkeypatch, capsys):
     assert main(["edit", "glm", "--model", "glm-5.2:cloud", "--dry-run"]) == 0
 
     out = capsys.readouterr().out
-    assert "edited glm (model, tiers)" in out
+    assert "would edit glm (model, tiers)" in out
     assert "dry run — nothing written" in out
     after = Paths.from_home(tmp_path).script_for("glm").read_text(encoding="utf-8")
     assert after == before
