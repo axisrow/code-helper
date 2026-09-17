@@ -41,9 +41,11 @@ import sys
 from dataclasses import replace
 
 from codehelper.cli.requests import (
+    UNSET,
     AddRequest,
     DisableRequest,
     EditTokenRequest,
+    EditWrapperRequest,
     EnableRequest,
     ProxyRequest,
     RemoveRequest,
@@ -104,6 +106,7 @@ from codehelper.services.secrets import (
     valid_active_profile,
 )
 from codehelper.services.spec import (
+    REASONING_EFFORTS,
     build_spec,
     get_preset,
     spec_from_preset,
@@ -112,8 +115,10 @@ from codehelper.services.spec import (
 from codehelper.services.state import active_selection
 from codehelper.services.wrappers import (
     WRAPPERS,
+    Unset,
     describe_all,
     discover_managed,
+    edit_wrapper,
     get_spec,
     install_wrapper,
     is_installed,
@@ -1167,6 +1172,64 @@ def _handle_remove(args: argparse.Namespace | RemoveRequest) -> int:
     return 0
 
 
+def _handle_edit_wrapper(args: argparse.Namespace | EditWrapperRequest) -> int:
+    """``edit`` (issue #100) — edit an installed wrapper's axes in place.
+
+    A thin translation layer: parse the raw context window, map ``--auth``
+    onto the service's ``want_secret``, read ``--token-stdin``, and hand
+    everything to :func:`wrappers.edit_wrapper` — the SAME request shape
+    the TUI's edit screen dispatches. Prints from the service's result:
+    the changed axes, the shape-change notice, and nothing per-agent (the
+    applied-state hint is the TUI's, whose chip readback knows the truth).
+    """
+    if isinstance(args, EditWrapperRequest):
+        req = args
+        token = req.token
+    else:
+        req = EditWrapperRequest.from_namespace(args)
+        token = _token_stdin_value(args)
+
+    paths = Paths.default()
+    if req.provider is not None:
+        # Explicit provider name: the ONE disable gate, before anything
+        # interactive (the add/switch precedent).
+        _refuse_disabled_provider(get_provider(req.provider), paths)
+
+    ctx_raw = req.context_window
+    ctx = UNSET if isinstance(ctx_raw, Unset) else _parse_context_window(ctx_raw)
+    want_secret = None if req.auth is None else req.auth == "secret"
+
+    result = edit_wrapper(
+        paths,
+        req.alias,
+        provider=req.provider,
+        want_secret=want_secret,
+        model=req.model,
+        tier_overrides=req.tier_overrides,
+        subagent_model=req.subagent_model,
+        effort=req.effort,
+        context_window=ctx,
+        base_url=req.base_url,
+        profile_name=req.profile,
+        token=token,
+        dry_run=req.dry_run,
+        force=req.force,
+        confirm=_confirm_overwrite,
+    )
+
+    if not result.changed:
+        print(f"no changes: {req.alias}")
+        return 0
+    print(f"edited {req.alias} ({', '.join(result.changed)})")
+    if result.shape_changed:
+        print(
+            f"shape changed: {result.old_spec.shape.value} -> {result.spec.shape.value}"
+        )
+    if req.dry_run:
+        print("dry run — nothing written")
+    return 0
+
+
 def _handle_rename(args: argparse.Namespace | RenameRequest) -> int:
     """Rename a wrapper alias or a token profile (issue #95).
 
@@ -1976,7 +2039,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_rename = subparsers.add_parser(
         "rename",
-        help="rename a wrapper alias, or a token profile (installed wrappers follow)",
+        help="rename a wrapper alias, or a token profile (installed wrappers "
+        "follow; `edit` changes a wrapper's axes in place)",
         parents=[sub_flags],
     )
     p_rename.add_argument(
@@ -2003,6 +2067,81 @@ def build_parser() -> argparse.ArgumentParser:
         help="profile only: the new profile name",
     )
     p_rename.set_defaults(func=_handle_rename)
+
+    p_edit = subparsers.add_parser(
+        "edit",
+        help="edit an installed wrapper's axes in place — model, tiers, "
+        "provider, effort (issue #100)",
+        parents=[sub_flags],
+    )
+    p_edit.add_argument("name", help="wrapper name to edit")
+    p_edit.add_argument(
+        "--provider",
+        default=None,
+        help="switch the backend provider (cross-shape allowed where the "
+        "pairing resolves)",
+    )
+    p_edit.add_argument(
+        "--auth",
+        choices=["secret", "literal"],
+        default=None,
+        help="auth override for --provider (the picker's ':secret' twin)",
+    )
+    p_edit.add_argument(
+        "--model",
+        default=UNSET,
+        help="new model — env-shaped wrappers reset all tiers to it",
+    )
+    p_edit.add_argument(
+        "--tier",
+        action="append",
+        default=None,
+        metavar="TIER=MODEL",
+        help="per-tier model override (haiku|sonnet|opus); repeatable",
+    )
+    p_edit.add_argument(
+        "--subagent-model",
+        dest="subagent_model",
+        default=UNSET,
+        help="subagent model for env-shaped wrappers ('none' to clear)",
+    )
+    p_edit.add_argument(
+        "--effort",
+        choices=[*REASONING_EFFORTS, "none"],
+        default=UNSET,
+        help="reasoning effort for codex wrappers ('none' stops managing it)",
+    )
+    p_edit.add_argument(
+        "--context-window",
+        dest="context_window",
+        default=UNSET,
+        help="explicit window in tokens, or 'none' for no declaration",
+    )
+    p_edit.add_argument(
+        "--base-url",
+        dest="base_url",
+        default=None,
+        help="endpoint override (requires --provider)",
+    )
+    p_edit.add_argument(
+        "--profile",
+        default=None,
+        help="token profile for --provider",
+    )
+    p_edit.add_argument(
+        "--token-stdin",
+        dest="token_stdin",
+        action="store_true",
+        default=False,
+        help="read the token from one stdin line",
+    )
+    p_edit.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="overwrite a foreign companion file without asking",
+    )
+    p_edit.set_defaults(func=_handle_edit_wrapper)
 
     p_disable = subparsers.add_parser(
         "disable",

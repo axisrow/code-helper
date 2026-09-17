@@ -96,6 +96,8 @@ __all__ = [
     "rename_provider_profile",
     "edit_wrapper",
     "EditWrapperResult",
+    "Unset",
+    "UNSET",
     "is_installed",
     "is_managed",
     "spec_from_installed",
@@ -1592,6 +1594,13 @@ class _Unset:
 
 
 _UNSET: Final = _Unset()
+
+#: Public aliases — the CLI layer shares the ONE sentinel: an axis-flag
+#: distinction ("absent" vs "none") defined here, next to the verb that
+#: gives it meaning, and imported by requests.py / parser.py. Two separate
+#: sentinel classes would be type-incompatible drift.
+Unset = _Unset
+UNSET = _UNSET
 
 
 def _default_getpass(prompt: str) -> str:
