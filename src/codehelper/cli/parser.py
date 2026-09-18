@@ -1252,8 +1252,6 @@ def _handle_edit_wrapper(args: argparse.Namespace | EditWrapperRequest) -> int:
         print(
             f"shape changed: {result.old_spec.shape.value} -> {result.spec.shape.value}"
         )
-    if req.dry_run:
-        print("dry run — nothing written")
     return 0
 
 

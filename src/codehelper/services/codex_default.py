@@ -823,11 +823,12 @@ def clear_default(
         return False
     _verify_toml_or_refuse(original, context=str(config_path))
 
-    cleared = clear_config_toml(original, current_default(paths))
+    provider_table = current_default(paths)
+    cleared = clear_config_toml(original, provider_table)
     if cleared == original:
         print("no changes to config.toml")
         return False
-    _verify_cleared(original, cleared, current_default(paths))
+    _verify_cleared(original, cleared, provider_table)
 
     preview = diff_preview(original, cleared)
     if dry_run:
@@ -866,10 +867,8 @@ def read_default_config(paths: Paths) -> tuple[str | None, dict | None, str]:
     (``current_default`` collapses the three to one ``None``; the doctor
     reports them separately).
 
-    ``current_default`` and ``current_default_model`` still carry their own
-    private copies of the ladder (pre-existing; migrate them onto this when
-    next touched). Same posture as theirs: read-only, never raises — a
-    missing, unreadable, or unparseable file is an answer, not an exception.
+    Same posture throughout: read-only, never raises — a missing, unreadable,
+    or unparseable file is an answer, not an exception.
     """
     text = read_text_or_none(paths.codex_main_config())
     if text is None:
@@ -908,23 +907,15 @@ def current_default(paths: Paths) -> str | None:
     wrote before the rename, and callers resolve it via
     ``model.get_provider_for_legacy_read`` rather than plain ``get_provider``.
 
-    Uses ``tomllib`` directly rather than ``_require_tomllib``: that helper
-    refuses loudly because ``set-default`` is about to WRITE, and a missing
-    verifier there would mean writing unverified. This function only reads,
-    and its whole contract is to degrade to ``None`` instead of raising.
+    Reads through :func:`read_default_config` rather than ``_require_tomllib``:
+    that helper refuses loudly because ``set-default`` is about to WRITE, and
+    a missing verifier there would mean writing unverified. This function only
+    reads, and its whole contract is to degrade to ``None`` instead of raising.
     """
     from codehelper.services.model import get_provider_for_legacy_read
 
-    text = read_text_or_none(paths.codex_main_config())
-    if not text:
-        return None
-    try:
-        import tomllib
-    except ModuleNotFoundError:  # pragma: no cover - py3.11+ is the floor
-        return None
-    try:
-        data = tomllib.loads(text)
-    except ValueError:
+    _, data, _ = read_default_config(paths)
+    if data is None:
         return None
     name = data.get("model_provider")
     if not isinstance(name, str):
@@ -953,16 +944,8 @@ def current_default_model(paths: Paths) -> str | None:
     equality the caller performs against a wrapper's own `spec.model`, which
     `_patch_value_for` wrote here verbatim.
     """
-    text = read_text_or_none(paths.codex_main_config())
-    if not text:
-        return None
-    try:
-        import tomllib
-    except ModuleNotFoundError:  # pragma: no cover - py3.11+ is the floor
-        return None
-    try:
-        data = tomllib.loads(text)
-    except ValueError:
+    _, data, _ = read_default_config(paths)
+    if data is None:
         return None
     model = data.get("model")
     return model if isinstance(model, str) else None

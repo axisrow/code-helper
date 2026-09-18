@@ -40,7 +40,6 @@ __all__ = [
     "normalize_base_url",
     "MAX_BASE_URL_LENGTH",
     "DEFAULT_BASE_URL_PORT",
-    "DEFAULT_BASE_URL_PATH",
 ]
 
 #: Cap on alias length. Not a filesystem limit (those are far higher) — a
@@ -170,15 +169,15 @@ MAX_BASE_URL_LENGTH = 512
 #: an ``ANTHROPIC_BASE_URL`` that 404s on every request. Leave path completion
 #: to each shape's renderer, which knows which protocol it is serving.
 DEFAULT_BASE_URL_PORT = "4000"
-DEFAULT_BASE_URL_PATH = ""
 
 
 def normalize_base_url(url: str) -> str:
     """Auto-complete a bare host/IP into a full ``base_url``.
 
     A user typing ``78.47.183.125`` (no scheme, no port, no path) gets
-    ``https://78.47.183.125:4000`` — no path guessed, see
-    :data:`DEFAULT_BASE_URL_PATH`. Input that already carries a scheme
+    ``https://78.47.183.125:4000`` — no path guessed; the note above
+    ``DEFAULT_BASE_URL_PORT`` explains why path completion is left to each
+    shape's renderer. Input that already carries a scheme
     (``http://``/``https://``) is returned untouched — an explicit ``http://``
     is respected, never rewritten to https. Only scheme-less input is touched.
 
@@ -215,12 +214,9 @@ def normalize_base_url(url: str) -> str:
         # as malformed rather than leaking a bare ValueError here.
         return candidate
     netloc = parts.netloc
-    path = parts.path
     if ":" not in netloc:  # no explicit port
         netloc = f"{netloc}:{DEFAULT_BASE_URL_PORT}"
-    if not path:
-        path = DEFAULT_BASE_URL_PATH
-    return f"https://{netloc}{path}"
+    return f"https://{netloc}{parts.path}"
 
 
 def validate_base_url(url: str) -> None:

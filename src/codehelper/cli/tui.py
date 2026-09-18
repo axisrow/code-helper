@@ -2563,12 +2563,10 @@ class TuiSession:
                 )
                 if choice in (_BACK, _QUIT):
                     return 0
-                if choice == _ADD:
+                if choice in (_ADD, _ADD_WRAPPER):
                     self._run_add()
                 elif choice == _ADD_AGENT:
                     self._run_add_agent()
-                elif choice == _ADD_WRAPPER:
-                    self._run_add()
                 elif choice.startswith("add:"):
                     self._run_add(choice.removeprefix("add:"))
                 elif choice == _PROFILE:
