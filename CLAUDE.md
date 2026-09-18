@@ -16,7 +16,7 @@ Guidance for Claude Code when working in this repository.
 | Run tests | `pytest -q` |
 | Lint | `ruff check .` |
 | Format | `ruff format .` |
-| CLI entry points | `codehelper add [<preset>] \| add --agent A --provider P --model M \| list [wrappers\|agents\|providers\|matrix] \| tokens [--reveal] \| edit-token [<name>] \| edit <wrapper> [--provider P] [--auth secret\|literal] [--model M] [--tier TIER=M] [--subagent-model [none]] [--effort E\|none] [--context-window N\|none] [--base-url] [--profile] [--token-stdin] [--force] [--dry-run] \| rename wrapper <old> <new> \| rename profile <provider> <old> <new> \| set-default [...] \| switch [<provider>\|--from-wrapper NAME] \| proxy [on\|off\|toggle] [--url URL] [--no-proxy LIST] \| tui` |
+| CLI entry points | `codehelper add [<preset>] \| add --agent A --provider P --model M \| list [wrappers\|agents\|providers\|matrix] \| tokens [--reveal] \| doctor \| edit-token [<name>] \| edit <wrapper> [--provider P] [--auth secret\|literal] [--model M] [--tier TIER=M] [--subagent-model [none]] [--effort E\|none] [--context-window N\|none] [--base-url] [--profile] [--token-stdin] [--force] [--dry-run] \| rename wrapper <old> <new> \| rename profile <provider> <old> <new> \| set-default [...] \| switch [<provider>\|--from-wrapper NAME] \| proxy [on\|off\|toggle] [--url URL] [--no-proxy LIST] \| tui` |
 
 ## Architecture
 
@@ -31,6 +31,7 @@ Guidance for Claude Code when working in this repository.
 | Service | `services/render.py` | one renderer per `ConfigShape`, dispatched on `resolve_shape`'s result |
 | Service | `services/naming.py` | `validate_alias` allow-list for executable names on `PATH` |
 | Service | `services/models_api.py` | `list_models(provider)` — never raises, degrades to `error` |
+| Service | `services/doctor.py` | `doctor` — read-only health report (exit 1 only on FAIL): codex default auth chain (env_key + token visibility in env/launchctl), claude env coherence, live discovery probe via `models_api`; never raises, masks tokens |
 | Service | `services/wrappers.py` | generated-script lifecycle: install/list/describe/ownership guard; rename (alias move / profile cascade re-pointing markers) |
 | Service | `services/codex_default.py` | `set-default` — patches `~/.codex/config.toml` in place; `current_default` reads back what is applied, `clear_default` removes the managed region (codex's "native") |
 | Service | `services/claude_settings.py` | `switch` — live-patches `~/.claude/settings.json`'s `env` block so an already-running `claude` picks up a new backend on its next prompt, no restart |

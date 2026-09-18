@@ -1,7 +1,7 @@
-"""Tests for ``_urlopen_fetch``'s ACTUAL HTTP behaviour — unlike
+"""Tests for ``urlopen_fetch``'s ACTUAL HTTP behaviour — unlike
 ``test_models_api.py`` (which injects ``fetch`` and never touches the
 network), this file drives a real loopback ``http.server`` to prove the
-redirect-refusal fix in ``models_api._urlopen_fetch``: the rest of the
+redirect-refusal fix in ``models_api.urlopen_fetch``: the rest of the
 codebase can inject a fake fetcher and stay honest about the JSON-parsing
 contract, but nothing short of a real HTTP round-trip proves what
 ``urllib.request``'s redirect machinery actually does with the
@@ -21,7 +21,7 @@ import urllib.error
 
 import pytest
 
-from codehelper.services.models_api import _urlopen_fetch
+from codehelper.services.models_api import urlopen_fetch
 
 
 class _RedirectingHandler(http.server.BaseHTTPRequestHandler):
@@ -64,7 +64,7 @@ def test_urlopen_fetch_refuses_a_redirect_instead_of_following_it(redirecting_se
     would have sent back."""
     url = f"http://127.0.0.1:{redirecting_server}/models"
     with pytest.raises(urllib.error.HTTPError) as exc_info:
-        _urlopen_fetch(url, timeout=2.0, token="sk-should-not-travel")
+        urlopen_fetch(url, timeout=2.0, token="sk-should-not-travel")
     assert exc_info.value.code == 302
 
 
@@ -76,5 +76,5 @@ def test_urlopen_fetch_sends_the_token_only_to_the_original_host(redirecting_ser
     not just stopped it from leaking to the redirect target."""
     url = f"http://127.0.0.1:{redirecting_server}/models"
     with pytest.raises(urllib.error.HTTPError):
-        _urlopen_fetch(url, timeout=2.0, token="sk-should-not-travel")
+        urlopen_fetch(url, timeout=2.0, token="sk-should-not-travel")
     assert _RedirectingHandler.seen_auth_header == ["Bearer sk-should-not-travel"]

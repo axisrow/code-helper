@@ -435,17 +435,22 @@ def redact_credential(value: str) -> str:
 #: the values ``_redacted_preview`` must mask — not just the newly supplied
 #: ``token`` — because a PREVIOUS switch may have already left one of these
 #: in ``original``, and a preview is printed to stdout / a confirm prompt.
-_CREDENTIAL_ENV_KEYS: tuple[str, ...] = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
+
+#: The env keys that hold a credential. Public (no ``_`` prefix) so the
+#: ``doctor``'s coherence check iterates THIS tuple instead of re-listing the
+#: names — the key vocabulary of settings.json has exactly one owner, and a
+#: credential key added here must become visible to every reader at once.
+CREDENTIAL_ENV_KEYS: tuple[str, ...] = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY")
 
 
 def credential_values(parsed: dict) -> set[str]:
-    """Every non-empty value of :data:`_CREDENTIAL_ENV_KEYS` in ``parsed["env"]``."""
+    """Every non-empty value of :data:`CREDENTIAL_ENV_KEYS` in ``parsed["env"]``."""
     env = parsed.get("env")
     if not isinstance(env, dict):
         return set()
     return {
         value
-        for key in _CREDENTIAL_ENV_KEYS
+        for key in CREDENTIAL_ENV_KEYS
         if isinstance(value := env.get(key), str) and value
     }
 

@@ -39,6 +39,7 @@ __all__ = [
     "openai_base_url",
     "anthropic_base_url",
     "openai_env_key",
+    "openai_provider_table",
     "toml_string",
     "MARKER_PREFIX",
     "MODEL_CONTEXT_WINDOWS",
@@ -425,6 +426,37 @@ def openai_env_key(provider: Provider) -> str:
     return provider.token_env_var
 
 
+def openai_provider_table(
+    table: str,
+    display_name: str,
+    base_url: str,
+    wire_api: str,
+    env_key: str,
+) -> str:
+    """The ``[model_providers.<table>]`` block BOTH codex-table writers emit.
+
+    ONE home for the field set, the line order, and the conditional-emission
+    rule (``env_key`` only for a secret provider, LAST) — the rule whose
+    duplication between this module's per-alias profile and
+    ``codex_default``'s ``config.toml`` patcher is exactly what once left
+    bare ``codex`` authenticating with no key at all (401) while the wrapper
+    on the same endpoint worked. Both writers call this; neither spells the
+    block by hand any more. Public like :func:`toml_string` and
+    :func:`openai_env_key` for the same reason: the two writers must not
+    drift. Empty ``env_key`` emits no line, byte-identical to the pre-env_key
+    output — required by the ownership guard's byte comparison.
+    """
+    body = (
+        f"[model_providers.{table}]\n"
+        f'name = "{toml_string(display_name)}"\n'
+        f'base_url = "{toml_string(base_url)}"\n'
+        f'wire_api = "{toml_string(wire_api)}"\n'
+    )
+    if env_key:
+        body += f'env_key = "{toml_string(env_key)}"\n'
+    return body
+
+
 def openai_toml_body(spec: WrapperSpec) -> str:
     """The ``~/.codex/<alias>.config.toml`` profile body (pure, no IO).
 
@@ -502,14 +534,14 @@ def openai_toml_body(spec: WrapperSpec) -> str:
         lines.append(f'model_reasoning_effort = "{toml_string(spec.effort)}"\n')
     lines += [
         "\n",
-        f"[model_providers.{table}]\n",
-        f'name = "{toml_string(display_name)}"\n',
-        f'base_url = "{toml_string(base_url)}"\n',
-        f'wire_api = "{toml_string(spec.provider.wire_api)}"\n',
+        openai_provider_table(
+            table,
+            display_name,
+            base_url,
+            spec.provider.wire_api,
+            openai_env_key(spec.provider),
+        ),
     ]
-    env_key = openai_env_key(spec.provider)
-    if env_key:
-        lines.append(f'env_key = "{toml_string(env_key)}"\n')
     return "".join(lines)
 
 

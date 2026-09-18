@@ -9,12 +9,15 @@ byte-for-byte untouched, rather than deciding whole-file skip/write/refuse.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from codehelper.errors import CodeHelperError
 from codehelper.services.codex_default import (
     DefaultPatch,
     _config_backup_slots,
+    _render_model_providers_table,
     _rotate_backups,
     apply_set_default,
     clear_default,
@@ -32,7 +35,7 @@ OLLAMA = get_provider("ollama-direct")
 
 
 def _patch(**overrides) -> DefaultPatch:
-    base = dict(
+    base: dict[str, Any] = dict(
         model="glm-5.2:cloud",
         provider_table="ollama-direct",
         display_name="local Ollama daemon",
@@ -1070,3 +1073,86 @@ def test_no_provider_name_collides_with_codex_reserved_ids():
         f"built-in provider IDs — rename in PROVIDERS (see codex_default.py "
         f"CODEX_RESERVED_PROVIDER_IDS for the reserved list and why)"
     )
+
+
+# ---------------------------------------------------------------------------
+# env_key: a secret provider's table carries it, a non-secret one keeps the
+# byte-identical table — parity with render.openai_toml_body (render.py), the
+# wrapper renderer that already writes this line. Its absence in set-default's
+# table is what left Codex going to a token-requiring proxy with NO key
+# (401 Invalid API key), and let a hand-added env_key line be clobbered by
+# the next set-default run.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_render_table_writes_env_key_last_for_secret_provider():
+    """Same shape as render.openai_toml_body: env_key is the LAST line of the
+    table, quoted like every other value."""
+    patch = _patch(provider_table="freellmapi", env_key="FREELLMAPI_API_KEY")
+    lines = _render_model_providers_table(patch).strip().splitlines()
+    assert lines[0] == "[model_providers.freellmapi]"
+    assert lines[-1] == 'env_key = "FREELLMAPI_API_KEY"'
+
+
+@pytest.mark.unit
+def test_render_table_omits_env_key_for_non_secret_provider():
+    """No env_key line for a non-secret patch — the rendered table stays
+    byte-identical to what older versions wrote (ownership/verification
+    parity with the renderer's own byte-identity rule)."""
+    rendered = _render_model_providers_table(_patch())
+    assert "env_key" not in rendered
+
+
+@pytest.mark.unit
+def test_resolve_default_patch_lifts_env_key_from_secret_provider():
+    patch = resolve_default_patch(CODEX, get_provider("freellmapi"), "auto")
+    assert patch.env_key == "FREELLMAPI_API_KEY"
+
+
+@pytest.mark.unit
+def test_resolve_default_patch_leaves_env_key_empty_for_non_secret():
+    patch = resolve_default_patch(CODEX, OLLAMA, "glm-5.2:cloud")
+    assert patch.env_key == ""
+
+
+@pytest.mark.unit
+def test_provider_table_emission_is_shared_with_render():
+    """The ``[model_providers.X]`` block set-default writes and the one the
+    per-alias profile writer emits come from THE SAME renderer
+    (render.openai_provider_table) — field set, order, and the conditional
+    last-line env_key have one home. These two writers drifting apart is
+    what once let bare ``codex`` 401 while the wrapper on the same endpoint
+    authenticated; this pin catches anyone un-sharing the renderer."""
+    from codehelper.services.render import openai_provider_table
+
+    for env_key in ("", "FREELLMAPI_API_KEY"):
+        patch = _patch(provider_table="freellmapi", env_key=env_key)
+        assert _render_model_providers_table(patch) == openai_provider_table(
+            patch.provider_table,
+            patch.display_name,
+            patch.base_url,
+            patch.wire_api,
+            env_key,
+        )
+
+
+@pytest.mark.integration
+def test_set_default_writes_env_key_for_secret_provider(tmp_path):
+    """The written config.toml lets a bare `codex` authenticate: env_key names
+    the variable the token must be exported to."""
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text('some_other_key = "x"\n', encoding="utf-8")
+
+    apply_set_default(
+        paths,
+        agent=CODEX,
+        provider=get_provider("freellmapi"),
+        model="auto",
+        force=True,
+    )
+
+    text = config.read_text(encoding="utf-8")
+    assert 'env_key = "FREELLMAPI_API_KEY"' in text

@@ -59,6 +59,7 @@ from codehelper.errors import CodeHelperError
 from codehelper.services import (
     claude_settings,
     codex_default,
+    doctor,
     models_api,
     secrets,
     state,
@@ -337,6 +338,26 @@ def _handle_tokens(args: argparse.Namespace) -> int:
         else:
             print(f"{env_var:18} not set")
     return 0
+
+
+def _handle_doctor(args: argparse.Namespace) -> int:
+    """Print the read-only health report, one row per check.
+
+    The answer to "why does my agent get 401?" without reading three config
+    files: the codex default's auth chain (env_key present? the variable
+    visible to codex — process env or launchctl?), the claude settings' env
+    coherence, and a live discovery probe of the backend. Exit 1 only when a
+    row FAILs, so it works as a scriptable pre-flight gate. Read-only:
+    nothing is written, nothing is prompted, tokens print masked.
+    """
+    paths = Paths.default()
+    report = doctor.run(paths)
+    markers = {doctor.OK: "ok  ", doctor.WARN: "WARN", doctor.FAIL: "FAIL"}
+    for row in report.rows:
+        print(f"{markers[row.status]} {row.name}: {row.detail}")
+        if row.hint:
+            print(f"     hint: {row.hint}")
+    return 1 if report.has_failure else 0
 
 
 def _ask_yes_no(prompt: str) -> bool:
@@ -2028,6 +2049,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="print full token values instead of the head+tail mask",
     )
     p_tokens.set_defaults(func=_handle_tokens)
+
+    p_doctor = subparsers.add_parser(
+        "doctor",
+        help="read-only health report: codex default auth chain, claude "
+        "settings coherence, live backend probe",
+        parents=[sub_flags],
+    )
+    p_doctor.set_defaults(func=_handle_doctor)
 
     p_remove = subparsers.add_parser(
         "remove",

@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from codehelper.services.model import ModelListAPI, Provider
 from codehelper.services.render import openai_base_url
 
-__all__ = ["list_models", "ModelListResult", "Fetcher", "DEFAULT_TIMEOUT"]
+__all__ = ["list_models", "ModelListResult", "Fetcher", "urlopen_fetch", "DEFAULT_TIMEOUT"]
 
 #: Short by design: this is an interactive convenience, and a picker that hangs
 #: for seconds is worse than one that falls back to manual entry.
@@ -92,7 +92,7 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 _opener = urllib.request.build_opener(_NoRedirectHandler)
 
 
-def _urlopen_fetch(url: str, timeout: float, token: str) -> bytes:
+def urlopen_fetch(url: str, timeout: float, token: str) -> bytes:
     request = urllib.request.Request(url, method="GET")
     if token:
         request.add_header("Authorization", f"Bearer {token}")
@@ -166,7 +166,7 @@ def _classify_fetch_error(e: Exception, url: str, provider: Provider) -> str:
 def list_models(
     provider: Provider,
     *,
-    fetch: Fetcher = _urlopen_fetch,
+    fetch: Fetcher = urlopen_fetch,
     timeout: float = DEFAULT_TIMEOUT,
     token: str = "",
 ) -> ModelListResult:
