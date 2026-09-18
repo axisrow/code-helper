@@ -854,6 +854,36 @@ def clear_default(
     return True
 
 
+def read_default_config(paths: Paths) -> tuple[str | None, dict | None, str]:
+    """Read ``config.toml`` without raising: ``(text, parsed, parse_error)``.
+
+    The shared never-raise READ primitive for the file this module owns —
+    ``set-default``'s readback (``current_default``, ``current_default_model``)
+    and the ``doctor`` project their own answers onto it instead of each
+    hand-rolling read → parse → degrade. Exactly one of ``parsed`` and
+    ``parse_error`` is set when ``text`` is not ``None``, so the missing /
+    unparseable / parseable distinction survives for callers that need it
+    (``current_default`` collapses the three to one ``None``; the doctor
+    reports them separately).
+
+    ``current_default`` and ``current_default_model`` still carry their own
+    private copies of the ladder (pre-existing; migrate them onto this when
+    next touched). Same posture as theirs: read-only, never raises — a
+    missing, unreadable, or unparseable file is an answer, not an exception.
+    """
+    text = read_text_or_none(paths.codex_main_config())
+    if text is None:
+        return None, None, ""
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - py3.11+ is the floor
+        return None, None, ""
+    try:
+        return text, tomllib.loads(text), ""
+    except ValueError as exc:
+        return text, None, str(exc)
+
+
 def current_default(paths: Paths) -> str | None:
     """Which provider ``config.toml``'s ``model_provider`` names, or ``None``.
 

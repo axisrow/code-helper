@@ -50,21 +50,15 @@ def _fetch_down(url: str, timeout: float, token: str) -> bytes:
     raise urllib.error.URLError("connection refused")
 
 
-_FREE_TABLE = (
-    "\n"
-    "[model_providers.freellmapi]\n"
-    'name = "FreeLLMAPI local proxy"\n'
-    'base_url = "http://127.0.0.1:3002/v1/"\n'
-    'wire_api = "responses"\n'
-)
-
-
 def _free_config(env_key_line: str = 'env_key = "FREELLMAPI_API_KEY"\n') -> str:
     return (
         'model = "auto"\n'
         'model_provider = "freellmapi"\n'
         "\n"
-        + _FREE_TABLE
+        "[model_providers.freellmapi]\n"
+        'name = "FreeLLMAPI local proxy"\n'
+        'base_url = "http://127.0.0.1:3002/v1/"\n'
+        'wire_api = "responses"\n'
         + env_key_line
     )
 
@@ -119,7 +113,12 @@ def test_non_secret_provider_needs_no_token(tmp_path):
         'base_url = "http://127.0.0.1:11434/v1/"\n'
         'wire_api = "responses"\n',
     )
-    row = _row(doctor.run(paths, environ={}, launchctl_fn=_no_gui), "codex default")
+    row = _row(
+        doctor.run(
+            paths, environ={}, launchctl_fn=_no_gui, fetch=_fetch_models
+        ),
+        "codex default",
+    )
     assert row.status == "ok"
     assert "no token" in row.detail
 
@@ -155,7 +154,10 @@ def test_secret_provider_without_env_key_fails(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write_config(paths, _free_config(env_key_line=""))
     row = _row(
-        doctor.run(paths, environ={}, launchctl_fn=_no_gui), "codex default"
+        doctor.run(
+            paths, environ={}, launchctl_fn=_no_gui, fetch=_fetch_models
+        ),
+        "codex default",
     )
     assert row.status == "fail"
     assert "401" in row.detail
@@ -167,7 +169,10 @@ def test_mismatched_env_key_fails(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write_config(paths, _free_config('env_key = "WRONG_KEY"\n'))
     row = _row(
-        doctor.run(paths, environ={}, launchctl_fn=_no_gui), "codex default"
+        doctor.run(
+            paths, environ={}, launchctl_fn=_no_gui, fetch=_fetch_models
+        ),
+        "codex default",
     )
     assert row.status == "fail"
     assert "registry" in row.detail
@@ -181,6 +186,7 @@ def test_env_key_plus_env_var_is_clean(tmp_path):
         paths,
         environ={"FREELLMAPI_API_KEY": "tok-123456789"},
         launchctl_fn=_no_gui,
+        fetch=_fetch_models,
     )
     assert _row(report, "codex default").status == "ok"
     source = _row(report, "FREELLMAPI_API_KEY")
@@ -196,7 +202,10 @@ def test_env_var_only_in_launchctl_warns(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write_config(paths, _free_config())
     row = _row(
-        doctor.run(paths, environ={}, launchctl_fn=_gui_set), "FREELLMAPI_API_KEY"
+        doctor.run(
+            paths, environ={}, launchctl_fn=_gui_set, fetch=_fetch_models
+        ),
+        "FREELLMAPI_API_KEY",
     )
     assert row.status == "warn"
     assert "launchctl" in row.detail
@@ -208,7 +217,10 @@ def test_env_var_missing_everywhere_fails(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write_config(paths, _free_config())
     row = _row(
-        doctor.run(paths, environ={}, launchctl_fn=_no_gui), "FREELLMAPI_API_KEY"
+        doctor.run(
+            paths, environ={}, launchctl_fn=_no_gui, fetch=_fetch_models
+        ),
+        "FREELLMAPI_API_KEY",
     )
     assert row.status == "fail"
     assert "Missing environment variable" in row.detail
@@ -225,6 +237,7 @@ def test_env_cache_conflict_becomes_a_warning_row(tmp_path, monkeypatch):
         paths,
         environ={"FREELLMAPI_API_KEY": "env-value"},
         launchctl_fn=_no_gui,
+        fetch=_fetch_models,
     )
     rows = [r for r in report.rows if r.name == "FREELLMAPI_API_KEY"]
     assert [r.status for r in rows] == ["ok", "warn"]

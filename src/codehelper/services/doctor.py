@@ -19,14 +19,13 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
-from codehelper.backends._atomic import read_text_or_none
 from codehelper.errors import CodeHelperError
 from codehelper.services import models_api, secrets
 from codehelper.services.claude_settings import CREDENTIAL_ENV_KEYS, active_switch_env
+from codehelper.services.codex_default import read_default_config
 from codehelper.services.model import Provider, get_provider_for_legacy_read
 from codehelper.services.paths import Paths
 from codehelper.services.render import openai_env_key
@@ -82,17 +81,6 @@ def _launchctl_getenv(env_var: str) -> str:
     except (OSError, subprocess.SubprocessError):
         return ""
     return proc.stdout.strip()
-
-
-def _parse_config(paths: Paths) -> tuple[str | None, dict | None, str]:
-    """``(text, parsed, parse_error)`` — exactly one of the last two is set."""
-    text = read_text_or_none(paths.codex_main_config())
-    if text is None:
-        return None, None, ""
-    try:
-        return text, tomllib.loads(text), ""
-    except tomllib.TOMLDecodeError as exc:
-        return text, None, str(exc)
 
 
 def _token_source_rows(
@@ -151,7 +139,7 @@ def _codex_rows(
     Returns the rows plus the resolved registry provider (``None`` for native
     or custom) so the caller knows whether a backend probe applies.
     """
-    text, data, parse_error = _parse_config(paths)
+    text, data, parse_error = read_default_config(paths)
     if text is None:
         return (
             [CheckRow(OK, "codex default", "config.toml not found — codex on stock defaults")],
@@ -323,7 +311,7 @@ def run(
     *,
     environ: Mapping[str, str] = os.environ,
     launchctl_fn: LaunchctlFn = _launchctl_getenv,
-    fetch: models_api.Fetcher = models_api._urlopen_fetch,
+    fetch: models_api.Fetcher = models_api.urlopen_fetch,
 ) -> DoctorReport:
     """Run every check. Never raises; writes nothing; masks every token.
 
