@@ -53,6 +53,8 @@ from codehelper.services.model import (
 from codehelper.services.paths import Paths
 from codehelper.services.render import (
     openai_base_url,
+    openai_env_key,
+    openai_provider_table,
     toml_string,
     uniform_context_window,
 )
@@ -88,6 +90,13 @@ class DefaultPatch:
     #: same conditional-emission rule ``render.openai_toml_body`` and
     #: ``_render_anthropic_env`` use.
     context_window: int | None
+    #: The ``env_key`` line's value for a secret provider — the env var Codex
+    #: reads the bearer token from. Empty for every non-secret provider, which
+    #: writes NO line at all (byte-identity with pre-env_key output, the same
+    #: conditional-emission rule and LAST-line position as
+    #: ``render.openai_toml_body``). Without it Codex authenticates a
+    #: token-requiring proxy with no key at all (401 Invalid API key).
+    env_key: str = ""
 
 
 #: Provider IDs Codex CLI itself treats as built-in and refuses to see
@@ -169,6 +178,7 @@ def resolve_default_patch(agent: Agent, provider: Provider, model: str) -> Defau
         base_url=openai_base_url(provider.base_url, provider.base_url_is_openai_root),
         wire_api=provider.wire_api,
         context_window=uniform_context_window([model]),
+        env_key=openai_env_key(provider),
     )
 
 
@@ -376,14 +386,17 @@ def _render_model_providers_table(patch: DefaultPatch) -> str:
     ONE renderer for both "insert fresh" and "replace existing" call sites in
     :func:`_patch_model_providers_table`, so a first ``set-default`` and a
     later re-run of the same arguments can never drift in what they write —
-    the property idempotency (below) depends on.
+    the property idempotency (below) depends on. The block itself comes from
+    :func:`render.openai_provider_table` — the same home the per-alias
+    profile writer uses — so the two codex tables cannot drift on the field
+    set, the order, or the conditional env_key emission.
     """
-    table = patch.provider_table
-    return (
-        f"[model_providers.{table}]\n"
-        f'name = "{toml_string(patch.display_name)}"\n'
-        f'base_url = "{toml_string(patch.base_url)}"\n'
-        f'wire_api = "{toml_string(patch.wire_api)}"\n'
+    return openai_provider_table(
+        patch.provider_table,
+        patch.display_name,
+        patch.base_url,
+        patch.wire_api,
+        patch.env_key,
     )
 
 
@@ -644,6 +657,8 @@ def _verify_patch_applied(original: str, patched: str, patch: DefaultPatch) -> N
         "base_url": patch.base_url,
         "wire_api": patch.wire_api,
     }
+    if patch.env_key:
+        table_expected["env_key"] = patch.env_key
     table_actual = {k: table.get(k) for k in table_expected}
     if actual != expected or table_actual != table_expected:
         raise CodeHelperError(
