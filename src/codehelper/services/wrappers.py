@@ -45,7 +45,6 @@ from codehelper.services.agents import (
     get_agent as get_any_agent,
 )
 from codehelper.services.model import (
-    Agent,
     BaseUrlPolicy,
     ConfigShape,
     Provider,
@@ -65,30 +64,15 @@ from codehelper.services.render import (
 )
 from codehelper.services.spec import (
     PRESETS,
-    Preset,
     TierModels,
     WrapperSpec,
     build_spec,
     get_preset,
     preset_names,
     spec_from_preset,
-    suggest_alias,
 )
 
 __all__ = [
-    # re-exported so existing imports keep working
-    "WrapperSpec",
-    "TierModels",
-    "Preset",
-    "PRESETS",
-    "Agent",
-    "Provider",
-    "build_spec",
-    "get_preset",
-    "preset_names",
-    "spec_from_preset",
-    "suggest_alias",
-    "render_script",
     # lifecycle
     "install_wrapper",
     "remove_wrapper",
@@ -1139,8 +1123,6 @@ def _openai_toml_plan(paths: Paths, spec: WrapperSpec, token: str) -> list[_File
     and adopt it as ours). Modes: the wrapper follows :func:`_mode_for` (``0o700``
     for a secret, else ``0o755``); the profile is ``0o600`` owner-only.
     """
-    from codehelper.services.render import openai_toml_body
-
     config_path = paths.codex_config_for(spec.alias)
     return [
         _FilePlan(
