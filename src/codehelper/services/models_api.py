@@ -34,7 +34,13 @@ from dataclasses import dataclass
 from codehelper.services.model import ModelListAPI, Provider
 from codehelper.services.render import openai_base_url
 
-__all__ = ["list_models", "ModelListResult", "Fetcher", "urlopen_fetch", "DEFAULT_TIMEOUT"]
+__all__ = [
+    "list_models",
+    "ModelListResult",
+    "Fetcher",
+    "urlopen_fetch",
+    "DEFAULT_TIMEOUT",
+]
 
 #: Short by design: this is an interactive convenience, and a picker that hangs
 #: for seconds is worse than one that falls back to manual entry.

@@ -58,8 +58,7 @@ def _free_config(env_key_line: str = 'env_key = "FREELLMAPI_API_KEY"\n') -> str:
         "[model_providers.freellmapi]\n"
         'name = "FreeLLMAPI local proxy"\n'
         'base_url = "http://127.0.0.1:3002/v1/"\n'
-        'wire_api = "responses"\n'
-        + env_key_line
+        'wire_api = "responses"\n' + env_key_line
     )
 
 
@@ -129,9 +128,7 @@ def test_non_secret_provider_needs_no_token(tmp_path):
         'wire_api = "responses"\n',
     )
     row = _row(
-        doctor.run(
-            paths, environ={}, launchctl_fn=_no_gui, fetch=_fetch_models
-        ),
+        doctor.run(paths, environ={}, launchctl_fn=_no_gui, fetch=_fetch_models),
         "codex default",
     )
     assert row.status == "ok"
@@ -169,9 +166,7 @@ def test_secret_provider_without_env_key_fails(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write_config(paths, _free_config(env_key_line=""))
     row = _row(
-        doctor.run(
-            paths, environ={}, launchctl_fn=_no_gui, fetch=_fetch_models
-        ),
+        doctor.run(paths, environ={}, launchctl_fn=_no_gui, fetch=_fetch_models),
         "codex default",
     )
     assert row.status == "fail"
@@ -184,9 +179,7 @@ def test_mismatched_env_key_fails(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write_config(paths, _free_config('env_key = "WRONG_KEY"\n'))
     row = _row(
-        doctor.run(
-            paths, environ={}, launchctl_fn=_no_gui, fetch=_fetch_models
-        ),
+        doctor.run(paths, environ={}, launchctl_fn=_no_gui, fetch=_fetch_models),
         "codex default",
     )
     assert row.status == "fail"
@@ -217,9 +210,7 @@ def test_env_var_only_in_launchctl_warns(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write_config(paths, _free_config())
     row = _row(
-        doctor.run(
-            paths, environ={}, launchctl_fn=_gui_set, fetch=_fetch_models
-        ),
+        doctor.run(paths, environ={}, launchctl_fn=_gui_set, fetch=_fetch_models),
         "FREELLMAPI_API_KEY",
     )
     assert row.status == "warn"
@@ -232,9 +223,7 @@ def test_env_var_missing_everywhere_fails(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write_config(paths, _free_config())
     row = _row(
-        doctor.run(
-            paths, environ={}, launchctl_fn=_no_gui, fetch=_fetch_models
-        ),
+        doctor.run(paths, environ={}, launchctl_fn=_no_gui, fetch=_fetch_models),
         "FREELLMAPI_API_KEY",
     )
     assert row.status == "fail"

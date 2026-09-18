@@ -107,7 +107,9 @@ def _token_source_rows(
     value = environ.get(env_var, "")
     if value:
         rows = [
-            CheckRow(OK, env_var, f"set in the environment ({secrets.mask_token(value)})")
+            CheckRow(
+                OK, env_var, f"set in the environment ({secrets.mask_token(value)})"
+            )
         ]
         conflict = secrets.env_cache_conflict(
             secrets.ResolvedToken(value, secrets.SOURCE_ENV),
@@ -159,7 +161,13 @@ def _codex_rows(
     text, data, parse_error = read_default_config(paths)
     if text is None:
         return (
-            [CheckRow(OK, "codex default", "config.toml not found — codex on stock defaults")],
+            [
+                CheckRow(
+                    OK,
+                    "codex default",
+                    "config.toml not found — codex on stock defaults",
+                )
+            ],
             None,
         )
     if data is None:
@@ -223,9 +231,7 @@ def _codex_rows(
         ]
         env_var = table.get("env_key")
         if isinstance(env_var, str) and env_var:
-            rows.extend(
-                _token_source_rows(env_var, paths, name, environ, launchctl_fn)
-            )
+            rows.extend(_token_source_rows(env_var, paths, name, environ, launchctl_fn))
         return rows, None
 
     # openai_env_key IS the secret→token_env_var rule — the same helper both
@@ -306,9 +312,7 @@ def _claude_row(paths: Paths) -> CheckRow:
     """
     managed = active_switch_env(paths)
     if not managed:
-        return CheckRow(
-            OK, "claude settings", "no managed env override — native mode"
-        )
+        return CheckRow(OK, "claude settings", "no managed env override — native mode")
     base = managed.get("ANTHROPIC_BASE_URL")
     if base and not any(managed.get(key) for key in CREDENTIAL_ENV_KEYS):
         return CheckRow(
