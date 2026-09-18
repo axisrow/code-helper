@@ -846,14 +846,14 @@ def test_provider_first_flow_through_a_real_pty(tmp_path):
 
 @pytest.mark.integration
 @pytest.mark.skipif(os.name != "posix", reason="PTY tests require POSIX")
-@pytest.mark.xfail(
-    reason="The primary PTY flow is covered by hotkey-specific tests.", strict=False
-)
-def test_main_screen_default_wrapper_marker_through_a_real_pty(tmp_path):
-    """Issue #29: Enter on a wrapper makes it the default (`●` marker moves),
-    and the marker survives a TUI restart (state.json persistence). This is
-    the manual-PTY verification the issue requires — the injected-`read_key`
-    suite cannot see real ANSI redraw behavior."""
+def test_main_screen_chipset_apply_through_a_real_pty(tmp_path):
+    """The chipset's core interaction through a real PTY: ↓ onto the codex
+    row, → onto an installed wrapper's chip, Enter applies it — and answering
+    the set-default confirm with ``y`` really patches ~/.codex/config.toml.
+    The injected-`read_key` suite cannot see the raw-mode/ANSI interplay
+    (issue #29's original "Enter sets default" screen, as it evolved into
+    the #42 chipset) — this is the manual verification the repo convention
+    requires."""
     import errno
     import fcntl
     import pty
@@ -864,6 +864,10 @@ def test_main_screen_default_wrapper_marker_through_a_real_pty(tmp_path):
     import termios
     import time
 
+    from codehelper.services.paths import Paths
+    from codehelper.services.spec import build_spec
+    from codehelper.services.wrappers import install_wrapper
+
     environment = os.environ.copy()
     environment["HOME"] = str(tmp_path)
     environment.pop("ZAI_API_KEY", None)
@@ -872,77 +876,100 @@ def test_main_screen_default_wrapper_marker_through_a_real_pty(tmp_path):
         part for part in (source_dir, environment.get("PYTHONPATH")) if part
     )
 
-    def run_session(expect_marker_after_enter: bool) -> bytearray:
-        """Spawn the TUI, press Enter (first wrapper = default), read the redraw,
-        then Esc-quit. Returns the captured output."""
-        master_fd, slave_fd = pty.openpty()
-        # Force an 80-column terminal so a wrapper row is wide enough to show
-        # the marker yet narrow enough that `_fit` truncation is exercised.
-        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-        child = subprocess.Popen(
-            [sys.executable, "-m", "codehelper", "tui"],
-            cwd=str(Path(__file__).resolve().parents[1]),
-            env=environment,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            close_fds=True,
-        )
-        output = bytearray()
-        search_from = 0
+    # One installed codex wrapper: its chip sits on the codex row's chipset,
+    # and applying it patches the NOT-YET-EXISTING ~/.codex/config.toml — a
+    # real change, so the confirm prompt fires.
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(agent="codex", provider="ollama-direct", model="qwen3.5:9b")
+    install_wrapper(paths, spec)
 
-        def read_until(marker: str) -> None:
-            nonlocal search_from
-            deadline = time.monotonic() + 8
-            while time.monotonic() < deadline:
-                found = output.find(marker.encode(), search_from)
-                if found >= 0:
-                    search_from = found + len(marker)
-                    return
-                ready, _, _ = select.select([master_fd], [], [], 0.1)
-                if ready:
-                    try:
-                        output.extend(os.read(master_fd, 4096))
-                    except OSError as exc:
-                        if exc.errno != errno.EIO:
-                            raise
-            raise AssertionError(output.decode(errors="replace")[-3000:])
+    master_fd, slave_fd = pty.openpty()
+    # Force an 80-column terminal so the row is wide enough to show the chip
+    # yet narrow enough that `_fit` truncation is exercised.
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    child = subprocess.Popen(
+        [sys.executable, "-m", "codehelper", "tui"],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=environment,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+    output = bytearray()
+    search_from = 0
 
-        def menu_key(value: str) -> None:
-            deadline = time.monotonic() + 5
-            while termios.tcgetattr(master_fd)[3] & termios.ICANON:
-                if time.monotonic() >= deadline:
-                    raise AssertionError("TUI did not enter raw mode")
-                time.sleep(0.01)
-            os.write(master_fd, value.encode())
+    def read_until(marker: str) -> None:
+        nonlocal search_from
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            found = output.find(marker.encode(), search_from)
+            if found >= 0:
+                search_from = found + len(marker)
+                return
+            ready, _, _ = select.select([master_fd], [], [], 0.1)
+            if ready:
+                try:
+                    output.extend(os.read(master_fd, 4096))
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
+        raise AssertionError(output.decode(errors="replace")[-3000:])
 
-        try:
-            read_until("Esc quit")
-            menu_key("\x1b")
-            if expect_marker_after_enter:
-                assert b"\xe2\x97\x8f" not in output
-        finally:
-            if child.poll() is None:
-                child.kill()
-            child.wait(timeout=2)
-            os.close(master_fd)
-            os.close(slave_fd)
-        return output
+    def menu_key(value: str, marker: str) -> None:
+        """Write one key, then wait until the TUI proves it processed it.
 
-    # One session is enough: fresh install, no default set, then Enter on the
-    # first wrapper makes it the default and the `●` marker appears on the
-    # redrawn frame. Persistence across restarts is covered by the round-trip
-    # unit tests in test_state.py (set_default_wrapper/default_wrapper); this
-    # test exists only to exercise the real ANSI redraw path that the
-    # injected-`read_key` suite cannot see.
-    run_session(expect_marker_after_enter=True)
+        Both halves are load-bearing. Draining is what unblocks the TUI: the
+        menu restores the terminal discipline with TCSADRAIN after every
+        keypress — a test that stops reading leaves the queue full and the
+        TUI blocked mid-restore, so no raw read ever resumes (the marker
+        redraw alone is not enough either: it sits mid-frame). The ICANON
+        check then guarantees the key is written while the menu is back in
+        its blocking raw read, not echoed into the canonical line
+        discipline."""
+        deadline = time.monotonic() + 5
+        while True:
+            ready, _, _ = select.select([master_fd], [], [], 0.05)
+            if ready:
+                try:
+                    output.extend(os.read(master_fd, 4096))
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
+            elif not (termios.tcgetattr(master_fd)[3] & termios.ICANON):
+                break  # output quiet AND the menu is back in its raw read
+            elif time.monotonic() >= deadline:
+                raise AssertionError("TUI did not return to its raw read")
+        os.write(master_fd, value.encode())
+        read_until(marker)
+
+    try:
+        read_until("Esc quit")
+        # Each key waits for the redraw proving it landed: the row cursor on
+        # codex, then the reverse-video focus on the wrapper chip. ENTER's
+        # marker is the confirm prompt itself.
+        menu_key("\x1b[B", "> codex")
+        menu_key("\x1b[C", "\x1b[7mqwen3.5-codex")
+        menu_key("\r", "Continue? [y/N]")
+        assert b"About to write" in output
+        os.write(master_fd, b"y\n")
+        read_until("Press any key to continue")
+        os.write(master_fd, b" ")  # acknowledge the pause; teardown kills the TUI
+        time.sleep(0.5)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=2)
+        os.close(master_fd)
+        os.close(slave_fd)
+
+    # The accept really went through: config.toml now carries the patch.
+    text = paths.codex_main_config().read_text(encoding="utf-8")
+    assert 'model_provider = "ollama-direct"' in text
 
 
 @pytest.mark.integration
 @pytest.mark.skipif(os.name != "posix", reason="PTY tests require POSIX")
-@pytest.mark.xfail(
-    reason="The main-screen set-default control moved to the c hotkey.", strict=False
-)
 def test_set_default_confirmation_preview_is_visible_before_the_prompt(tmp_path):
     """Manual PTY verification for the ``_run`` tee fix: ``set-default``'s
     diff preview and ``[y/N]`` prompt must reach the real terminal BEFORE the
@@ -1010,20 +1037,42 @@ def test_set_default_confirmation_preview_is_visible_before_the_prompt(tmp_path)
                         raise
         raise AssertionError(output.decode(errors="replace")[-3000:])
 
-    def menu_key(value: str) -> None:
+    def menu_key(value: str, marker: str) -> None:
+        """Write one key, then wait until the TUI proves it processed it.
+
+        Both halves are load-bearing. Draining is what unblocks the TUI: the
+        menu restores the terminal discipline with TCSADRAIN after every
+        keypress — a test that stops reading leaves the queue full and the
+        TUI blocked mid-restore, so no raw read ever resumes (the marker
+        redraw alone is not enough either: it sits mid-frame). The ICANON
+        check then guarantees the key is written while the menu is back in
+        its blocking raw read, not echoed into the canonical line
+        discipline."""
         deadline = time.monotonic() + 5
-        while termios.tcgetattr(master_fd)[3] & termios.ICANON:
-            if time.monotonic() >= deadline:
-                raise AssertionError("TUI did not enter raw mode")
-            time.sleep(0.01)
+        while True:
+            ready, _, _ = select.select([master_fd], [], [], 0.05)
+            if ready:
+                try:
+                    output.extend(os.read(master_fd, 4096))
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
+            elif not (termios.tcgetattr(master_fd)[3] & termios.ICANON):
+                break  # output quiet AND the menu is back in its raw read
+            elif time.monotonic() >= deadline:
+                raise AssertionError("TUI did not return to its raw read")
         os.write(master_fd, value.encode())
+        read_until(marker)
 
     try:
         read_until("Esc quit")
-        menu_key("c")
+        # Each key waits for the redraw proving it landed: the row cursor on
+        # codex, then the reverse-video focus on the wrapper chip.
+        menu_key("\x1b[B", "> codex")
+        menu_key("\x1b[C", "\x1b[7mqwen3.5-codex")
         # The preview/prompt is written outside the TUI's raw-mode redraw
         # loop, so canonical-mode input() reads a real line — send "n\n".
-        read_until("Continue? [y/N]")
+        menu_key("\r", "Continue? [y/N]")
         # By the time the prompt itself is visible, the preview text that
         # precedes it must already be in the captured output too — proving
         # it reached the terminal before the blocking read, not after.
@@ -1032,8 +1081,8 @@ def test_set_default_confirmation_preview_is_visible_before_the_prompt(tmp_path)
         # A decline raises CodeHelperError; `_run` reports it and pauses on
         # `_notify` until acknowledged.
         read_until("Press any key to continue")
-        menu_key(" ")
-        read_until("Esc quit")
+        os.write(master_fd, b" ")  # acknowledge the pause; teardown kills the TUI
+        time.sleep(0.5)
     finally:
         if child.poll() is None:
             child.kill()
