@@ -63,6 +63,21 @@ def _free_config(env_key_line: str = 'env_key = "FREELLMAPI_API_KEY"\n') -> str:
     )
 
 
+def _litellm_config() -> str:
+    """A REQUIRED-policy provider: the registry base_url is empty, the real
+    address lives in the config.toml table (what `set-default --base-url`
+    writes)."""
+    return (
+        'model_provider = "litellm"\n'
+        "\n"
+        "[model_providers.litellm]\n"
+        'name = "LiteLLM proxy"\n'
+        'base_url = "http://127.0.0.1:9911/v1/"\n'
+        'wire_api = "responses"\n'
+        'env_key = "LITELLM_API_KEY"\n'
+    )
+
+
 def _row(report: DoctorReport, name: str) -> CheckRow:
     return next(r for r in report.rows if r.name == name)
 
@@ -331,6 +346,53 @@ def test_probe_carries_the_resolved_token(tmp_path):
         fetch=fetch,
     )
     assert seen["token"] == "env-value"
+
+
+@pytest.mark.integration
+def test_probe_uses_the_base_url_recorded_in_config_toml(tmp_path):
+    """The probe must test the endpoint codex will actually hit: for a
+    REQUIRED-policy provider (litellm) the registry base_url is an empty
+    placeholder and the real address lives in the config.toml table —
+    probing the registry entry would WARN "no base URL configured" on a
+    perfectly healthy setup."""
+    seen: dict = {}
+
+    def fetch(url: str, timeout: float, token: str) -> bytes:
+        seen["url"] = url
+        return b'{"data": [{"id": "m1"}]}'
+
+    paths = Paths.from_home(tmp_path)
+    _write_config(paths, _litellm_config())
+    report = doctor.run(
+        paths,
+        environ={"LITELLM_API_KEY": "tok"},
+        launchctl_fn=_no_gui,
+        fetch=fetch,
+    )
+    row = _row(report, "litellm: probe")
+    assert row.status == "ok"
+    assert seen["url"] == "http://127.0.0.1:9911/v1/models"
+
+
+@pytest.mark.integration
+def test_env_cache_conflict_respects_the_provider_policy(tmp_path, monkeypatch):
+    """A non-fixed policy never consults the default cache
+    (env_cache_conflict's own gate): the "unset the env var to use the
+    profile" remedy is FALSE for a REQUIRED-policy provider — unsetting
+    would prompt, not select the profile — so no conflict row may appear."""
+    paths = Paths.from_home(tmp_path)
+    _write_config(paths, _litellm_config())
+    monkeypatch.setattr(
+        secrets, "credential_for", lambda paths_, name, profile=None: "cached-value"
+    )
+    report = doctor.run(
+        paths,
+        environ={"LITELLM_API_KEY": "env-value"},
+        launchctl_fn=_no_gui,
+        fetch=_fetch_models,
+    )
+    rows = [r for r in report.rows if r.name == "LITELLM_API_KEY"]
+    assert [r.status for r in rows] == ["ok"]
 
 
 # ---------------------------------------------------------------------------

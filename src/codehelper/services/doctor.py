@@ -26,7 +26,11 @@ from codehelper.errors import CodeHelperError
 from codehelper.services import models_api, secrets
 from codehelper.services.claude_settings import CREDENTIAL_ENV_KEYS, active_switch_env
 from codehelper.services.codex_default import read_default_config
-from codehelper.services.model import Provider, get_provider_for_legacy_read
+from codehelper.services.model import (
+    Provider,
+    get_provider_for_legacy_read,
+    with_base_url,
+)
 from codehelper.services.paths import Paths
 from codehelper.services.render import openai_env_key
 
@@ -89,8 +93,17 @@ def _token_source_rows(
     provider_name: str,
     environ: Mapping[str, str],
     launchctl_fn: LaunchctlFn,
+    base_url_policy: str = "fixed",
 ) -> list[CheckRow]:
-    """Where can codex actually read ``env_var`` — env, launchctl, nowhere?"""
+    """Where can codex actually read ``env_var`` — env, launchctl, nowhere?
+
+    ``base_url_policy`` threads the provider's own gate into
+    ``env_cache_conflict``: a non-fixed policy never consults the default
+    cache, so the "unset the env var to use the profile" remedy the warning
+    names would be FALSE there. Custom tables keep the default — no cache
+    entry exists for a name outside the registry, so the check is a no-op
+    either way.
+    """
     value = environ.get(env_var, "")
     if value:
         rows = [
@@ -101,6 +114,7 @@ def _token_source_rows(
             env_var=env_var,
             paths=paths,
             provider_name=provider_name,
+            base_url_policy=base_url_policy,
         )
         if conflict:
             rows.append(CheckRow(WARN, env_var, conflict))
@@ -137,7 +151,10 @@ def _codex_rows(
     """The config.toml side: which provider is live, can it authenticate?
 
     Returns the rows plus the resolved registry provider (``None`` for native
-    or custom) so the caller knows whether a backend probe applies.
+    or custom) so the caller knows whether a backend probe applies. The
+    provider comes back with the table's own base_url substituted in
+    (``with_base_url``) — the probe must test the address codex will
+    actually hit, not the registry placeholder.
     """
     text, data, parse_error = read_default_config(paths)
     if text is None:
@@ -178,6 +195,21 @@ def _codex_rows(
         provider = get_provider_for_legacy_read(name)
     except CodeHelperError:
         provider = None
+
+    # The probe must test the endpoint codex will actually hit: for a
+    # non-fixed base_url_policy the registry address is a placeholder
+    # (REQUIRED = empty) and the real one lives in the table this function
+    # just read. with_base_url is THE substitution point and its own policy
+    # branch gates what may be replaced — a CodeHelperError (a FIXED
+    # provider, or a hand-mangled URL) keeps the registry entry, the same
+    # never-raise posture as every other read here.
+    if provider is not None:
+        configured = table.get("base_url")
+        if isinstance(configured, str) and configured:
+            try:
+                provider = with_base_url(provider, configured)
+            except CodeHelperError:
+                pass
 
     if provider is None:
         # A hand-written table this tool does not know. Its env_key (when it
@@ -250,7 +282,16 @@ def _codex_rows(
     rows = [
         CheckRow(OK, "codex default", f"{provider.name}: env_key={expected} in place")
     ]
-    rows.extend(_token_source_rows(expected, paths, provider.name, environ, launchctl_fn))
+    rows.extend(
+        _token_source_rows(
+            expected,
+            paths,
+            provider.name,
+            environ,
+            launchctl_fn,
+            base_url_policy=provider.base_url_policy,
+        )
+    )
     return rows, provider
 
 

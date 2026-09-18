@@ -57,7 +57,7 @@ def redirecting_server():
 
 
 @pytest.mark.unit
-def testurlopen_fetch_refuses_a_redirect_instead_of_following_it(redirecting_server):
+def test_urlopen_fetch_refuses_a_redirect_instead_of_following_it(redirecting_server):
     """The core of finding L's fix: a redirecting endpoint must not have its
     ``Location`` followed — proven by the fact fetching raises rather than
     silently returning whatever ``198.51.100.1`` (deliberately unroutable)
@@ -69,7 +69,7 @@ def testurlopen_fetch_refuses_a_redirect_instead_of_following_it(redirecting_ser
 
 
 @pytest.mark.unit
-def testurlopen_fetch_sends_the_token_only_to_the_original_host(redirecting_server):
+def test_urlopen_fetch_sends_the_token_only_to_the_original_host(redirecting_server):
     """Even though the redirect is refused (proven above), confirm the ORIGIN
     request did carry the bearer token — this test would also catch a
     regression where the fix accidentally stopped sending the token at all,
