@@ -434,6 +434,23 @@ def test_best_effort_lock_propagates_body_exceptions_once(tmp_path):
     assert ran == [1]
 
 
+@pytest.mark.unit
+def test_best_effort_lock_propagates_an_oserror_body_once(tmp_path):
+    """The OSError twin of the pin above, and the second half of the
+    docstring's claim: an OSError raised by the BODY must not be mistaken
+    for a failed acquisition — the naive try/except-around-the-yield
+    refactor would swallow it, run the body a second time, and crash with
+    "generator didn't stop after throw()" (the exact bug
+    ``test_state_concurrency`` pins for ``state._locked_update``)."""
+    target = tmp_path / "data.json"
+    ran = []
+    with pytest.raises(OSError, match="from the body"):
+        with atomic_mod.best_effort_lock(target):
+            ran.append(1)
+            raise OSError("from the body")
+    assert ran == [1]
+
+
 # --------------------------------------------------------------------------- #
 # read_json_object — never-raises JSON-object read
 # --------------------------------------------------------------------------- #
