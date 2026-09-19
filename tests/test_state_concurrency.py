@@ -24,6 +24,7 @@ import json
 import threading
 
 import pytest
+from conftest import paths_from_home as _paths
 
 from codehelper.backends._atomic import atomic_write
 from codehelper.errors import CodeHelperError
@@ -40,10 +41,6 @@ from codehelper.services.state import (
 )
 
 _URL = "http://127.0.0.1:8118"
-
-
-def _paths(tmp_path) -> Paths:
-    return Paths.from_home(tmp_path)
 
 
 def _set_saved_proxy_without_lock(paths: Paths, url: str, barrier=None) -> None:

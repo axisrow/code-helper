@@ -21,6 +21,7 @@ import json
 import stat
 
 import pytest
+from conftest import paths_from_home as _paths
 
 from codehelper.services.paths import Paths
 from codehelper.services.secrets import (
@@ -40,10 +41,6 @@ from codehelper.services.secrets import (
     seed_default_profile,
     token_for_discovery,
 )
-
-
-def _paths(tmp_path) -> Paths:
-    return Paths.from_home(tmp_path)
 
 
 def _write_credentials_file(paths: Paths, content: str) -> None:

@@ -37,19 +37,25 @@ from codehelper.services.paths import Paths
 from codehelper.services.render import MODEL_CONTEXT_WINDOWS, uniform_context_window
 from codehelper.services.state import context_window, set_context_window
 
-__all__ = ["resolve_context_window"]
+__all__ = ["CONTEXT_WINDOW_PRESETS", "resolve_context_window"]
 
 #: Consecutive bad custom inputs tolerated before giving up (mirrors
 #: ``secrets.resolve_token``'s ``retries=3``).
 _RETRIES = 3
 
-#: ``(value, label)`` menu items — value is the string handed back by the
-#: menu, ``"custom"`` meaning "ask for a number" and ``"0"`` meaning
-#: "no declaration" (Claude Code's native fallback, today's behaviour).
-_MENU_ITEMS: Sequence[tuple[str, str]] = (
+#: The ``(value, label)`` preset rows every context-window menu offers — the
+#: CLI ask flow and the TUI edit screen render the SAME three. ``value`` is
+#: the string handed back by the menu; ``"0"`` means "no declaration"
+#: (Claude Code's native fallback, today's behaviour). The custom-entry
+#: sentinel and any Back row are the caller's — they differ per surface.
+CONTEXT_WINDOW_PRESETS: Sequence[tuple[str, str]] = (
     ("0", "no declaration — Claude Code's native 200k fallback"),
     ("1000000", "1,000,000 tokens (1M)"),
     ("2000000", "2,000,000 tokens (2M)"),
+)
+
+_MENU_ITEMS: Sequence[tuple[str, str]] = (
+    *CONTEXT_WINDOW_PRESETS,
     ("custom", "custom…"),
 )
 

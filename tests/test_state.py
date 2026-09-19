@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from conftest import paths_from_home as _paths
 
 from codehelper.services.paths import Paths
 from codehelper.services.state import (
@@ -32,10 +33,6 @@ from codehelper.services.state import (
     set_default_wrapper,
     set_provider_disabled,
 )
-
-
-def _paths(tmp_path) -> Paths:
-    return Paths.from_home(tmp_path)
 
 
 def _write_state_file(paths: Paths, content: str) -> None:

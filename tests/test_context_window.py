@@ -17,6 +17,7 @@ interactive menu → ``None``. These tests pin:
 from __future__ import annotations
 
 import pytest
+from conftest import paths_from_home as _paths
 
 from codehelper.cli.menu import MenuCancelled
 from codehelper.errors import CodeHelperError
@@ -27,10 +28,6 @@ from codehelper.services.state import context_window, set_context_window
 GLM = "glm-5.3"  # in MODEL_CONTEXT_WINDOWS (1M)
 
 _MENU = {"0": "0", "1": "1000000", "2": "2000000", "c": "custom"}
-
-
-def _paths(tmp_path) -> Paths:
-    return Paths.from_home(tmp_path)
 
 
 def _select(choice: str):

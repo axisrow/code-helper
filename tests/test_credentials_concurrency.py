@@ -39,6 +39,7 @@ import json
 import threading
 
 import pytest
+from conftest import paths_from_home as _paths
 
 from codehelper.backends._atomic import atomic_write
 from codehelper.services import secrets as secrets_module
@@ -51,10 +52,6 @@ from codehelper.services.secrets import (
     save_credential,
     seed_default_profile,
 )
-
-
-def _paths(tmp_path) -> Paths:
-    return Paths.from_home(tmp_path)
 
 
 def _save_credential_without_lock(

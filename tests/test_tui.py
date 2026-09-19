@@ -5,14 +5,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
-from types import SimpleNamespace
-from typing import cast
 
 import pytest
+from conftest import ctx_window_zero
 
 from codehelper.__main__ import main
 from codehelper.services.paths import Paths
+
+
+def _tui_args(**overrides: bool) -> argparse.Namespace:
+    """``args`` for a directly-constructed ``TuiSession`` — the two flags the
+    session reads, overridable where a test drives a flag itself."""
+    return argparse.Namespace(debug=False, dry_run=False, **overrides)
 
 
 def _menu_sequence(monkeypatch, answers):
@@ -88,23 +94,22 @@ def test_main_menu_lists_wrappers_grouped_by_agent_and_quit_exits(monkeypatch, c
 
 
 @pytest.mark.integration
-def test_add_order_is_agent_provider_model_alias(monkeypatch):
+def test_add_order_is_agent_provider_model_alias(monkeypatch, recording_select):
     """`add` is agent-first: kind (wrapper/agent), then which agent, then the
     old provider -> model -> alias order — with no separate agent screen
     after the model, since the agent is already scoped by then."""
-    seen: list[str] = []
-    answers = iter(["add", "wrapper", "codex", "ollama-direct", "model-x", "quit"])
-
-    def _select(_items, *, prompt, **_kwargs):
-        if str(prompt).startswith("Context window for"):
-            return "0"  # scripted "no declaration" — tests here don't care
-        # The main-menu header is a callable (live active-profile display).
-        seen.append(prompt() if callable(prompt) else prompt)
-        return next(answers)
+    select = recording_select(
+        "add",
+        "wrapper",
+        "codex",
+        "ollama-direct",
+        "model-x",
+        "quit",
+        decide=ctx_window_zero,
+    )
 
     import codehelper.services.models_api as api
 
-    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     monkeypatch.setattr(
         api,
         "list_models",
@@ -115,40 +120,36 @@ def test_add_order_is_agent_provider_model_alias(monkeypatch):
     assert main(["tui"]) == 0
     # The header no longer restates which backend is live: the chipset rows
     # say that in place (see TuiSession._main_prompt).
-    assert seen[0].startswith("codehelper")
-    assert "Live:" not in seen[0]
-    assert seen[1:4] == [
+    assert select.prompts[0].startswith("codehelper")
+    assert "Live:" not in select.prompts[0]
+    assert select.prompts[1:4] == [
         "What do you want to add?",
         "Add a wrapper for which agent?",
         "Select a provider for codex:",
     ]
-    assert "codex › Select a model for ollama-direct:" in seen
-    assert not any(p == "Select an agent:" for p in seen)
+    assert "codex › Select a model for ollama-direct:" in select.prompts
+    assert not any(p == "Select an agent:" for p in select.prompts)
     assert Paths.default().script_for("my-codex").exists()
 
 
 @pytest.mark.integration
-def test_add_agent_branch_persists_a_user_agent_end_to_end(monkeypatch):
+def test_add_agent_branch_persists_a_user_agent_end_to_end(
+    monkeypatch, recording_select
+):
     """`a` → Agent registers a new CLI integration that immediately shows up
     in the merged agent list (Stage 1.3) — verified by then adding a wrapper
     FOR that new agent via the unscoped Wrapper branch."""
-    answers = iter(
-        [
-            "add",
-            "agent",  # kind: Agent, not Wrapper
-            "add",
-            "wrapper",
-            "myagent",  # the just-added agent appears in the picker
-            "ollama-direct",
-            "model-x",
-            "quit",
-        ]
+    recording_select(
+        "add",
+        "agent",  # kind: Agent, not Wrapper
+        "add",
+        "wrapper",
+        "myagent",  # the just-added agent appears in the picker
+        "ollama-direct",
+        "model-x",
+        "quit",
+        decide=ctx_window_zero,
     )
-
-    def _select(_items, *, prompt="", **_kwargs):
-        if str(prompt).startswith("Context window for"):
-            return "0"  # scripted "no declaration"
-        return next(answers)
 
     agent_field_answers = iter(["myagent", "", ""])  # name, binary, description
 
@@ -159,7 +160,6 @@ def test_add_agent_branch_persists_a_user_agent_end_to_end(monkeypatch):
 
     import codehelper.services.models_api as api
 
-    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     monkeypatch.setattr("codehelper.cli.menu.read_line", _read_line)
     monkeypatch.setattr(
         api,
@@ -180,22 +180,24 @@ def test_add_agent_branch_persists_a_user_agent_end_to_end(monkeypatch):
 
 
 @pytest.mark.integration
-def test_alias_prompt_carries_a_breadcrumb_of_earlier_choices(monkeypatch):
+def test_alias_prompt_carries_a_breadcrumb_of_earlier_choices(
+    monkeypatch, recording_select
+):
     """The alias prompt is the last screen before a real filesystem write and
     the furthest from the choices that led there — it must show them, since
     there is no separate summary screen."""
-    seen: list[str] = []
-    answers = iter(["add", "wrapper", "codex", "ollama-direct", "model-x", "quit"])
-
-    def _select(_items, *, prompt, **_kwargs):
-        if str(prompt).startswith("Context window for"):
-            return "0"  # scripted "no declaration" — tests here don't care
-        seen.append(prompt() if callable(prompt) else prompt)
-        return next(answers)
+    recording_select(
+        "add",
+        "wrapper",
+        "codex",
+        "ollama-direct",
+        "model-x",
+        "quit",
+        decide=ctx_window_zero,
+    )
 
     import codehelper.services.models_api as api
 
-    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     monkeypatch.setattr(
         api,
         "list_models",
@@ -215,20 +217,19 @@ def test_alias_prompt_carries_a_breadcrumb_of_earlier_choices(monkeypatch):
 
 
 @pytest.mark.integration
-def test_literal_provider_skips_profile_screen(monkeypatch):
-    seen: list[str] = []
-    answers = iter(["add", "wrapper", "claude", "ollama-direct", "model-x", "quit"])
-
-    def _select(_items, *, prompt, **_kwargs):
-        if str(prompt).startswith("Context window for"):
-            return "0"  # scripted "no declaration" — tests here don't care
-        # The main-menu header is a callable (live active-profile display).
-        seen.append(prompt() if callable(prompt) else prompt)
-        return next(answers)
+def test_literal_provider_skips_profile_screen(monkeypatch, recording_select):
+    select = recording_select(
+        "add",
+        "wrapper",
+        "claude",
+        "ollama-direct",
+        "model-x",
+        "quit",
+        decide=ctx_window_zero,
+    )
 
     import codehelper.services.models_api as api
 
-    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     monkeypatch.setattr(
         api,
         "list_models",
@@ -237,7 +238,7 @@ def test_literal_provider_skips_profile_screen(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _prompt: "local")
 
     assert main(["tui"]) == 0
-    assert not any("Token profile" in prompt for prompt in seen)
+    assert not any("Token profile" in prompt for prompt in select.prompts)
 
 
 @pytest.mark.integration
@@ -301,24 +302,21 @@ def test_ctrl_c_from_tui_propagates_as_hard_cancel(monkeypatch):
 
 @pytest.mark.integration
 def test_model_step_falls_back_to_known_models_when_discovery_is_unavailable(
-    monkeypatch,
+    monkeypatch, recording_select
 ):
     """zai has no discovery endpoint at all — the model menu must still offer
     the registry's `known_models` instead of forcing manual entry, and the
     prompt must say the list is known-not-discovered (Stage 3)."""
-    seen_prompts: list[str] = []
 
-    def _select(_items, *, prompt="", **_kwargs):
-        text = prompt() if callable(prompt) else prompt
-        seen_prompts.append(text)
-        if str(text).startswith("Context window for"):
+    def _decide(text: str) -> str | None:
+        if text.startswith("Context window for"):
             return "0"  # scripted "no declaration" — tests here don't care
         if "Select a model for zai" in text:
             return "glm-5-turbo"
-        return next(answers)
+        return None
 
-    answers = iter(["add", "wrapper", "claude", "zai", "quit"])
-    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
+    select = recording_select("add", "wrapper", "claude", "zai", "quit", decide=_decide)
+
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-first")
     monkeypatch.setattr("builtins.input", lambda _prompt: "known-wrapper")
 
@@ -326,7 +324,7 @@ def test_model_step_falls_back_to_known_models_when_discovery_is_unavailable(
 
     assert any(
         "Select a model for zai (known models — discovery unavailable):" in p
-        for p in seen_prompts
+        for p in select.prompts
     )
     assert "glm-5-turbo" in Paths.default().script_for("known-wrapper").read_text()
 
@@ -496,9 +494,7 @@ def test_run_default_shows_the_transcript_once_and_pauses(capsys, monkeypatch):
 
     pauses = []
     monkeypatch.setattr(menu, "press_any_key", lambda *_a: pauses.append(1))
-    session = TuiSession(
-        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-    )
+    session = TuiSession(_tui_args())
 
     def handler(_req):
         print("single-line")
@@ -519,9 +515,7 @@ def test_run_live_is_visible_midflow_and_never_replayed(capsys, monkeypatch):
 
     pauses = []
     monkeypatch.setattr(menu, "press_any_key", lambda *_a: pauses.append(1))
-    session = TuiSession(
-        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-    )
+    session = TuiSession(_tui_args())
     seen = {}
 
     def handler(_req):
@@ -543,9 +537,7 @@ def test_run_silent_displays_nothing(capsys, monkeypatch):
 
     pauses = []
     monkeypatch.setattr(menu, "press_any_key", lambda *_a: pauses.append(1))
-    session = TuiSession(
-        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-    )
+    session = TuiSession(_tui_args())
 
     def handler(_req):
         print("quiet-line")
@@ -564,9 +556,7 @@ def test_run_default_error_shows_error_line_then_transcript(capsys, monkeypatch)
 
     pauses = []
     monkeypatch.setattr(menu, "press_any_key", lambda *_a: pauses.append(1))
-    session = TuiSession(
-        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-    )
+    session = TuiSession(_tui_args())
 
     def handler(_req):
         print("before failure")
@@ -591,9 +581,7 @@ def test_run_live_error_shows_everything_once(capsys, monkeypatch):
 
     pauses = []
     monkeypatch.setattr(menu, "press_any_key", lambda *_a: pauses.append(1))
-    session = TuiSession(
-        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-    )
+    session = TuiSession(_tui_args())
     seen = {}
 
     def handler(_req):
@@ -622,7 +610,7 @@ def test_a_on_the_codex_row_scopes_add_to_codex(monkeypatch):
     # lands back on the main screen — CANCEL then quits.
     real_menu_keys = iter(["DOWN", "a", "CANCEL"])
 
-    def _select(items, *, prompt, **kwargs):
+    def _select(items, *, prompt: str | Callable[[], str] = "", **kwargs):
         text = prompt() if callable(prompt) else prompt
         seen.append(text)
         if text == "Select a provider for codex:":
@@ -663,7 +651,7 @@ def test_a_without_row_context_asks_what_to_add_first(monkeypatch):
     # carries no agent scope of its own.
     real_menu_keys = iter(["DOWN", "DOWN", "DOWN", "a", "CANCEL"])
 
-    def _select(items, *, prompt, **kwargs):
+    def _select(items, *, prompt: str | Callable[[], str] = "", **kwargs):
         text = prompt() if callable(prompt) else prompt
         seen.append(text)
         if text == "What do you want to add?":
@@ -726,21 +714,13 @@ def test_add_agent_action_row_registers_a_new_agent(monkeypatch):
 
 
 @pytest.mark.integration
-def test_add_wrapper_action_row_opens_the_unscoped_kind_picker(monkeypatch):
+def test_add_wrapper_action_row_opens_the_unscoped_kind_picker(recording_select):
     """Entering the `+ add wrapper` row must open the unscoped Add flow — the
     kind picker (wrapper vs agent), not a provider list scoped to one agent."""
-    seen: list[str] = []
-    answers = iter(["__action:add-wrapper", "__back__", "quit"])
-
-    def _select(_items, *, prompt, **_kwargs):
-        text = prompt() if callable(prompt) else prompt
-        seen.append(text)
-        return next(answers)
-
-    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
+    select = recording_select("__action:add-wrapper", "__back__", "quit")
 
     assert main(["tui"]) == 0
-    assert "What do you want to add?" in seen
+    assert "What do you want to add?" in select.prompts
 
 
 @pytest.mark.integration
@@ -1209,7 +1189,9 @@ def test_set_default_confirmation_preview_is_visible_before_the_prompt(tmp_path)
 
 
 @pytest.mark.integration
-def test_tui_profile_screen_sets_active_and_persists_across_runs(monkeypatch):
+def test_tui_profile_screen_sets_active_and_persists_across_runs(
+    monkeypatch, recording_select
+):
     import codehelper.services.secrets as secrets
     from codehelper.services.state import active_selection
 
@@ -1220,17 +1202,11 @@ def test_tui_profile_screen_sets_active_and_persists_across_runs(monkeypatch):
     _menu_sequence(monkeypatch, ["profile", "litellm", "work", "quit"])
     assert main(["tui"]) == 0
 
-    # Run 2: state.json survives — capture the main-menu header callable and
-    # verify it now renders the profile the first run wrote.
-    prompts = []
-
-    def _select(_items, *, prompt, **_kwargs):
-        prompts.append(prompt)
-        return "quit"
-
-    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
+    # Run 2: state.json survives — verify the main-menu header now renders
+    # the profile the first run wrote.
+    select = recording_select("quit")
     assert main(["tui"]) == 0
-    assert prompts and prompts[0]().endswith("litellm/work")
+    assert select.prompts and select.prompts[0].endswith("litellm/work")
     assert active_selection(paths) == ("litellm", "work")
 
 
@@ -1370,22 +1346,16 @@ def test_tui_tab_falls_through_a_stale_stored_provider(monkeypatch):
 
 @pytest.mark.integration
 def test_tui_header_shows_active_profile_without_a_prior_profile_screen_visit(
-    monkeypatch,
+    monkeypatch, recording_select
 ):
     import codehelper.services.secrets as secrets
 
     paths = Paths.default()
     secrets.save_credential(paths, "zai", "sk-one", "work")
 
-    prompts = []
-
-    def _select(_items, *, prompt, **_kwargs):
-        prompts.append(prompt)
-        return "quit"
-
-    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
+    select = recording_select("quit")
     assert main(["tui"]) == 0
-    assert prompts and prompts[0]().endswith("zai/work")
+    assert select.prompts and select.prompts[0].endswith("zai/work")
 
 
 @pytest.mark.integration
@@ -1544,40 +1514,38 @@ def test_tui_agy_provider_list_is_antigravity_only(monkeypatch):
 
 
 @pytest.mark.integration
-def test_tui_add_agy_flow_feeds_the_known_models_and_installs(monkeypatch):
+def test_tui_add_agy_flow_feeds_the_known_models_and_installs(
+    monkeypatch, recording_select
+):
     """Full agy add flow through the SAME _handle_add path as the CLI: with
     discovery structurally unavailable (no base URL, model_list_api NONE),
     the model picker is fed the provider's known_models and LABELLED as
     such; installing writes the bare native dispatch line."""
-    seen_prompts: list[str] = []
-    answers = iter(
-        [
-            "add",
-            "wrapper",
-            "agy",
-            "antigravity",
-            "gemini-3.1-pro-low",
-            "quit",
-        ]
-    )
 
-    def _select(_items, *, prompt="", **_kwargs):
-        if str(prompt).startswith("Context window for"):  # pragma: no cover
+    def _refuse_window(text: str) -> str | None:
+        if text.startswith("Context window for"):  # pragma: no cover
             raise AssertionError("agent-native flow must not ask for a window")
-        prompt_text = str(prompt() if callable(prompt) else prompt)
-        seen_prompts.append(prompt_text)
-        return next(answers)
+        return None
+
+    select = recording_select(
+        "add",
+        "wrapper",
+        "agy",
+        "antigravity",
+        "gemini-3.1-pro-low",
+        "quit",
+        decide=_refuse_window,
+    )
 
     def _read_line(_prompt, **_kwargs):
         return ""  # the alias prompt — take the suggested default
 
-    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
     monkeypatch.setattr("codehelper.cli.menu.read_line", _read_line)
     monkeypatch.setattr("codehelper.cli.menu.press_any_key", lambda *_a, **_k: None)
 
     assert main(["tui"]) == 0
 
-    model_prompt = next(p for p in seen_prompts if "Select a model" in p)
+    model_prompt = next(p for p in select.prompts if "Select a model" in p)
     assert "known models — discovery unavailable" in model_prompt
     paths = Paths.default()
     body = paths.script_for("gemini-3.1-pro-low-agy").read_text(encoding="utf-8")
@@ -1655,8 +1623,12 @@ def test_main_screen_shows_wrappers_grouped_by_agent(monkeypatch):
     # Presets (all claude today) appear under a "claude — N wrappers" header
     # (not the bare word "claude" — that would repeat the chipset row above
     # it verbatim). Section defines no __eq__ (it is a render marker, not a
-    # value), so match on `.text` rather than `in`.
-    section_texts = [e.text for e in main_items if isinstance(e, Section)]
+    # value), so match on the rendered `.text` rather than `in`.
+    section_texts = [
+        e.text() if callable(e.text) else e.text
+        for e in main_items
+        if isinstance(e, Section)
+    ]
     assert any(text.startswith("claude — ") for text in section_texts)
     # The old indirection is gone.
     assert not any(not isinstance(e, Section) and e[0] == "list" for e in main_items)
@@ -1840,10 +1812,10 @@ def test_main_screen_groups_colliding_managed_wrapper_under_installed_agent(
 
     main_items = captured[0]
     section_of: dict[str, str] = {}
-    current = None
+    current = ""
     for e in main_items:
         if isinstance(e, Section):
-            current = e.text
+            current = e.text() if callable(e.text) else e.text
         elif e[0] not in (
             "add",
             "__action:add-agent",
@@ -1916,7 +1888,7 @@ def test_e_on_chip_row_targets_highlighted_wrapper():
     """Editing a chip row must resolve its selected chip, not the row key."""
     from codehelper.cli.tui import TuiSession
 
-    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session = TuiSession(_tui_args())
     session._chips = {"claude": ["native", "deepseek-ollama", "glm", "+ add"]}
     session._chip_index = {"claude": 2}
 
@@ -1941,9 +1913,7 @@ def test_e_edits_on_chip_row_and_is_inert_where_nothing_is_editable():
         TuiSession,
     )
 
-    session = TuiSession(
-        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-    )
+    session = TuiSession(_tui_args())
     session._chips = {"claude": ["native", "deepseek-ollama", "glm", "+ add"]}
     session._chip_index = {"claude": 2}
 
@@ -1969,9 +1939,7 @@ def test_on_rename_moves_the_wrapper(tmp_path, monkeypatch):
     install_wrapper(paths, "glm", token="sk-existing")
 
     monkeypatch.setattr(menu, "read_line", lambda _prompt="", **_kw: "glm2")
-    session = TuiSession(
-        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-    )
+    session = TuiSession(_tui_args())
     session._on_rename("glm")
 
     assert is_installed(paths, "glm2")
@@ -1992,9 +1960,7 @@ def test_on_rename_shows_the_confirmation_exactly_once(tmp_path, monkeypatch, ca
     install_wrapper(paths, "glm", token="sk-existing")
 
     monkeypatch.setattr(menu, "read_line", lambda _prompt="", **_kw: "glm2")
-    session = TuiSession(
-        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-    )
+    session = TuiSession(_tui_args())
     session._on_rename("glm")
 
     out = capsys.readouterr().out
@@ -2028,9 +1994,7 @@ def test_on_rename_collision_reports_error_without_success(
     )
 
     monkeypatch.setattr(menu, "read_line", lambda _prompt="", **_kw: "glm2")
-    session = TuiSession(
-        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-    )
+    session = TuiSession(_tui_args())
     session._on_rename("glm")
 
     out = capsys.readouterr().out
@@ -2067,9 +2031,7 @@ def test_profile_screen_e_renames(tmp_path, monkeypatch):
         return next(providers)
 
     monkeypatch.setattr(menu, "select_from_menu", _select)
-    session = TuiSession(
-        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-    )
+    session = TuiSession(_tui_args())
     session._run_profile_screen()
 
     assert secrets.credential_for(paths, "zai", "personal") == "sk-old"
@@ -2119,9 +2081,7 @@ def test_edit_screen_rows_follow_the_shape(tmp_path, monkeypatch):
     )
 
     def _rows(alias):
-        session = TuiSession(
-            cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-        )
+        session = TuiSession(_tui_args())
         seen: list[str] = []
 
         def _fake_pick(_self, items, prompt, **kwargs):
@@ -2190,9 +2150,7 @@ def test_edit_screen_reads_the_spec_once(tmp_path, monkeypatch):
         return real(*a, **kw)
 
     monkeypatch.setattr("codehelper.services.wrappers.spec_from_installed", _counting)
-    session = TuiSession(
-        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-    )
+    session = TuiSession(_tui_args())
 
     def _fake_pick(_self, items, prompt, **kwargs):
         return _BACK
@@ -2252,9 +2210,7 @@ def test_codex_chip_stays_applied_after_an_effort_only_edit():
         model="deepseek-v4-flash:0731-cloud",
         force=True,
     )
-    session = TuiSession(
-        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-    )
+    session = TuiSession(_tui_args())
     session._refresh_active_label()
     chip = next(
         c for c in session._chips["codex"] if getattr(c, "name", None) == "codex-eff"
@@ -2263,9 +2219,7 @@ def test_codex_chip_stays_applied_after_an_effort_only_edit():
 
     edit_wrapper(Paths.default(), "codex-eff", effort="high")
 
-    session = TuiSession(
-        cast(argparse.Namespace, SimpleNamespace(debug=False, dry_run=False))
-    )
+    session = TuiSession(_tui_args())
     session._refresh_active_label()
     chip = next(
         c for c in session._chips["codex"] if getattr(c, "name", None) == "codex-eff"
@@ -2463,7 +2417,7 @@ def test_enter_on_the_add_chip_opens_add_scoped_to_that_agent(monkeypatch):
     # ENTER applies it.
     real_menu_keys = iter(["DOWN", "RIGHT", "ENTER", "CANCEL"])
 
-    def _select(items, *, prompt, **kwargs):
+    def _select(items, *, prompt: str | Callable[[], str] = "", **kwargs):
         text = prompt() if callable(prompt) else prompt
         seen.append(text)
         if text == "Select a provider for codex:":
@@ -2708,15 +2662,13 @@ def test_spec_memo_consumers_match_a_fresh_read_including_agy(monkeypatch):
     read-through call — for a chipset agent (claude) AND for the launch-only
     agy, whose wrappers reach the memo's consumers without any
     `_AGENT_BACKENDS` row (issue #112's honest degradation, #110's memo)."""
-    from types import SimpleNamespace as NS
-
     from codehelper.cli.tui import TuiSession
     from codehelper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
     install_wrapper(Paths.default(), "agy-native")
 
-    session = TuiSession(cast(argparse.Namespace, NS(debug=False, dry_run=False)))
+    session = TuiSession(_tui_args())
     session._refresh_active_label()
     paths = Paths.default()
 
@@ -2751,14 +2703,12 @@ def test_all_wrapper_specs_state_kwarg_matches_chips_for_semantics(monkeypatch):
     explicitly passed dict — an empty one included — is honoured as-is. The
     session snapshot is passed by `_wrapper_rows` like any other preload;
     nothing falls through to it implicitly (review fix on PR #124)."""
-    from types import SimpleNamespace as NS
-
     from codehelper.cli.tui import TuiSession
     from codehelper.services.state import set_provider_disabled
     from codehelper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "glm", token="test-token")
-    session = TuiSession(cast(argparse.Namespace, NS(debug=False, dry_run=False)))
+    session = TuiSession(_tui_args())
     session._refresh_active_label()
     # Snapshot taken BEFORE the disable: it now disagrees with the disk on
     # purpose, so which answer a call produces tells the sources apart.
@@ -3591,7 +3541,7 @@ def test_codex_chip_readback_distinguishes_two_models_on_one_provider():
         force=True,
     )
 
-    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session = TuiSession(_tui_args())
     session._refresh_active_label()
 
     assert session._chip_is_applied("codex", applied) is True
@@ -3631,7 +3581,7 @@ def _apply_live(spec, token: str) -> None:
 def _claude_session():
     from codehelper.cli.tui import TuiSession
 
-    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session = TuiSession(_tui_args())
     session._refresh_active_label()
     return session
 
@@ -3853,12 +3803,11 @@ def test_ctx_wrapper_chip_matches_only_itself():
 
 
 @pytest.mark.integration
-def test_providers_submenu_dispatches_the_real_handlers(monkeypatch):
+def test_providers_submenu_dispatches_the_real_handlers(monkeypatch, recording_select):
     """The submenu must dispatch into parser._handle_disable/_handle_enable —
     the TUI mirrors the CLI, never a second implementation. The pick IS the
     confirmation (yes=True), so `disable ollama-direct` from the submenu
     deletes its wrappers and writes state exactly like the command."""
-    import codehelper.cli.menu as menu
     from codehelper.cli.tui import TuiSession
     from codehelper.services.paths import Paths
     from codehelper.services.state import disabled_providers
@@ -3866,19 +3815,13 @@ def test_providers_submenu_dispatches_the_real_handlers(monkeypatch):
 
     install_wrapper(Paths.default(), "deepseek-ollama", token="ollama")
 
-    seen: list[str] = []
-    picks = iter(["ollama-direct", "__back__"])  # toggle once, then leave
+    # Toggle once, then leave.
+    select = recording_select("ollama-direct", "__back__")
 
-    def _select(_items, *, prompt, **_kwargs):
-        text = prompt() if callable(prompt) else prompt
-        seen.append(text)
-        return next(picks)
-
-    monkeypatch.setattr(menu, "select_from_menu", _select)
-    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session = TuiSession(_tui_args())
     session._run_providers_screen()
 
-    assert "Providers:" in seen
+    assert "Providers:" in select.prompts
     assert disabled_providers(Paths.default()) == frozenset({"ollama-direct"})
     assert not is_installed(Paths.default(), "deepseek-ollama")
 
@@ -3902,7 +3845,7 @@ def test_providers_submenu_toggles_back_to_enabled(monkeypatch):
         return next(picks)
 
     monkeypatch.setattr(menu, "select_from_menu", _select)
-    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session = TuiSession(_tui_args())
     session._run_providers_screen()
     assert disabled_providers(Paths.default()) == frozenset()
 
@@ -3925,7 +3868,7 @@ def test_providers_submenu_hides_env_reset(monkeypatch):
         return "__back__"
 
     monkeypatch.setattr(menu, "select_from_menu", _select)
-    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session = TuiSession(_tui_args())
     session._run_providers_screen()
 
     assert "native" not in captured["rows"]
@@ -3948,7 +3891,7 @@ def test_chips_of_a_disabled_provider_vanish_from_the_chipset():
     from codehelper.services.wrappers import install_wrapper
 
     install_wrapper(Paths.default(), "deepseek-ollama", token="ollama")
-    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session = TuiSession(_tui_args())
     session._refresh_active_label()
     assert any(
         getattr(chip, "name", None) == "deepseek-ollama"
@@ -3961,7 +3904,7 @@ def test_chips_of_a_disabled_provider_vanish_from_the_chipset():
         True,
         storage_names=frozenset({"ollama", "ollama-direct"}),
     )
-    session = TuiSession(SimpleNamespace(debug=False, dry_run=False))
+    session = TuiSession(_tui_args())
     session._refresh_active_label()
     assert not any(
         getattr(chip, "name", None) == "deepseek-ollama"

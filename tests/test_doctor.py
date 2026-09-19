@@ -9,10 +9,10 @@ pattern as ``test_models_api.py``). File-touching cases are
 
 from __future__ import annotations
 
-import json
 import urllib.error
 
 import pytest
+from conftest import write_settings as _write_settings
 
 from codehelper.services import doctor, secrets
 from codehelper.services.doctor import CheckRow, DoctorReport
@@ -28,12 +28,6 @@ def _write_config(paths: Paths, text: str) -> None:
     cfg = paths.codex_main_config()
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text(text, encoding="utf-8")
-
-
-def _write_settings(paths: Paths, env: dict) -> None:
-    path = paths.claude_settings()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"env": env}), encoding="utf-8")
 
 
 def _no_gui(_var: str) -> str:
@@ -265,7 +259,7 @@ def test_claude_settings_absent_is_native_ok(tmp_path):
 @pytest.mark.integration
 def test_claude_base_url_without_token_fails(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write_settings(paths, {"ANTHROPIC_BASE_URL": "https://api.example.com"})
+    _write_settings(paths, {"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}})
     row = _row(doctor.run(paths, environ={}, launchctl_fn=_no_gui), "claude settings")
     assert row.status == "fail"
     assert "no key" in row.detail
@@ -276,7 +270,12 @@ def test_claude_base_url_with_token_is_ok(tmp_path):
     paths = Paths.from_home(tmp_path)
     _write_settings(
         paths,
-        {"ANTHROPIC_BASE_URL": "https://api.example.com", "ANTHROPIC_AUTH_TOKEN": "t"},
+        {
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.example.com",
+                "ANTHROPIC_AUTH_TOKEN": "t",
+            }
+        },
     )
     row = _row(doctor.run(paths, environ={}, launchctl_fn=_no_gui), "claude settings")
     assert row.status == "ok"
