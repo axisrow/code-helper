@@ -364,41 +364,44 @@ def test_seed_default_profile_never_loses_a_concurrent_update(tmp_path):
 
 
 @pytest.mark.unit
-def test_locked_update_falls_back_to_unlocked_when_fcntl_is_unavailable(
+def test_locked_update_falls_back_when_the_lock_cannot_be_acquired(
     tmp_path, monkeypatch
 ):
     """``_locked_update`` must never raise or hang when locking is
     unavailable — mirrors this module's never-raises contract elsewhere
-    (``load_credentials``, ``invalidate_cached_credential``). Forcing
-    ``fcntl`` to ``None`` (simulating a non-POSIX platform) must still let a
-    normal, single-threaded ``save_credential`` succeed.
+    (``load_credentials``, ``invalidate_cached_credential``). Since #108 the
+    acquisition lives in ``backends._atomic.best_effort_lock``, so the
+    injected failure is a ``file_lock`` raising ``OSError`` — the same seam
+    ``state._locked_update``'s degradation test patches. A normal,
+    single-threaded ``save_credential`` must still succeed.
     """
-    monkeypatch.setattr("codehelper.services.secrets.fcntl", None)
+    import codehelper.backends._atomic as atomic_mod
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("no locking here")
+
+    monkeypatch.setattr(atomic_mod, "file_lock", _boom)
     paths = _paths(tmp_path)
     save_credential(paths, "litellm", "sk-1")
     assert load_credentials(paths) == {"litellm": {DEFAULT_PROFILE: "sk-1"}}
 
 
 @pytest.mark.unit
-def test_locked_update_falls_back_when_the_lock_file_cannot_be_opened(
-    tmp_path, monkeypatch
-):
-    """A lock-file open failure (e.g. an unwritable ``config_dir``) must
-    degrade to no locking rather than propagate — the write itself must
-    still succeed, exactly as it did before issue #17's fix. Only the
-    ``.lock``-suffixed path's ``open`` call is made to fail; ``atomic_write``
-    opens its own temp file separately and must be unaffected.
+def test_locked_update_falls_back_when_the_lock_file_cannot_be_opened(tmp_path):
+    """A lock file that cannot be opened must degrade to no locking rather
+    than propagate — the write itself must still succeed, exactly as it did
+    before issue #17's fix. The failure shape is real, not mocked: a
+    DIRECTORY sitting on the ``credentials.json.lock`` name makes
+    ``file_lock``'s open raise (the same shape ``test_state_concurrency``'s
+    ``_break_locking`` uses). Only the ``.lock``-suffixed path is blocked;
+    ``credentials.json`` in the same (writable) directory is unaffected.
     """
-    import builtins
-
     paths = _paths(tmp_path)
-    real_open = builtins.open
+    lock_path = paths.credentials_file().with_suffix(
+        paths.credentials_file().suffix + ".lock"
+    )
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.mkdir()
 
-    def _boom(path, mode="r", *a, **kw):
-        if str(path).endswith(".json.lock"):
-            raise OSError("simulated: cannot open lock file")
-        return real_open(path, mode, *a, **kw)
-
-    monkeypatch.setattr("codehelper.services.secrets.open", _boom, raising=False)
     save_credential(paths, "litellm", "sk-1")
     assert load_credentials(paths) == {"litellm": {DEFAULT_PROFILE: "sk-1"}}

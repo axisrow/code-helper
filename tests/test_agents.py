@@ -9,6 +9,8 @@ interpolation of ``agent.binary``.
 from __future__ import annotations
 
 import json
+import os
+import stat
 import threading
 
 import pytest
@@ -55,6 +57,19 @@ def test_load_user_agents_malformed_json_is_empty(tmp_path):
 def test_load_user_agents_non_dict_payload_is_empty(tmp_path):
     paths = _paths(tmp_path)
     _write_agents_file(paths, '["foo", "bar"]')
+    assert load_user_agents(paths) == ()
+
+
+@pytest.mark.unit
+def test_load_user_agents_non_utf8_bytes_are_empty(tmp_path):
+    """A file that is not valid UTF-8 is corruption like any other and must
+    degrade to "no user agents". Before #108's read_json_object migration a
+    bare UnicodeDecodeError escaped this documented never-raises function
+    (the old ladder caught OSError around read_text but not the decoder)."""
+    paths = _paths(tmp_path)
+    path = paths.agents_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b'{"agents": [{"name": "\xff\xfe"}]}')
     assert load_user_agents(paths) == ()
 
 
@@ -276,6 +291,21 @@ def test_add_user_agent_fails_closed_on_a_non_dict_registry(tmp_path):
 
 
 @pytest.mark.unit
+def test_add_user_agent_fails_closed_on_a_non_utf8_registry(tmp_path):
+    """Bad UTF-8 must surface the CodeHelperError contract on the mutation
+    path too, never a raw UnicodeDecodeError — the strict reader's twin of
+    load_user_agents' #108 gap."""
+    paths = _paths(tmp_path)
+    path = paths.agents_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b'{"agents": [{"name": "\xff\xfe"}]}')
+    with pytest.raises(CodeHelperError, match="cannot read agents registry"):
+        add_user_agent(paths, "myagent")
+    # The corrupt file is preserved, not clobbered.
+    assert path.read_bytes() == b'{"agents": [{"name": "\xff\xfe"}]}'
+
+
+@pytest.mark.unit
 def test_add_user_agent_fails_closed_on_a_bad_entry(tmp_path):
     """A stray bad ENTRY must fail the mutation closed, not be silently dropped
     on the next write — serializing only the surviving entries would be data
@@ -325,6 +355,20 @@ def test_add_user_agent_concurrent_adds_all_survive(tmp_path):
 
     assert errors == []
     assert {a.name for a in load_user_agents(paths)} == set(names)
+
+
+@pytest.mark.unit
+def test_add_user_agent_lock_file_is_0600_at_the_canonical_name(tmp_path):
+    """The sibling lock must keep the byte-identical name the pre-#108
+    hand-rolled flock created — an existing install reuses that file, and a
+    renamed lock would let two processes run concurrent adds unserialized —
+    AND carry 0o600, which the old hand-rolled open() never applied
+    (issue #108's chmod drift fix, now inherited from file_lock)."""
+    paths = _paths(tmp_path)
+    add_user_agent(paths, "myagent")
+    lock_path = paths.config_dir / "agents.json.lock"
+    assert lock_path.is_file()
+    assert stat.S_IMODE(os.stat(lock_path).st_mode) == 0o600
 
 
 # --------------------------------------------------------------------------- #

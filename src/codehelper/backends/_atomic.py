@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 import stat
 import tempfile
@@ -34,7 +35,9 @@ from pathlib import Path
 
 __all__ = [
     "atomic_write",
+    "best_effort_lock",
     "file_lock",
+    "read_json_object",
     "read_text_or_none",
     "remove_file",
     "rotate_backups",
@@ -53,6 +56,41 @@ def file_lock(path: str | Path):
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def best_effort_lock(path: str | Path):
+    """Hold :func:`file_lock` when possible, degrade to unlocked when not.
+
+    The best-effort companion to :func:`file_lock` for stores whose writers
+    must never crash on locking itself: ANY ``OSError`` from acquisition (an
+    unwritable parent dir, a directory squatting on the ``.lock`` name, a
+    filesystem that refuses ``flock``) yields WITHOUT the lock instead of
+    propagating — the same posture ``state._locked_update`` established for
+    its re-pickable pre-selection writers. Locking only serializes a
+    read-modify-write window, so an unserialized cycle is strictly no worse
+    than the pre-lock behavior those stores shipped with, while an unhandled
+    ``OSError`` would break every writer over a problem the write itself does
+    not have.
+
+    Acquisition happens BEFORE the ``yield`` (never ``try/except`` wrapped
+    around it): an ``OSError`` raised by the CALLER's body must propagate
+    untouched, not be mistaken for a failed acquisition — and the body must
+    never run twice.
+    """
+    # Acquire OUTSIDE the yield (see docstring): same shape as
+    # ``state._locked_update``.
+    try:
+        lock = file_lock(path)
+        lock.__enter__()
+    except OSError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            lock.__exit__(None, None, None)
 
 
 def remove_file(path: str | Path) -> None:
@@ -223,3 +261,28 @@ def read_text_or_none(path: str | Path) -> str | None:
         return Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
+
+
+def read_json_object(path: str | Path) -> dict | None:
+    """Read ``path`` as a JSON object, returning ``None`` on any failure.
+
+    The JSON-store companion to :func:`read_text_or_none`: one copy of the
+    read → ``json.loads`` → ``isinstance(dict)`` ladder that every
+    never-raises loader (``secrets.load_credentials``, ``state.load_state``,
+    ``agents.load_user_agents``) used to repeat inline, differing only in the
+    empty value it degraded to. ``None`` covers: the file does not exist, is
+    unreadable, is not decodable as UTF-8, is not valid JSON, or parses to a
+    non-object (a list, a string, a number, ``null``).
+
+    Callers keep their OWN per-store normalization on top (string-key
+    filtering, per-entry skip, legacy-shape reads) — this only replaces the
+    ladder shape they all shared. The mutation-path readers that fail CLOSED
+    on corruption (``agents.load_user_agents_strict``, the settings patchers)
+    stay on their own ladders: they need to distinguish "missing" from
+    "corrupt" and raise, which a ``None`` return cannot express.
+    """
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None

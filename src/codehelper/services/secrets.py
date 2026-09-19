@@ -39,7 +39,7 @@ import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
-from codehelper.backends._atomic import atomic_write
+from codehelper.backends._atomic import atomic_write, best_effort_lock, read_json_object
 from codehelper.errors import CodeHelperError
 from codehelper.services.model import RETIRED_PROVIDER_NAMES, provider_storage_names
 from codehelper.services.paths import Paths
@@ -57,11 +57,6 @@ def _storage_names(provider_name: str) -> tuple[str, ...]:
     """
     return provider_storage_names(provider_name)
 
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - this project targets macOS/Linux only
-    fcntl = None  # type: ignore[assignment]
 
 __all__ = [
     "ResolvedToken",
@@ -189,16 +184,8 @@ def load_credentials(paths: Paths) -> dict[str, dict[str, str]]:
     token is a normal state, not an error. Non-string values are skipped (not
     fatal): a stray entry must not cost the user the rest of the cache.
     """
-    path = paths.credentials_file()
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return {}
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return {}
-    if not isinstance(data, dict):
+    data = read_json_object(paths.credentials_file())
+    if data is None:
         return {}
     credentials: dict[str, dict[str, str]] = {}
     for provider_name, value in data.items():
@@ -355,16 +342,6 @@ def credential_for(
     return ""
 
 
-#: Sibling lock file for ``credentials.json`` (issue #17). ``fcntl.flock`` is
-#: advisory and held only for the duration of a single read-modify-write
-#: cycle below — this is NOT a lock file in the "process is running" sense,
-#: just a mutex protecting the read-write window every writer in this module
-#: shares. A separate file (not the credentials file itself) is used so a
-#: crashed holder never leaves the credentials file itself locked or in a
-#: half-open state; the lock file's own content is never read.
-_LOCK_SUFFIX = ".lock"
-
-
 @contextlib.contextmanager
 def _locked_update(paths: Paths):
     """Serialize one read-modify-write cycle against ``credentials.json``.
@@ -377,48 +354,28 @@ def _locked_update(paths: Paths):
     :func:`cache_freshly_typed_token` and ``render.openai_base_url``, so the
     three writers cannot drift on how they serialize.
 
+    The lock itself is :func:`backends._atomic.best_effort_lock` — an
+    ``fcntl.flock`` held for the read-modify-write window on a sibling
+    ``credentials.json.lock`` file (a separate file, since ``atomic_write``
+    replaces the destination inode), opened at ``0o600`` to match the
+    credentials file's own permissions. Its acquisition degrades to an
+    unlocked yield on ANY ``OSError``, mirroring every other function in
+    this module's never-raises contract (:func:`load_credentials`,
+    :func:`invalidate_cached_credential`): an unwritable ``config_dir``
+    degrades to NO locking rather than an uncaught exception, which is
+    strictly no worse than this project's pre-#17 behavior.
+
     Empirically (see ``tests/test_credentials_concurrency.py``), two
     concurrent ``codehelper`` invocations racing this window reliably lose
     one side's update — not a rare, hard-to-hit interleaving, but one that
-    reproduced on ordinary GIL-scheduled threads with no forced delay. An
-    ``fcntl.flock`` held for the read-modify-write window closes that window:
-    a second holder blocks until the first releases it (via the ``with``
-    block's exit, which always runs, success or exception), so the two
-    read-modify-write cycles serialize instead of interleaving.
-
-    The lock acquisition itself must NEVER raise or block forever, mirroring
-    every other function in this module's never-raises contract
-    (:func:`load_credentials`, :func:`invalidate_cached_credential`): a
-    missing ``fcntl`` module (not POSIX — this project targets macOS/Linux
-    only, so this is a defensive fallback, not a supported platform gap) or
-    an unwritable ``config_dir`` degrades to NO locking rather than an
-    uncaught exception, which is strictly no worse than this project's
-    pre-#17 behavior. The lock file is opened in ``a`` mode (create if
-    absent, never truncate — its content is irrelevant, only the fd's lock
-    matters) at ``0o600``, matching the credentials file's own permissions.
+    reproduced on ordinary GIL-scheduled threads with no forced delay. The
+    lock closes that window: a second holder blocks until the first releases
+    it (via the ``with`` block's exit, which always runs, success or
+    exception), so the two read-modify-write cycles serialize instead of
+    interleaving.
     """
-    lock_module = fcntl
-    handle = None
-    if lock_module is not None:
-        lock_path = paths.credentials_file().with_suffix(
-            paths.credentials_file().suffix + _LOCK_SUFFIX
-        )
-        try:
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            handle = open(lock_path, "a")
-            os.chmod(lock_path, 0o600)
-            lock_module.flock(handle.fileno(), lock_module.LOCK_EX)
-        except OSError:
-            if handle is not None:
-                handle.close()
-            handle = None  # fall through to the unlocked path
-    try:
+    with best_effort_lock(paths.credentials_file()):
         yield
-    finally:
-        if handle is not None and lock_module is not None:
-            with contextlib.suppress(OSError):
-                lock_module.flock(handle.fileno(), lock_module.LOCK_UN)
-            handle.close()
 
 
 def save_credential(
