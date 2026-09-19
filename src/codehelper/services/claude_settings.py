@@ -402,11 +402,14 @@ def dump_settings(data: dict) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
 
 
-def diff_preview(original: str, patched: str, *, label: str = "settings.json") -> str:
+def diff_preview(original: str, patched: str, *, label: str) -> str:
     """Unified diff of ``original`` -> ``patched``, stdlib only.
 
-    Empty string when the two are identical (the no-op case). Mirrors
-    ``codex_default.diff_preview``'s exact shape and calling convention.
+    Empty string when the two are identical (the no-op case). The ONE home
+    for this primitive: ``codex_default`` imports it too — naming its file
+    with ``label="config.toml"`` — instead of keeping its own copy (there is
+    no cycle; this module never imports ``codex_default``). ``label`` is a
+    required keyword: every caller names the file the diff describes.
     """
     return "".join(
         difflib.unified_diff(
@@ -471,7 +474,7 @@ def _redacted_preview(
     this call is writing. Switching AWAY from a provider whose token is
     still sitting in ``env`` must not print that old value verbatim.
     """
-    preview = diff_preview(original, patched)
+    preview = diff_preview(original, patched, label="settings.json")
     values = credential_values(original_parsed) | credential_values(patched_parsed)
     if token:
         values.add(token)
@@ -754,7 +757,7 @@ def restore_settings(
     # unparseable (it is NOT validated — a corrupt live file is
     # read_settings/apply_switch's problem, restore's job is only to not
     # WRITE a corrupt one), so its parse is still guarded.
-    preview = diff_preview(current, backup_body)
+    preview = diff_preview(current, backup_body, label="settings.json")
     try:
         secrets = credential_values(json.loads(current) if current else {})
     except json.JSONDecodeError:

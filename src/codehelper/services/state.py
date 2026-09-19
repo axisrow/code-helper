@@ -75,6 +75,7 @@ import json
 
 from codehelper.backends._atomic import atomic_write, file_lock
 from codehelper.errors import CodeHelperError
+from codehelper.services.limits import MAX_CONTEXT_WINDOW, context_window_usable
 from codehelper.services.paths import Paths
 
 __all__ = [
@@ -354,7 +355,7 @@ def context_window(paths: Paths, model: str) -> int | None:
     value = windows.get(model)
     if isinstance(value, bool) or not isinstance(value, int):
         return None
-    if not 0 <= value <= 10_000_000:
+    if not context_window_usable(value):
         return None
     return value
 
@@ -374,10 +375,10 @@ def set_context_window(paths: Paths, model: str, value: int) -> None:
     """
     from codehelper.errors import CodeHelperError
 
-    if not 0 <= value <= 10_000_000:
+    if not context_window_usable(value):
         raise CodeHelperError(
             f"unusable context window {value}: expected 0 (no declaration) "
-            f"or a token count in 1..10_000_000"
+            f"or a token count in 1..{MAX_CONTEXT_WINDOW:_}"
         )
     with _locked_update(paths):
         state = load_state(paths)
