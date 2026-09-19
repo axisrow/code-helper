@@ -5,9 +5,10 @@ provider does ``~/.codex/config.toml`` actually name, does its table carry the
 ``env_key`` a secret provider needs, is that env variable visible to codex
 (process env, or ``launchctl`` for GUI-launched apps), does the env token
 disagree with the cached profile (the #71 class), is the claude settings'
-``env`` block coherent, and does the backend actually answer a discovery
-probe. Each answer is one :class:`CheckRow`; the exit code is 1 only when a
-row FAILs.
+``env`` block coherent, does the backend actually answer a discovery probe,
+and — for each installed OPENAI_TOML wrapper — which proxy-env names the
+current environment supplies it (issue #76). Each answer is one
+:class:`CheckRow`; the exit code is 1 only when a row FAILs.
 
 Read-only and never-raise, the same posture :mod:`models_api` documents: a
 missing file, a garbled config, or a dead endpoint is an answer, not an
@@ -21,20 +22,29 @@ import shutil
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from codehelper.errors import CodeHelperError
 from codehelper.services import models_api, secrets
 from codehelper.services.claude_settings import CREDENTIAL_ENV_KEYS, active_switch_env
 from codehelper.services.codex_default import read_default_config
 from codehelper.services.model import (
+    ConfigShape,
     Provider,
     get_provider_for_legacy_read,
     with_base_url,
 )
 from codehelper.services.paths import Paths
+from codehelper.services.proxy import redact_proxy_url
 from codehelper.services.render import openai_env_key
+from codehelper.services.wrappers import (
+    discover_managed,
+    is_managed,
+    preset_names,
+    spec_from_installed,
+)
 
-__all__ = ["CheckRow", "DoctorReport", "OK", "WARN", "FAIL", "run"]
+__all__ = ["CheckRow", "DoctorReport", "OK", "WARN", "FAIL", "proxy_env_row", "run"]
 
 OK = "ok"
 WARN = "warn"
@@ -351,6 +361,197 @@ def _probe_row(
     )
 
 
+#: The C2 proxy-env universe of the issue #76 contract — every name a wrapper
+#: must never write. This report only READS them (a wrapper's proxy comes from
+#: the caller's environment; the wrapper itself is env-transparent), and the
+#: net is deliberately wider than ``proxy.PROXY_ENV_KEYS`` (``ALL_PROXY``
+#: included): the report mirrors the contract's test universe, not one
+#: consumer's habit.
+PROXY_ENV_NAMES: tuple[str, ...] = (
+    "https_proxy",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "HTTP_PROXY",
+    "ALL_PROXY",
+    "all_proxy",
+)
+
+#: The bypass-list names, the other half of C2's universe.
+BYPASS_ENV_NAMES: tuple[str, ...] = ("NO_PROXY", "no_proxy")
+
+#: Claude Code's documented precedence (``proxy.PROXY_ENV_KEYS``): the
+#: "effective address" below is the first NON-EMPTY of these. One consumer's
+#: reading order, worded as such — codex, curl, and urllib each read the same
+#: names in their own order, which is why the row says so instead of claiming
+#: a universal answer.
+_EFFECTIVE_ORDER: tuple[str, ...] = (
+    "https_proxy",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "HTTP_PROXY",
+)
+
+#: Case spellings of the SAME variable. Two different values behind two
+#: spellings is the genuinely harmful case (``proxy.py``'s docstring):
+#: consumers disagree on which spelling wins, so some traffic can miss the
+#: proxy — or the bypass.
+_DIVERGENCE_PAIRS: tuple[tuple[str, str], ...] = (
+    ("https_proxy", "HTTPS_PROXY"),
+    ("http_proxy", "HTTP_PROXY"),
+    ("ALL_PROXY", "all_proxy"),
+    ("NO_PROXY", "no_proxy"),
+)
+
+
+def _endpoint_host(base_url: str) -> str | None:
+    """The host a wrapper's endpoint URL names, or ``None`` — never raises.
+
+    A hand-mangled ``base_url`` is an answer here (other rows already judge
+    the URL itself); this function only needs a host to check the bypass list
+    against, and "unparseable" means the check is skipped.
+    """
+    try:
+        host = urlsplit(base_url).hostname
+    except ValueError:
+        return None
+    return host or None
+
+
+def _host_is_bypassed(host: str, bypass_value: str) -> bool:
+    """Whether a NO_PROXY-style comma list names ``host`` — exact or suffix.
+
+    Deliberately ONLY those two forms: no CIDR, no port, no ``*`` magic. This
+    is a diagnostic wording one predicate, not a network engine — when in
+    doubt, the proxy's own log is the ground truth (contract §4, step 4).
+    """
+    host = host.lower().rstrip(".")
+    for entry in bypass_value.split(","):
+        entry = entry.strip().lower().lstrip(".").rstrip(".")
+        if entry and (host == entry or host.endswith("." + entry)):
+            return True
+    return False
+
+
+def proxy_env_row(
+    wrapper: str,
+    endpoint_host: str | None,
+    environ: Mapping[str, str],
+) -> CheckRow:
+    """One OPENAI_TOML wrapper's proxy picture in THIS environment.
+
+    The issue #76 contract's diagnostic half (its §4, steps 1–2): wrappers
+    are env-transparent (C2), so what the wrapper's session sees is exactly
+    what this process sees — run doctor from the same shell that launches the
+    wrapper. Pure, so the unit tests own it; WARN/INFO at most and NEVER a
+    FAIL (a proxy-less environment is legitimate — the wrapper runs direct —
+    and doctor's exit code stays "1 only on FAIL"). Hostile environments
+    degrade to an answer: a non-string value, or a mapping that raises on
+    ``get``, reads as "not set" — the same never-raise posture as every other
+    read in this module.
+
+    ``endpoint_host`` is the wrapper's endpoint host (``None`` when the
+    profile carries no readable ``base_url``): the bypass check compares it
+    against ``NO_PROXY``/``no_proxy`` — exact host or domain suffix only.
+    """
+    values: dict[str, str] = {}
+    for name in (*PROXY_ENV_NAMES, *BYPASS_ENV_NAMES):
+        try:
+            value = environ.get(name, "")
+        except Exception:
+            value = ""
+        if isinstance(value, str) and value:
+            values[name] = value
+
+    if not values:
+        return CheckRow(
+            OK,
+            f"{wrapper}: proxy",
+            "no proxy env names set — the wrapper inherits this environment "
+            "verbatim and runs direct, which is correct behaviour",
+            hint=(
+                "to proxy it, export the standard names (e.g. https_proxy) in "
+                "the shell or launcher that runs the wrapper, or prefix one "
+                "invocation — codehelper proxy configures Claude Code only"
+            ),
+        )
+
+    host = endpoint_host if isinstance(endpoint_host, str) and endpoint_host else None
+    parts = [
+        "proxy env set: "
+        + ", ".join(n for n in (*PROXY_ENV_NAMES, *BYPASS_ENV_NAMES) if n in values)
+    ]
+    effective = next(
+        (values[name] for name in _EFFECTIVE_ORDER if name in values),
+        "",
+    )
+    if effective:
+        # A proxy URL may embed basic-auth credentials — same masking rule as
+        # every other value this command prints.
+        parts.append(
+            f"effective address {redact_proxy_url(effective)} (first non-empty "
+            "of https_proxy → HTTPS_PROXY → http_proxy → HTTP_PROXY — each "
+            "agent reads these names in its own order)"
+        )
+
+    status = OK
+    diverged = [
+        f"{a} vs {b}"
+        for a, b in _DIVERGENCE_PAIRS
+        if a in values and b in values and values[a] != values[b]
+    ]
+    if diverged:
+        status = WARN
+        parts.append(
+            f"{' and '.join(diverged)} case spellings hold different values — "
+            "consumers disagree on which spelling wins, so traffic may split"
+        )
+
+    bypassed = [
+        name
+        for name in BYPASS_ENV_NAMES
+        if name in values and host and _host_is_bypassed(host, values[name])
+    ]
+    if bypassed:
+        status = WARN
+        parts.append(
+            f"endpoint {host} is in {', '.join(bypassed)} — API traffic to it "
+            "bypasses the proxy"
+        )
+    elif effective and not host:
+        parts.append("wrapper endpoint unknown — bypass check skipped")
+
+    hint = ""
+    if bypassed:
+        hint = f"if the bypass is unintended, remove {host} from the NO_PROXY list"
+    elif diverged:
+        hint = "align the case spellings — export both with the same value"
+    return CheckRow(status, f"{wrapper}: proxy", "; ".join(parts), hint)
+
+
+def _proxy_rows(paths: Paths, environ: Mapping[str, str]) -> list[CheckRow]:
+    """One row per installed OPENAI_TOML wrapper: its proxy picture right here.
+
+    The issue #76 contract scopes the report to OPENAI_TOML wrappers — the
+    shape whose endpoint lives in a per-alias profile, and the one the issue's
+    failure mode ("valid base_url, unintended network path") is about.
+    ``discover_managed`` deliberately lists only ad-hoc wrappers, so installed
+    PRESETS on the shape are unioned in: a future codex preset must not lose
+    its row. An unreconstructable wrapper (corrupt profile) reads as no row —
+    its health is the other rows' job; this report only describes proxies.
+    """
+    aliases = set(discover_managed(paths))
+    aliases.update(name for name in preset_names() if is_managed(paths, name))
+    rows: list[CheckRow] = []
+    for alias in sorted(aliases):
+        spec = spec_from_installed(paths, alias)
+        if spec is None or spec.shape is not ConfigShape.OPENAI_TOML:
+            continue
+        rows.append(
+            proxy_env_row(alias, _endpoint_host(spec.provider.base_url), environ)
+        )
+    return rows
+
+
 def run(
     paths: Paths,
     *,
@@ -368,4 +569,5 @@ def run(
     rows.append(_claude_row(paths))
     if provider is not None:
         rows.append(_probe_row(provider, paths, fetch, environ))
+    rows.extend(_proxy_rows(paths, environ))
     return DoctorReport(tuple(rows))

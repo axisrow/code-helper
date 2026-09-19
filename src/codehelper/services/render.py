@@ -20,6 +20,16 @@ straight from ``--model``. The one deliberate exception is
 because ``_validate_registries`` constrains it to ``[a-z][a-z0-9_-]*`` at
 import time. Structural validation where the input is a constant, quoting where
 it is not.
+
+Proxy posture (issue #76 contract, C1–C2): a ``base_url`` — here and in its
+derivations :func:`openai_base_url` / :func:`anthropic_base_url` — is an
+ENDPOINT (which server the agent talks to), never a network proxy, and no
+renderer derives a proxy setting from it. Every renderer is env-transparent:
+a generated wrapper inherits the invoking process's environment and never
+assigns, exports, or unsets any proxy variable (``https_proxy``,
+``HTTPS_PROXY``, ``http_proxy``, ``HTTP_PROXY``, ``ALL_PROXY``,
+``all_proxy``, ``NO_PROXY``, ``no_proxy``) — the only env writes are the
+per-shape exports below. Pinned by ``tests/test_render.py``'s T1/T2 tests.
 """
 
 from __future__ import annotations

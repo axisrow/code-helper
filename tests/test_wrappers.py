@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -4145,3 +4146,118 @@ def test_edit_refuses_missing_and_unmanaged_targets(tmp_path):
     foreign.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
     with pytest.raises(CodeHelperError, match="unmanaged"):
         edit_wrapper(paths, "foreign")
+
+
+# --------------------------------------------------------------------------- #
+# Issue #76 T3 — env transparency end to end. A generated wrapper inherits
+# the invoking process's environment verbatim (C2: "proxying is caller-owned;
+# wrappers are env-transparent") and adds no proxy name of its own. The agent
+# binary is a stub on PATH that dumps the environment it was exec'd with, so
+# what the stub prints IS what the wrapper handed the agent.
+# --------------------------------------------------------------------------- #
+
+#: The same C2 universe test_render.py owns (T1); duplicated here so this
+#: file stays self-contained.
+_T3_PROXY_ENV_NAMES = (
+    "https_proxy",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "HTTP_PROXY",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+)
+
+_STUB_BINARY = "stub-codex-env-dump"
+
+
+def _install_env_dump_stub(tmp_path) -> Path:
+    """A fake agent binary that prints its environment NUL-separated —
+    immune to newline-bearing values, present on macOS and Linux alike."""
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir(exist_ok=True)
+    stub = stub_dir / _STUB_BINARY
+    stub.write_text("#!/bin/bash\nenv -0\n", encoding="utf-8")
+    stub.chmod(0o755)
+    return stub_dir
+
+
+def _install_stub_wrapper(tmp_path):
+    """An installed OPENAI_TOML wrapper whose agent is the env-dump stub."""
+    from codehelper.services.model import Agent
+
+    stub_dir = _install_env_dump_stub(tmp_path)
+    agent = Agent(
+        name="stubcodex",
+        binary=_STUB_BINARY,
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        description="env-dump stub",
+    )
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(
+        paths,
+        build_spec(
+            agent=agent, provider="ollama-direct", model="glm-5.2:cloud", alias="pt"
+        ),
+    )
+    return paths, stub_dir
+
+
+def _child_env_of(wrapper: Path, parent_env: dict[str, str]) -> dict[str, str]:
+    import subprocess
+
+    proc = subprocess.run(
+        [str(wrapper)],
+        env=parent_env,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    env: dict[str, str] = {}
+    for pair in proc.stdout.split(b"\0"):
+        if not pair:
+            continue
+        key, _, value = pair.partition(b"=")
+        env[key.decode()] = value.decode()
+    return env
+
+
+@pytest.mark.integration
+def test_wrapper_passes_parent_proxy_env_through_byte_identical(tmp_path):
+    """T3a (issue #76 §5): proxy variables the caller exports reach the
+    agent's process byte-identical — the wrapper neither filters nor rewrites
+    them, and ``exec`` inherits the environment verbatim."""
+    paths, stub_dir = _install_stub_wrapper(tmp_path)
+
+    child_env = _child_env_of(
+        paths.script_for("pt"),
+        {
+            "PATH": f"{stub_dir}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "https_proxy": "http://proxy.example.net:8118",
+            "no_proxy": "localhost,.internal.example.net",
+        },
+    )
+
+    assert child_env["https_proxy"] == "http://proxy.example.net:8118"
+    assert child_env["no_proxy"] == "localhost,.internal.example.net"
+
+
+@pytest.mark.integration
+def test_wrapper_adds_no_proxy_name_to_a_proxy_free_environment(tmp_path):
+    """T3b (issue #76 §5): a proxy-free parent env produces NO C2 name in the
+    child — catches a future renderer that "helpfully" injects one."""
+    paths, stub_dir = _install_stub_wrapper(tmp_path)
+
+    child_env = _child_env_of(
+        paths.script_for("pt"),
+        {"PATH": f"{stub_dir}:/usr/bin:/bin", "HOME": str(tmp_path)},
+    )
+
+    for name in _T3_PROXY_ENV_NAMES:
+        assert name not in child_env, (
+            f"the wrapper injected {name} into the agent's environment — "
+            "wrappers are env-transparent (issue #76, C2)"
+        )
