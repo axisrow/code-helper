@@ -2623,6 +2623,34 @@ def test_one_iteration_loads_state_json_once(monkeypatch):
 
 
 @pytest.mark.integration
+def test_one_iteration_loads_credentials_once(monkeypatch):
+    """Issue #110 step 2: ONE ``load_credentials`` per main-loop iteration —
+    the profile resolvers (tab, slot strip) and every preset chip's cache-leg
+    token readback share one preloaded snapshot instead of re-reading
+    ``credentials.json`` per provider per keystroke."""
+    import codehelper.services.secrets as secrets_service
+    from codehelper.services.secrets import save_credential
+    from codehelper.services.wrappers import install_wrapper
+
+    save_credential(Paths.default(), "zai", "sk-test")
+    install_wrapper(Paths.default(), "glm", token="test-token")
+
+    calls = {"load_credentials": 0}
+    real = secrets_service.load_credentials
+
+    def counting(paths):
+        calls["load_credentials"] += 1
+        return real(paths)
+
+    monkeypatch.setattr(secrets_service, "load_credentials", counting)
+
+    _real_menu_keys(monkeypatch, ["CANCEL"])
+    assert main(["tui"]) == 0
+
+    assert calls == {"load_credentials": 1}
+
+
+@pytest.mark.integration
 def test_chip_cursor_is_independent_per_agent(monkeypatch):
     """Each agent row remembers its own chip, so moving away and back does
     not reset where the user was."""

@@ -1566,7 +1566,7 @@ def _handle_set_default(args: argparse.Namespace | SetDefaultRequest) -> int:
 
 
 def _switch_resolve_token(
-    provider, req: SwitchRequest, paths, *, non_interactive: bool = False
+    provider, req: SwitchRequest, paths, *, non_interactive: bool = False, creds=None
 ) -> str:
     """The token for a `switch --provider ...` (explicit-axes) invocation.
 
@@ -1580,6 +1580,10 @@ def _switch_resolve_token(
     token is taken from env/cache or the switch FAILS CLEANLY — it never
     prompts, because a prompt inside the running menu would swallow the
     user's keystrokes and block the very no-prompt apply the chip promises.
+
+    ``creds`` is an optional preloaded :func:`secrets.load_credentials`
+    result (issue #110) — the TUI chip readback passes its per-iteration
+    snapshot; ``None`` reads the file.
     """
     if provider.auth != "secret":
         return provider.auth_value
@@ -1604,6 +1608,7 @@ def _switch_resolve_token(
         profile_name=req.profile,
         base_url_policy=provider.base_url_policy,
         getpass_fn=getpass_fn,
+        creds=creds,
     )
     _print_token_conflict(conflict)
     return resolved.value
@@ -1666,7 +1671,7 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths, *, state=None):
     return provider, tier_models, token, subagent_model, spec.context_window
 
 
-def _switch_axes_from_preset(req: SwitchRequest, paths, *, state=None):
+def _switch_axes_from_preset(req: SwitchRequest, paths, *, state=None, creds=None):
     """Resolve a curated Claude chip without consulting ``~/.local/bin``.
 
     Presets are backend choices in the chipset.  Their optional wrapper is a
@@ -1680,9 +1685,9 @@ def _switch_axes_from_preset(req: SwitchRequest, paths, *, state=None):
     no-prompt hot-apply, and a hidden prompt inside the running menu would
     swallow keystrokes.
 
-    ``state`` is an optional preloaded :func:`state.load_state` result
-    (issue #110) for the disabled-provider gate — the TUI chip readback
-    passes its per-iteration snapshot; ``None`` reads the file.
+    ``state`` / ``creds`` are optional preloaded :func:`state.load_state` /
+    :func:`secrets.load_credentials` results (issue #110) — the TUI chip
+    readback passes its per-iteration snapshot; ``None`` reads the files.
     """
     if not req.from_preset:
         raise CodeHelperError("internal error: missing preset for chipset switch")
@@ -1696,7 +1701,9 @@ def _switch_axes_from_preset(req: SwitchRequest, paths, *, state=None):
     return (
         provider,
         tier_models,
-        _switch_resolve_token(provider, req, paths, non_interactive=True),
+        _switch_resolve_token(
+            provider, req, paths, non_interactive=True, creds=creds
+        ),
         subagent_model,
         spec.context_window,  # None for every preset — catalog-derived
     )

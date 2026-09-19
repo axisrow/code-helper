@@ -300,6 +300,7 @@ class TuiSession:
         "_chip_switch_tokens",
         "_tokens_reveal",
         "_state_snapshot",
+        "_creds_snapshot",
     )
 
     def __init__(self, args: argparse.Namespace) -> None:
@@ -343,6 +344,9 @@ class TuiSession:
         #: otherwise re-read the file — the profile resolvers, the disabled
         #: gates, the proxy row, the per-agent default-wrapper lookups.
         self._state_snapshot: dict[str, object] = {}
+        #: The per-iteration ``credentials.json`` snapshot (issue #110), fed
+        #: to the profile resolvers and the chip-token cache leg the same way.
+        self._creds_snapshot: dict[str, dict[str, str]] = {}
 
     # --- UI primitives ---------------------------------------------------
 
@@ -1590,11 +1594,17 @@ class TuiSession:
             if p.auth == "secret" or p.auth_policy is AuthPolicy.OVERRIDABLE
         ]
 
-    def _resolve_tab_provider(self, *, state: dict[str, object] | None = None) -> str | None:
+    def _resolve_tab_provider(
+        self,
+        *,
+        state: dict[str, object] | None = None,
+        creds: dict[str, dict[str, str]] | None = None,
+    ) -> str | None:
         """Resolve which provider Tab/the header should act on.
 
-        ``state`` is the per-iteration snapshot (issue #110); ``None`` reads
-        ``state.json`` — the event-path callers keep their fresh read.
+        ``state`` / ``creds`` are the per-iteration snapshots (issue #110);
+        ``None`` reads the files — the event-path callers keep their fresh
+        read.
         """
         from codehelper.services.paths import Paths
         from codehelper.services.secrets import profile_names
@@ -1604,38 +1614,47 @@ class TuiSession:
         selection = active_selection(paths, state=state)
         if selection is not None:
             stored, _ = selection
-            if profile_names(paths, stored):
+            if profile_names(paths, stored, creds=creds):
                 return stored
         for provider in self._secret_providers(state=state):
-            if profile_names(paths, provider.name):
+            if profile_names(paths, provider.name, creds=creds):
                 return provider.name
         return None
 
     def _tab_profile(
-        self, provider: str, *, state: dict[str, object] | None = None
+        self,
+        provider: str,
+        *,
+        state: dict[str, object] | None = None,
+        creds: dict[str, dict[str, str]] | None = None,
     ) -> str | None:
         """The profile Tab currently shows/would land on for ``provider``.
 
-        ``state`` is the per-iteration snapshot (issue #110); ``None`` reads
-        ``state.json`` — the event-path callers keep their fresh read.
+        ``state`` / ``creds`` are the per-iteration snapshots (issue #110);
+        ``None`` reads the files — the event-path callers keep their fresh
+        read.
         """
         from codehelper.services.paths import Paths
         from codehelper.services.secrets import profile_names, valid_active_profile
 
         paths = Paths.default()
-        stored = valid_active_profile(paths, provider, state=state)
+        stored = valid_active_profile(paths, provider, state=state, creds=creds)
         if stored:
             return stored
-        names = profile_names(paths, provider)
+        names = profile_names(paths, provider, creds=creds)
         return names[0] if names else None
 
     def _active_label(
-        self, tab_provider: str | None, *, state: dict[str, object] | None = None
+        self,
+        tab_provider: str | None,
+        *,
+        state: dict[str, object] | None = None,
+        creds: dict[str, dict[str, str]] | None = None,
     ) -> str:
         """``"provider/profile"``, ``"provider"``, or ``""`` for header/row."""
         if not tab_provider:
             return ""
-        profile = self._tab_profile(tab_provider, state=state)
+        profile = self._tab_profile(tab_provider, state=state, creds=creds)
         return f"{tab_provider}/{profile}" if profile else tab_provider
 
     def _on_tab(self) -> None:
@@ -1680,7 +1699,10 @@ class TuiSession:
         return Section(lambda: self._slot_label)
 
     def _refresh_profile_label(
-        self, *, state: dict[str, object] | None = None
+        self,
+        *,
+        state: dict[str, object] | None = None,
+        creds: dict[str, dict[str, str]] | None = None,
     ) -> None:
         """Refresh only the profile-related caches.
 
@@ -1689,18 +1711,22 @@ class TuiSession:
         config file there would be work no keypress on that screen can
         invalidate.
 
-        ``state`` is the per-iteration snapshot (issue #110); ``None`` reads
-        ``state.json`` — the event-path callers (Tab, digit slots, the
-        Profile screen) keep their fresh read.
+        ``state`` / ``creds`` are the per-iteration snapshots (issue #110);
+        ``None`` reads the files — the event-path callers (Tab, digit slots,
+        the Profile screen) keep their fresh read.
         """
         from codehelper.services.paths import Paths
         from codehelper.services.profiles import profile_slots
 
-        self._tab_provider = self._resolve_tab_provider(state=state)
-        self._tab_label = self._active_label(self._tab_provider, state=state)
+        self._tab_provider = self._resolve_tab_provider(state=state, creds=creds)
+        self._tab_label = self._active_label(
+            self._tab_provider, state=state, creds=creds
+        )
         self._slot_label = "  ".join(
             f"{i + 1} {provider}/{profile}"
-            for i, (provider, profile) in enumerate(profile_slots(Paths.default()))
+            for i, (provider, profile) in enumerate(
+                profile_slots(Paths.default(), creds=creds)
+            )
         )
 
     def _refresh_active_label(self) -> None:
@@ -1720,11 +1746,15 @@ class TuiSession:
         the file themselves, so nothing off this loop changes.
         """
         from codehelper.services.paths import Paths
+        from codehelper.services.secrets import load_credentials
         from codehelper.services.state import load_state
 
         paths = Paths.default()
         self._state_snapshot = load_state(paths)
-        self._refresh_profile_label(state=self._state_snapshot)
+        self._creds_snapshot = load_credentials(paths)
+        self._refresh_profile_label(
+            state=self._state_snapshot, creds=self._creds_snapshot
+        )
         self._applied = {
             name: backend.read_applied(paths)
             for name, backend in _AGENT_BACKENDS.items()
@@ -1752,7 +1782,7 @@ class TuiSession:
         self._chip_switch_tokens = {
             name: {
                 self._chip_name(chip): getattr(self, backend.chip_switch_token)(
-                    chip, paths, state=self._state_snapshot
+                    chip, paths, state=self._state_snapshot, creds=self._creds_snapshot
                 )
                 for chip in chips
             }
@@ -1880,7 +1910,12 @@ class TuiSession:
         return model is None or chip.model == model
 
     def _chip_switch_token(
-        self, chip, paths, *, state: dict[str, object] | None = None
+        self,
+        chip,
+        paths,
+        *,
+        state: dict[str, object] | None = None,
+        creds: dict[str, dict[str, str]] | None = None,
     ) -> str | None:
         """The token Enter on ``chip`` would apply, or ``None`` when it has none.
 
@@ -1892,8 +1927,9 @@ class TuiSession:
         token available, unreadable wrapper), which is NOT a no-op: ``None``,
         never a guess.
 
-        ``state`` is the per-iteration snapshot (issue #110) for the
-        resolvers' disabled-provider gate; ``None`` reads ``state.json``.
+        ``state`` / ``creds`` are the per-iteration snapshots (issue #110)
+        for the resolvers' disabled gate and cache leg; ``None`` reads the
+        files.
         """
         from codehelper.cli.parser import (
             _switch_axes_from_preset,
@@ -1907,11 +1943,16 @@ class TuiSession:
         try:
             if chip.name in preset_names():
                 _, _, token, _, _ = _switch_axes_from_preset(
-                    self._switch_request(from_preset=chip.name), paths, state=state
+                    self._switch_request(from_preset=chip.name),
+                    paths,
+                    state=state,
+                    creds=creds,
                 )
             else:
                 _, _, token, _, _ = _switch_axes_from_wrapper(
-                    self._switch_request(from_wrapper=chip.name), paths, state=state
+                    self._switch_request(from_wrapper=chip.name),
+                    paths,
+                    state=state,
                 )
         except CodeHelperError:
             return None

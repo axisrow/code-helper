@@ -17,6 +17,7 @@ import pytest
 from codehelper.services.profiles import (
     NewProfileOutcome,
     classify_new_profile,
+    profile_slots,
     validate_new_profile_name,
 )
 
@@ -157,3 +158,26 @@ def test_validate_new_profile_name_empty_existing_list():
     """No existing names → only EMPTY can fire, never COLLISION_NEW."""
     assert validate_new_profile_name("personal", []) is NewProfileOutcome.OK
     assert validate_new_profile_name("", []) is NewProfileOutcome.EMPTY
+
+
+@pytest.mark.unit
+def test_profile_slots_honours_a_preloaded_creds_snapshot(tmp_path, monkeypatch):
+    """``creds=`` (issue #110) answers exactly as a fresh read and never
+    re-reads ``credentials.json`` — the TUI feeds its per-iteration
+    snapshot so the slot strip costs no file I/O per redraw frame."""
+    from codehelper.services.paths import Paths
+    from codehelper.services.secrets import load_credentials, save_credential
+
+    paths = Paths.from_home(tmp_path)
+    save_credential(paths, "zai", "sk-work", "work")
+    save_credential(paths, "deepseek", "sk-ds")
+    snapshot = load_credentials(paths)
+    fresh = profile_slots(paths)
+    assert ("zai", "work") in fresh
+    assert ("deepseek", "default") in fresh
+
+    def _forbidden(_paths):
+        raise AssertionError("creds= call re-read the file")
+
+    monkeypatch.setattr("codehelper.services.secrets.load_credentials", _forbidden)
+    assert profile_slots(paths, creds=snapshot) == fresh
