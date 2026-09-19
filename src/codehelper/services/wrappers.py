@@ -1441,6 +1441,21 @@ def _marker_with_repointed_profile(
     return "\n".join(lines)
 
 
+def _marker_profile_of(path: Path) -> str | None:
+    """The URL-unquoted ``profile=`` recorded in the marker at ``path``.
+
+    Raw-body read for the companion half of an ``OPENAI_TOML`` pair — its
+    marker rides line 1, where :func:`profile_from_installed` (which goes
+    through :func:`spec_from_installed` and the SCRIPT's marker) cannot reach
+    it. ``None`` when the file is unreadable or records no profile.
+    """
+    body = read_text_or_none(path)
+    if body is None:
+        return None
+    profile = _marker_fields_from(body).get("profile")
+    return unquote(profile) if profile else None
+
+
 def rename_wrapper(
     paths: Paths,
     old_alias: str,
@@ -1561,15 +1576,24 @@ def rename_wrapper(
         # every pointer reader degrades to None, so there is nothing to roll
         # back — the same posture as remove_wrapper's pointer clear and the
         # profile path's active-pointer write.
+        # Every agent is attempted even after a failure: the slots are
+        # independent, so a mid-list failure must neither abort the rest
+        # untried nor leave them unmentioned — the error names each one.
+        failures: list[str] = []
+        first_exc: OSError | None = None
         for agent_name in agents_to_repoint:
             try:
                 set_default_wrapper(paths, agent_name, new_alias)
             except OSError as exc:
-                raise CodeHelperError(
-                    f"renamed {old_alias} -> {new_alias} but failed to repoint the "
-                    f"default-wrapper pointer for {agent_name} "
-                    f"({paths.state_file()}): {exc}"
-                ) from exc
+                if first_exc is None:
+                    first_exc = exc
+                failures.append(f"{agent_name}: {exc}")
+        if failures:
+            raise CodeHelperError(
+                f"renamed {old_alias} -> {new_alias} but failed to repoint the "
+                f"default-wrapper pointer(s) in {paths.state_file()}: "
+                f"{'; '.join(failures)}"
+            ) from first_exc
 
     try:
         remove_wrapper(paths, old_alias, dry_run=dry_run)
@@ -2102,11 +2126,26 @@ def rename_provider_profile(
     if outcome in (NewProfileOutcome.EMPTY, NewProfileOutcome.COLLISION_NEW):
         raise CodeHelperError(f"invalid new profile name: {new_name!r}")
 
-    targets = [
-        name
-        for name in wrappers_for_provider(paths, provider)
-        if profile_from_installed(paths, name) == old_name
-    ]
+    targets: list[str] = []
+    for name in wrappers_for_provider(paths, provider):
+        if profile_from_installed(paths, name) == old_name:
+            targets.append(name)
+            continue
+        # An interrupted attempt can leave an OPENAI_TOML pair SPLIT across
+        # old and new (issue #121): one half restored to the old body, the
+        # other still carrying the committed new one. The stale half must
+        # still make the wrapper a target, or the retry never re-examines
+        # the pair — profile_from_installed reads only the script's marker —
+        # and the companion marker silently drifts (the #80/#81 class).
+        spec = spec_from_installed(paths, name)
+        if spec is not None and spec.shape is ConfigShape.OPENAI_TOML:
+            companion = paths.codex_config_for(name)
+            if (
+                companion.exists()
+                and _ownership_marker_only(companion)
+                and _marker_profile_of(companion) == old_name
+            ):
+                targets.append(name)
 
     old_quoted = quote(old_name, safe="._-")
     new_quoted = quote(new_name, safe="._-")
@@ -2122,6 +2161,15 @@ def rename_provider_profile(
             old_body = path.read_text(encoding="utf-8")
             new_body = _marker_with_repointed_profile(old_body, old_quoted, new_quoted)
             if new_body is None:
+                if (
+                    _marker_with_repointed_profile(old_body, new_quoted, new_quoted)
+                    is not None
+                ):
+                    # Already carrying the new profile — the committed half of
+                    # an interrupted earlier attempt (issue #121). Adopting it
+                    # as a no-op is what makes the retry the UNRECOVERED
+                    # message advises genuinely converge instead of refusing.
+                    continue
                 raise CodeHelperError(
                     f"cannot re-point {path}: no profile={old_quoted} in its marker"
                 )

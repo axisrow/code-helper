@@ -3542,6 +3542,124 @@ def test_rename_provider_profile_rollback_failure_reports_both_errors(
 
 
 @pytest.mark.integration
+def test_rename_retry_converges_when_a_restore_failure_strands_the_companion(
+    tmp_path, monkeypatch
+):
+    """Split-pair shape 1 (issue #121 review): the companion's restore write
+    fails, so the pair is left split — script old, companion new. The
+    UNRECOVERED message advises a retry; the retry must genuinely converge:
+    the stranded half is adopted as already re-pointed, the stale half is
+    re-written, no refusal, no drift."""
+    import codehelper.services.secrets as secrets
+    import codehelper.services.wrappers as wrappers_mod
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "bai", _SECRET_TOKEN, "work")
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="codex",
+            provider="bai",
+            model="gpt-5.5",
+            alias="glm-work-codex",
+            profile_name="work",
+        ),
+        token=_SECRET_TOKEN,
+    )
+
+    def losing_rename(_paths, _provider, _old, _new):
+        raise CodeHelperError("credential race lost")
+
+    monkeypatch.setattr(secrets, "rename_profile", losing_rename)
+
+    real_atomic_write = wrappers_mod.atomic_write
+    restores = {"n": 0}
+
+    def companion_restore_fails(path, body, mode=None):
+        if "profile=work" in body:  # a restoration write (old body)
+            restores["n"] += 1
+            if restores["n"] == 1:  # reversed(committed) → the companion first
+                raise OSError("permission denied")
+        return real_atomic_write(path, body, mode=mode)
+
+    monkeypatch.setattr(wrappers_mod, "atomic_write", companion_restore_fails)
+
+    with pytest.raises(CodeHelperError) as caught:
+        rename_provider_profile(paths, "bai", "work", "personal")
+    assert "UNRECOVERED" in str(caught.value)
+    assert str(paths.codex_config_for("glm-work-codex")) in str(caught.value)
+    assert profile_from_installed(paths, "glm-work-codex") == "work"
+
+    monkeypatch.undo()
+
+    assert rename_provider_profile(paths, "bai", "work", "personal") == 1
+    assert profile_from_installed(paths, "glm-work-codex") == "personal"
+    companion = paths.codex_config_for("glm-work-codex").read_text(encoding="utf-8")
+    assert "profile=personal" in companion.split("\n")[0]
+    assert secrets.credential_for(paths, "bai", "work") == ""
+    assert secrets.credential_for(paths, "bai", "personal") == _SECRET_TOKEN
+
+
+@pytest.mark.integration
+def test_rename_retry_converges_when_a_restore_failure_strands_the_script(
+    tmp_path, monkeypatch
+):
+    """Split-pair shape 2 (issue #121 review): the script's restore write
+    fails, so the script keeps the committed new profile while the companion
+    is back on the old. profile_from_installed reads only the script, so the
+    stale companion must still make the wrapper a retry target — otherwise
+    the retry reports success while the companion marker silently drifts."""
+    import codehelper.services.secrets as secrets
+    import codehelper.services.wrappers as wrappers_mod
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "bai", _SECRET_TOKEN, "work")
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="codex",
+            provider="bai",
+            model="gpt-5.5",
+            alias="glm-work-codex",
+            profile_name="work",
+        ),
+        token=_SECRET_TOKEN,
+    )
+
+    def losing_rename(_paths, _provider, _old, _new):
+        raise CodeHelperError("credential race lost")
+
+    monkeypatch.setattr(secrets, "rename_profile", losing_rename)
+
+    real_atomic_write = wrappers_mod.atomic_write
+    restores = {"n": 0}
+
+    def script_restore_fails(path, body, mode=None):
+        if "profile=work" in body:  # a restoration write (old body)
+            restores["n"] += 1
+            if restores["n"] == 2:  # reversed(committed) → the script second
+                raise OSError("permission denied")
+        return real_atomic_write(path, body, mode=mode)
+
+    monkeypatch.setattr(wrappers_mod, "atomic_write", script_restore_fails)
+
+    with pytest.raises(CodeHelperError) as caught:
+        rename_provider_profile(paths, "bai", "work", "personal")
+    assert "UNRECOVERED" in str(caught.value)
+    assert str(paths.script_for("glm-work-codex")) in str(caught.value)
+    assert profile_from_installed(paths, "glm-work-codex") == "personal"
+
+    monkeypatch.undo()
+
+    assert rename_provider_profile(paths, "bai", "work", "personal") == 1
+    assert profile_from_installed(paths, "glm-work-codex") == "personal"
+    companion = paths.codex_config_for("glm-work-codex").read_text(encoding="utf-8")
+    assert "profile=personal" in companion.split("\n")[0]
+    assert secrets.credential_for(paths, "bai", "work") == ""
+    assert secrets.credential_for(paths, "bai", "personal") == _SECRET_TOKEN
+
+
+@pytest.mark.integration
 def test_rename_provider_profile_marker_failure_at_first_position(
     tmp_path, monkeypatch
 ):
