@@ -466,6 +466,27 @@ def test_set_default_creates_backup_containing_original_bytes(tmp_path):
 
 
 @pytest.mark.integration
+def test_set_default_on_a_fresh_install_creates_no_backup_slot(tmp_path):
+    """Service-level pin for ``guarded_replace``'s rotation rule: an absent
+    config.toml means ``expected=""`` — the ring is skipped and NO bak slot
+    is created. (Pre-unification, ``apply_set_default`` rotated
+    unconditionally and archived an empty string into slot 1.) The
+    three-runs ring test passes under either rule because its final state is
+    invariant — THIS is the pin that fails if the rule regresses. The twin
+    consequence, the success print still naming bak1 unconditionally on this
+    path, is deliberately documented in the PR's behavior-visible list
+    rather than changed (codex's print form stays identical to
+    claude/proxy's long-standing one).
+    """
+    paths = Paths.from_home(tmp_path)
+
+    _install(paths)
+
+    assert paths.codex_main_config().exists()
+    assert not paths.codex_main_config_backup(1).exists()
+
+
+@pytest.mark.integration
 def test_set_default_second_noop_run_does_not_recreate_backup(tmp_path):
     paths = Paths.from_home(tmp_path)
     original = 'some_other_key = "x"\n'
@@ -534,7 +555,8 @@ def test_set_default_force_writes_on_non_tty(tmp_path):
 def test_rotate_backups_archives_the_passed_in_content_not_a_fresh_disk_read(
     tmp_path,
 ):
-    """``_rotate_backups`` must archive the ``current`` text the caller
+    """``rotate_backups`` (``codehelper.backends._atomic``) must archive the
+    ``current`` text the caller
 
     already read/diffed/confirmed, not re-read ``config.toml`` from disk —
     re-reading would open a TOCTOU gap where a file changed between the
