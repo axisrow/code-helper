@@ -122,7 +122,7 @@ def test_menu_choices_are_recorded(tmp_path, choice, expected):
 
 
 @pytest.mark.unit
-def test_custom_input_is_validated_then_recorded(tmp_path):
+def test_custom_input_is_validated_then_recorded(tmp_path, capsys):
     """Garbage re-prompts; a valid number (or 'none') is accepted."""
     paths = _paths(tmp_path)
     answers = iter(["abc", "-5", "none"])
@@ -139,6 +139,10 @@ def test_custom_input_is_validated_then_recorded(tmp_path):
     )
     assert value == 0
     assert context_window(paths, "mystery-3b") == 0
+    # The ceiling renders PLAIN here — no ``:_`` underscores — byte-identical
+    # with the pre-#106 message; the lockstep tripwire in test_limits.py pins
+    # only the underscored spellings.
+    assert "out of range (1..10000000): -5" in capsys.readouterr().out
 
 
 @pytest.mark.unit

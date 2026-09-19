@@ -29,6 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from codehelper.errors import CodeHelperError
+from codehelper.services.limits import MAX_CONTEXT_WINDOW, context_window_usable
 from codehelper.services.model import (
     Agent,
     BaseUrlPolicy,
@@ -276,10 +277,10 @@ def build_spec(
     # this is what makes spec_from_installed's garbage marker values
     # (``ctx=abc`` → ValueError, ``ctx=-5`` → lands here) fail closed to
     # None, the same answer as any other unrecognised marker value.
-    if context_window is not None and not (0 <= context_window <= 10_000_000):
+    if context_window is not None and not context_window_usable(context_window):
         raise CodeHelperError(
             f"unusable context window {context_window}: expected 0 (no "
-            f"declaration) or a token count in 1..10_000_000"
+            f"declaration) or a token count in 1..{MAX_CONTEXT_WINDOW:_}"
         )
 
     # An unknown effort value refuses here, beside the window check (issue

@@ -32,14 +32,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 
 from codehelper.errors import CodeHelperError
+from codehelper.services.limits import MAX_CONTEXT_WINDOW
 from codehelper.services.paths import Paths
 from codehelper.services.render import MODEL_CONTEXT_WINDOWS, uniform_context_window
 from codehelper.services.state import context_window, set_context_window
 
 __all__ = ["resolve_context_window"]
-
-#: Custom-input ceiling: a typo beyond this is a mistake, not a window.
-_MAX_WINDOW = 10_000_000
 
 #: Consecutive bad custom inputs tolerated before giving up (mirrors
 #: ``secrets.resolve_token``'s ``retries=3``).
@@ -143,12 +141,16 @@ def _ask_or_none(
     """Ask once and record, or — non-interactively — the status-quo ``None``."""
     if not interactive:
         return None
-    menu_fn = select_fn
-    if menu_fn is None:
+    menu_fn: SelectFn
+    if select_fn is None:
         from codehelper.cli.menu import select_from_menu
 
-        def menu_fn(items: Sequence[tuple[str, str]]) -> str:
+        def _default_menu(items: Sequence[tuple[str, str]]) -> str:
             return select_from_menu(items, prompt=f"Context window for {model}:")
+
+        menu_fn = _default_menu
+    else:
+        menu_fn = select_fn
 
     answer = menu_fn(_MENU_ITEMS)
     if answer == "custom":
@@ -180,9 +182,9 @@ def _ask_custom(read_line_fn: ReadLineFn | None) -> int:
         except ValueError:
             print(f"not a number: {raw!r}")
             continue
-        if 0 < value <= _MAX_WINDOW:
+        if 0 < value <= MAX_CONTEXT_WINDOW:
             return value
-        print(f"out of range (1..{_MAX_WINDOW}): {value}")
+        print(f"out of range (1..{MAX_CONTEXT_WINDOW}): {value}")
     raise CodeHelperError(
         f"no usable context window after {_RETRIES} attempts — nothing recorded"
     )

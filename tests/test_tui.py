@@ -2378,6 +2378,19 @@ def test_chipset_row_count_matches_agent_backends(monkeypatch):
     assert f"{tui._BOLD}✓ native{tui._RESET}" in rows["codex"]
 
 
+@pytest.mark.unit
+def test_exact_readback_is_per_agent_registry_data():
+    """The `_apply_chip` no-op guard keys on `_AgentBackend.exact_readback`,
+    never an agent-name branch: only claude's readback (the full managed env
+    plus the chip's own token) is exact enough to skip an already-applied
+    chip. codex's provider+model pair cannot tell two same-axes wrappers
+    apart, so Enter there must always re-apply."""
+    import codehelper.cli.tui as tui
+
+    assert tui._AGENT_BACKENDS["claude"].exact_readback is True
+    assert tui._AGENT_BACKENDS["codex"].exact_readback is False
+
+
 @pytest.mark.integration
 def test_chipset_cursor_moves_with_the_list_not_duplicates(monkeypatch):
     """Moving the list cursor to codex highlights ONLY codex's chip — claude

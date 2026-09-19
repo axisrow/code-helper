@@ -71,6 +71,7 @@ from codehelper.services.agents import all_agents, load_user_agents_strict
 from codehelper.services.agents import get_agent as get_any_agent
 from codehelper.services.claude_settings import current_switch
 from codehelper.services.codex_default import restore_default
+from codehelper.services.limits import MAX_CONTEXT_WINDOW, context_window_usable
 from codehelper.services.model import (
     PROVIDERS,
     BaseUrlPolicy,
@@ -469,11 +470,11 @@ def _parse_context_window(raw: str | int | None) -> int | None:
     if raw is None:
         return None
     if isinstance(raw, int):  # the TUI passes the parsed value straight through
-        if 0 <= raw <= 10_000_000:
+        if context_window_usable(raw):
             return raw
         raise CodeHelperError(
             f"invalid --context-window: {raw} (expected 0 (no declaration) "
-            f"or a token count in 1..10_000_000)"
+            f"or a token count in 1..{MAX_CONTEXT_WINDOW:_})"
         )
     text = raw.strip()
     if text.lower() == "none":
@@ -487,12 +488,12 @@ def _parse_context_window(raw: str | int | None) -> int | None:
     # The FULL range check lives here, not only in build_spec (issue #83,
     # review round 1): switch never builds a spec, so an oversized value
     # would otherwise sail straight into the live patch.
-    if not 0 < value <= 10_000_000:
+    if not 0 < value <= MAX_CONTEXT_WINDOW:
         # 0 arrives only via the 'none' spelling — a literal 0 is almost
         # certainly a typo for it, and a negative is always garbage.
         raise CodeHelperError(
             f"invalid --context-window: {raw!r} (expected a token count in "
-            f"1..10_000_000, or 'none' for no declaration)"
+            f"1..{MAX_CONTEXT_WINDOW:_}, or 'none' for no declaration)"
         )
     return value
 

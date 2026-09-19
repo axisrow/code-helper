@@ -31,7 +31,6 @@ this project's ``requires-python`` floor is 3.11, not lower.
 
 from __future__ import annotations
 
-import difflib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +42,7 @@ from codehelper.backends._atomic import (
 )
 from codehelper.backends._atomic import rotate_backups as _rotate_backups
 from codehelper.errors import CodeHelperError
+from codehelper.services.claude_settings import diff_preview
 from codehelper.services.model import (
     Agent,
     BaseUrlPolicy,
@@ -64,7 +64,6 @@ __all__ = [
     "CODEX_RESERVED_PROVIDER_IDS",
     "resolve_default_patch",
     "patch_config_toml",
-    "diff_preview",
     "apply_set_default",
     "clear_default",
     "current_default",
@@ -504,24 +503,6 @@ def patch_config_toml(original: str, patch: DefaultPatch) -> str:
     return _patch_model_providers_table(with_keys, patch)
 
 
-def diff_preview(original: str, patched: str, *, label: str = "config.toml") -> str:
-    """Unified diff of ``original`` -> ``patched``, stdlib only.
-
-    Empty string when the two are identical (the no-op case) — callers print
-    this as-is under ``--dry-run`` and before an interactive confirm. ``label``
-    names the file in the diff headers — defaults to ``config.toml``, the
-    only caller.
-    """
-    return "".join(
-        difflib.unified_diff(
-            original.splitlines(keepends=True),
-            patched.splitlines(keepends=True),
-            fromfile=f"{label} (current)",
-            tofile=f"{label} (new)",
-        )
-    )
-
-
 def _require_tomllib():
     """Import and return ``tomllib``, or refuse with a clear message.
 
@@ -830,7 +811,7 @@ def clear_default(
         return False
     _verify_cleared(original, cleared, provider_table)
 
-    preview = diff_preview(original, cleared)
+    preview = diff_preview(original, cleared, label="config.toml")
     if dry_run:
         print(preview or "(no textual change)")
         print(f"would write {config_path}")
@@ -1012,7 +993,7 @@ def apply_set_default(
         print("no changes to config.toml")
         return False
 
-    preview = diff_preview(original, patched)
+    preview = diff_preview(original, patched, label="config.toml")
     if dry_run:
         print(preview or "(no textual change)")
         print(f"would write {config_path}")
@@ -1081,7 +1062,7 @@ def _confirm_restore(plan: _RestorePlan, *, force: bool, confirm) -> None:
     """
     if not plan.config_changed:
         return
-    preview = diff_preview(plan.current, plan.backup_body)
+    preview = diff_preview(plan.current, plan.backup_body, label="config.toml")
     if not force and not (confirm and confirm(plan.config_path, preview)):
         raise CodeHelperError(
             f"about to restore {plan.config_path} from {plan.backup_path} — "

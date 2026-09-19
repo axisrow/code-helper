@@ -1046,12 +1046,12 @@ def test_restore_settings_missing_slot_raises(tmp_path):
 
 @pytest.mark.unit
 def test_diff_preview_empty_when_identical():
-    assert diff_preview("same\n", "same\n") == ""
+    assert diff_preview("same\n", "same\n", label="settings.json") == ""
 
 
 @pytest.mark.unit
 def test_diff_preview_shows_a_real_change():
-    preview = diff_preview('{"a": 1}\n', '{"a": 2}\n')
+    preview = diff_preview('{"a": 1}\n', '{"a": 2}\n', label="settings.json")
     assert "-{" not in preview or "settings.json" in preview
     assert preview != ""
 

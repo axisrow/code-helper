@@ -256,7 +256,7 @@ def _redacted_preview(
     the text: ``apply_proxy`` has both in scope, and ``patched`` was just
     serialised to produce ``patched_text``.
     """
-    preview = diff_preview(original_text, patched_text)
+    preview = diff_preview(original_text, patched_text, label="settings.json")
     if not preview:
         return preview
     values = _proxy_values_in(original) | _proxy_values_in(patched)

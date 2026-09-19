@@ -144,6 +144,15 @@ class _AgentBackend:
             backend differ in nothing but the token, so a readback that
             ignores it marks every chip on that backend applied. Optional —
             only agents whose readback is token-exact carry it.
+        exact_readback: Whether this agent's ``chip_is_applied`` hook is an
+            EXACT comparison of the applied target — the property that makes
+            Enter on a chip already reading applied a safe silent no-op.
+            claude compares the full managed env plus the chip's own token;
+            codex's provider+model pair cannot tell two same-axes wrappers
+            apart, so codex keeps ``False`` and Enter always re-applies.
+            The flag exists so ``_apply_chip`` stays free of an
+            ``agent_name`` branch — the one that shipped there read
+            ``agent_name == "claude"``.
     """
 
     read_applied: Callable[[Paths], str | None]
@@ -153,6 +162,7 @@ class _AgentBackend:
     chip_is_applied: str
     read_applied_model: Callable[[Paths], str | None] | None = None
     chip_switch_token: str | None = None
+    exact_readback: bool = False
 
 
 def _hint(
@@ -2426,11 +2436,12 @@ class TuiSession:
     def _apply_chip(self, agent_name: str) -> None:
         """Apply the highlighted chip of ``agent_name`` (Enter on its row).
 
-        A selected Claude chip is an exact comparison of its full managed
-        target (endpoint, models, subagent and credential), so Enter is a
-        silent no-op.  The same holds for native, whose no-override state is
-        exact.  Other agents retain their existing provider-level readback,
-        which is not precise enough to skip a potentially different wrapper.
+        A chip whose backend readback is exact (``_AgentBackend.exact_readback``
+        — claude compares its full managed target: endpoint, models, subagent
+        and credential) is a silent no-op when it already reads applied.  The
+        same holds for native, whose no-override state is exact.  Other agents
+        retain their existing provider-level readback, which is not precise
+        enough to skip a potentially different wrapper.
         """
         chips = self._chips.get(agent_name, [])
         if not chips:
@@ -2445,7 +2456,7 @@ class TuiSession:
             self._run_add(agent_name)
             return
         backend = _AGENT_BACKENDS[agent_name]
-        if (chip == _NATIVE_CHIP or agent_name == "claude") and self._chip_is_applied(
+        if (chip == _NATIVE_CHIP or backend.exact_readback) and self._chip_is_applied(
             agent_name, chip
         ):
             return
@@ -2671,6 +2682,7 @@ def _register_agent_backends() -> None:
                 lifecycle="live",
                 chip_is_applied="_chip_is_applied_switch",
                 chip_switch_token="_chip_switch_token",
+                exact_readback=True,
             ),
             "codex": _AgentBackend(
                 read_applied=current_default,
