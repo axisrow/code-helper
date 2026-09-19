@@ -36,11 +36,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from codehelper.backends._atomic import (
-    atomic_write,
-    file_lock,
+    guarded_replace,
     read_text_or_none,
 )
-from codehelper.backends._atomic import rotate_backups as _rotate_backups
 from codehelper.errors import CodeHelperError
 from codehelper.services.claude_settings import diff_preview
 from codehelper.services.model import (
@@ -795,8 +793,8 @@ def clear_default(
     the difference between "undo my last change" and "stop overriding".
 
     Takes the same write path as :func:`apply_set_default` — gate on
-    confirm/force, rotate backups, ``atomic_write`` — so a clear is exactly
-    as recoverable as a set.
+    confirm/force, then :func:`guarded_replace` (rotate + write) — so a
+    clear is exactly as recoverable as a set.
 
     Returns:
         True if anything was written (or would be, under ``dry_run``);
@@ -828,15 +826,16 @@ def clear_default(
             f"(use --force, or re-run interactively)"
         )
 
-    with file_lock(config_path):
-        current_now = read_text_or_none(config_path) or ""
-        if current_now != original:
-            raise CodeHelperError(
-                f"{config_path} changed since it was read — refusing to write "
-                "a stale config snapshot; re-run to patch the current file"
-            )
-        _rotate_backups(_config_backup_slots(paths), current=original)
-        atomic_write(config_path, cleared, mode=None)
+    guarded_replace(
+        config_path,
+        expected=original,
+        new_text=cleared,
+        stale_message=(
+            f"{config_path} changed since it was read — refusing to write "
+            "a stale config snapshot; re-run to patch the current file"
+        ),
+        backup_slots=_config_backup_slots(paths),
+    )
     print(f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})")
     return True
 
@@ -1010,16 +1009,17 @@ def apply_set_default(
             f"confirmation (use --force, or re-run interactively)"
         )
 
-    with file_lock(config_path):
-        current_now = read_text_or_none(config_path) or ""
-        if current_now != original:
-            raise CodeHelperError(
-                f"{config_path} changed since it was read — refusing to write "
-                "a stale config snapshot; re-run to patch the current file"
-            )
-        _rotate_backups(_config_backup_slots(paths), current=original)
-        atomic_write(config_path, patched, mode=None)
-        print(f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})")
+    guarded_replace(
+        config_path,
+        expected=original,
+        new_text=patched,
+        stale_message=(
+            f"{config_path} changed since it was read — refusing to write "
+            "a stale config snapshot; re-run to patch the current file"
+        ),
+        backup_slots=_config_backup_slots(paths),
+    )
+    print(f"wrote {config_path} (backup: {paths.codex_main_config_backup(1)})")
 
     return True
 
@@ -1113,14 +1113,15 @@ def restore_default(
 
     _confirm_restore(plan, force=force, confirm=confirm)
 
-    with file_lock(plan.config_path):
-        current_config = read_text_or_none(plan.config_path) or ""
-        if current_config != plan.current:
-            raise CodeHelperError(
-                f"{plan.config_path} changed since it was read — refusing to "
-                "restore over a concurrent change; re-run to restore"
-            )
-        atomic_write(plan.config_path, plan.backup_body, mode=None)
-        print(f"restored {plan.config_path} from {plan.backup_path}")
+    guarded_replace(
+        plan.config_path,
+        expected=plan.current,
+        new_text=plan.backup_body,
+        stale_message=(
+            f"{plan.config_path} changed since it was read — refusing to "
+            "restore over a concurrent change; re-run to restore"
+        ),
+    )
+    print(f"restored {plan.config_path} from {plan.backup_path}")
 
     return True
