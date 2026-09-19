@@ -389,6 +389,7 @@ def _verify_proxy_patch(original: dict, patched: dict, patch: dict[str, str]) ->
 def proxy_status(
     paths: Paths,
     *,
+    env: dict | None = None,
     state: dict[str, object] | None = None,
 ) -> ProxyStatus:
     """What the proxy configuration currently is. Read-only, NEVER raises.
@@ -403,13 +404,14 @@ def proxy_status(
     order — i.e. the address Claude Code would actually use, not merely the
     one most recently written.
 
-    ``state`` is an optional preloaded :func:`state.load_state` result (issue
-    #110) — the TUI main loop loads ``state.json`` once per iteration; the
-    default ``None`` reads the file.
+    ``env`` / ``state`` are optional preloaded
+    :func:`claude_settings.read_env` / :func:`state.load_state` results
+    (issue #110) — the TUI main loop reads both files once per iteration;
+    the default ``None`` reads the files.
     """
     from codehelper.services.state import saved_proxy
 
-    env = read_env(paths) or {}
+    env = (read_env(paths) if env is None else env) or {}
     url = next(
         (
             value

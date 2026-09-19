@@ -2651,6 +2651,32 @@ def test_one_iteration_loads_credentials_once(monkeypatch):
 
 
 @pytest.mark.integration
+def test_one_iteration_reads_settings_env_once(monkeypatch):
+    """Issue #110 step 3: ONE ``read_env`` per main-loop iteration. Claude's
+    applied readback, the managed-env chip snapshot and the proxy row all
+    consume the same preloaded settings.json ``env`` block instead of each
+    re-reading the file."""
+    import codehelper.services.claude_settings as claude_settings_service
+    from codehelper.services.wrappers import install_wrapper
+
+    install_wrapper(Paths.default(), "glm", token="test-token")
+
+    calls = {"read_env": 0}
+    real = claude_settings_service.read_env
+
+    def counting(paths):
+        calls["read_env"] += 1
+        return real(paths)
+
+    monkeypatch.setattr(claude_settings_service, "read_env", counting)
+
+    _real_menu_keys(monkeypatch, ["CANCEL"])
+    assert main(["tui"]) == 0
+
+    assert calls == {"read_env": 1}
+
+
+@pytest.mark.integration
 def test_chip_cursor_is_independent_per_agent(monkeypatch):
     """Each agent row remembers its own chip, so moving away and back does
     not reset where the user was."""
@@ -2699,12 +2725,14 @@ def test_enter_applies_the_second_wrapper_sharing_a_provider_with_the_first(
     # time (`_register_agent_backends`) and captures `current_switch` as a
     # bound function value there, so patching the source module after import
     # would not reach it; `_AgentBackend` is frozen, so replace the whole
-    # entry rather than mutating a field.
+    # entry rather than mutating a field. The replacement honours claude's
+    # `read_applied_takes_env` arity (#110): the iteration snapshot rides in
+    # as a keyword and is ignored by this stand-in.
     monkeypatch.setitem(
         tui._AGENT_BACKENDS,
         "claude",
         dataclasses.replace(
-            tui._AGENT_BACKENDS["claude"], read_applied=lambda _paths: "zai"
+            tui._AGENT_BACKENDS["claude"], read_applied=lambda _paths, env=None: "zai"
         ),
     )
 

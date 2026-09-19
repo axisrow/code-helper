@@ -116,9 +116,18 @@ class _AgentBackend:
     ultimately does the work.
 
     Attributes:
-        read_applied: ``(paths) -> provider name | None``. MUST never raise —
+        read_applied: ``(paths) -> provider name | None``, or — when
+            :attr:`read_applied_takes_env` is set —
+            ``(paths, *, env) -> provider name | None`` where ``env`` is the
+            iteration's settings.json ``env`` snapshot. MUST never raise —
             it runs once per main-loop iteration on the UI path, where an
             unreadable config means "nothing applied", not a crash.
+        read_applied_takes_env: Whether ``read_applied`` consumes the
+            iteration's settings.json snapshot (issue #110): claude's
+            ``current_switch`` reads that same file for its answer, so its
+            entry takes the preloaded env instead of re-reading it per
+            reader. ``read_applied`` is typed ``Callable[...]`` because the
+            flag decides which arity the entry honours.
         read_applied_model: ``(paths) -> model | None``, or ``None`` when this
             agent's config does not record a model this project can read back.
             Same never-raise contract as ``read_applied``, and it runs on the
@@ -155,11 +164,12 @@ class _AgentBackend:
             ``agent_name == "claude"``.
     """
 
-    read_applied: Callable[[Paths], str | None]
+    read_applied: Callable[..., str | None]
     apply_wrapper: str
     apply_native: str
     lifecycle: str
     chip_is_applied: str
+    read_applied_takes_env: bool = False
     read_applied_model: Callable[[Paths], str | None] | None = None
     chip_switch_token: str | None = None
     exact_readback: bool = False
@@ -1742,21 +1752,37 @@ class TuiSession:
         The per-file stores are also loaded ONCE here and fed to every
         reader below as an optional preloaded kwarg (issue #110): one
         ``load_state`` instead of one per profile resolver / disabled gate /
-        proxy row / default-wrapper lookup. The readers default to reading
-        the file themselves, so nothing off this loop changes.
+        proxy row / default-wrapper lookup, one ``load_credentials`` instead
+        of one per provider profile scan, and one ``read_env`` instead of
+        one per claude readback plus the proxy row. The readers default to
+        reading the files themselves, so nothing off this loop changes.
         """
+        from codehelper.services.claude_settings import active_switch_env, read_env
         from codehelper.services.paths import Paths
+        from codehelper.services.proxy import proxy_status
         from codehelper.services.secrets import load_credentials
         from codehelper.services.state import load_state
 
         paths = Paths.default()
         self._state_snapshot = load_state(paths)
         self._creds_snapshot = load_credentials(paths)
+        # read_env's None (missing/corrupt settings.json) is unrepresentable
+        # in the env= kwarg, and every consumer below answers a {} snapshot
+        # exactly as it answers None — so preload the empty dict rather than
+        # let the None re-trigger a file read.
+        env = read_env(paths) or {}
         self._refresh_profile_label(
             state=self._state_snapshot, creds=self._creds_snapshot
         )
         self._applied = {
-            name: backend.read_applied(paths)
+            name: (
+                # The env-aware readbacks (claude's current_switch) consume
+                # this same snapshot instead of re-reading the file; the
+                # flag is per-agent table data, never a name branch.
+                backend.read_applied(paths, env=env)
+                if backend.read_applied_takes_env
+                else backend.read_applied(paths)
+            )
             for name, backend in _AGENT_BACKENDS.items()
         }
         self._applied_model = {
@@ -1764,13 +1790,12 @@ class TuiSession:
             for name, backend in _AGENT_BACKENDS.items()
             if backend.read_applied_model is not None
         }
-        from codehelper.services.claude_settings import active_switch_env
-        from codehelper.services.proxy import proxy_status
-
-        self._claude_active_env = active_switch_env(paths)
+        self._claude_active_env = active_switch_env(paths, env=env)
         # Read here, never from the proxy row's label callable: the menu
         # re-evaluates that on every redraw frame, cursor movement included.
-        self._proxy = proxy_status(paths, state=self._state_snapshot)
+        self._proxy = proxy_status(
+            paths, env=env, state=self._state_snapshot
+        )
         self._chips = {
             name: self._chips_for(name, paths, state=self._state_snapshot)
             for name in _AGENT_BACKENDS
@@ -2793,6 +2818,7 @@ def _register_agent_backends() -> None:
                 chip_is_applied="_chip_is_applied_switch",
                 chip_switch_token="_chip_switch_token",
                 exact_readback=True,
+                read_applied_takes_env=True,
             ),
             "codex": _AgentBackend(
                 read_applied=current_default,
