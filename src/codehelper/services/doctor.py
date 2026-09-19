@@ -451,7 +451,9 @@ def proxy_env_row(
 
     ``endpoint_host`` is the wrapper's endpoint host (``None`` when the
     profile carries no readable ``base_url``): the bypass check compares it
-    against ``NO_PROXY``/``no_proxy`` — exact host or domain suffix only.
+    against ``NO_PROXY``/``no_proxy`` — exact host or domain suffix only, and
+    only when a forward-proxy address is actually configured, since a bypass
+    list without a proxy is inert.
     """
     values: dict[str, str] = {}
     for name in (*PROXY_ENV_NAMES, *BYPASS_ENV_NAMES):
@@ -506,10 +508,17 @@ def proxy_env_row(
             "consumers disagree on which spelling wins, so traffic may split"
         )
 
+    # The bypass verdict needs a proxy to bypass: with no forward-proxy
+    # address configured, nothing is being proxied and "traffic bypasses the
+    # proxy" would be false — so the check itself is gated, not just worded.
+    proxy_configured = any(name in values for name in PROXY_ENV_NAMES)
     bypassed = [
         name
         for name in BYPASS_ENV_NAMES
-        if name in values and host and _host_is_bypassed(host, values[name])
+        if proxy_configured
+        and name in values
+        and host
+        and _host_is_bypassed(host, values[name])
     ]
     if bypassed:
         status = WARN
@@ -517,7 +526,12 @@ def proxy_env_row(
             f"endpoint {host} is in {', '.join(bypassed)} — API traffic to it "
             "bypasses the proxy"
         )
-    elif effective and not host:
+    elif not proxy_configured:
+        # A bypass list without a proxy is the normal aftermath of
+        # `proxy off` (proxy.py deliberately leaves NO_PROXY standing), so
+        # this is an answer, not a warning: the list is inert.
+        parts.append("no proxy address set — the NO_PROXY list is inert")
+    elif not host:
         parts.append("wrapper endpoint unknown — bypass check skipped")
 
     hint = ""

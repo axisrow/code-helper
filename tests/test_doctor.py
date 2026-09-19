@@ -468,7 +468,9 @@ def test_proxy_row_warns_when_case_spellings_diverge():
 
 @pytest.mark.unit
 def test_proxy_row_warns_when_the_endpoint_is_bypassed_exact_host():
-    row = _proxy_report({"NO_PROXY": "localhost,api.example.net"})
+    row = _proxy_report(
+        {"https_proxy": "http://p:1", "NO_PROXY": "localhost,api.example.net"}
+    )
     assert row.status == doctor.WARN
     assert "api.example.net" in row.detail
     assert "NO_PROXY" in row.detail
@@ -479,19 +481,38 @@ def test_proxy_row_bypass_match_is_exact_host_or_domain_suffix_only():
     """.example.net matches api.example.net; a bare-suffix entry matches its
     subdomains and the bare host; an unrelated host that merely CONTAINS the
     entry never matches — and no CIDR or port forms exist here."""
-    assert _proxy_report({"no_proxy": ".example.net"}).status == doctor.WARN
+    env = {"https_proxy": "http://p:1"}
+    assert _proxy_report({**env, "no_proxy": ".example.net"}).status == doctor.WARN
     assert (
-        _proxy_report({"no_proxy": "example.net"}, host="api.example.net").status
+        _proxy_report({**env, "no_proxy": "example.net"}, host="api.example.net").status
         == doctor.WARN
     )
     assert (
-        _proxy_report({"no_proxy": "example.net"}, host="example.net").status
+        _proxy_report({**env, "no_proxy": "example.net"}, host="example.net").status
         == doctor.WARN
     )
     assert (
-        _proxy_report({"no_proxy": "example.net"}, host="notexample.net").status
+        _proxy_report({**env, "no_proxy": "example.net"}, host="notexample.net").status
         == doctor.OK
     )
+
+
+@pytest.mark.unit
+def test_proxy_row_reports_an_inert_bypass_list_without_a_proxy():
+    """A bypass list with no forward-proxy address proxies nothing — the row
+    must not claim traffic "bypasses the proxy", and must not warn: NO_PROXY
+    outliving `proxy off` is proxy.py's designed behaviour, not a fault."""
+    row = _proxy_report({"NO_PROXY": "api.example.net"})
+    assert row.status == doctor.OK
+    assert "inert" in row.detail
+    assert "bypasses the proxy" not in row.detail
+    assert "remove" not in row.hint
+
+    # ALL_PROXY alone IS a configured address (curl-style consumers), so the
+    # bypass claim becomes true again even without a claude-chain address.
+    row = _proxy_report({"ALL_PROXY": "http://p:1", "NO_PROXY": "api.example.net"})
+    assert row.status == doctor.WARN
+    assert "bypasses the proxy" in row.detail
 
 
 @pytest.mark.unit
@@ -512,6 +533,7 @@ def test_proxy_row_is_never_a_failure():
         {"https_proxy": "http://p:1"},
         {"https_proxy": "http://a:1", "HTTPS_PROXY": "http://a:2"},
         {"NO_PROXY": "api.example.net", "https_proxy": "http://p:1"},
+        {"NO_PROXY": "api.example.net"},  # inert list, no proxy
     ):
         assert _proxy_report(environ).status in (doctor.OK, doctor.WARN)
 
