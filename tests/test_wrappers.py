@@ -83,12 +83,13 @@ _SECRET_TOKEN = "00000000000000000000000000000000.aaaaaaaaaaaaaaaa"
 
 
 @pytest.mark.unit
-def test_registry_has_the_four_curated_presets():
+def test_registry_has_the_five_curated_presets():
     assert {w.name for w in WRAPPERS} == {
         "deepseek-ollama",
         "glm",
         "glm-ollama",
         "bai",
+        "agy-native",
     }
 
 
@@ -147,6 +148,65 @@ def test_glm_ollama_uses_the_launcher_shape():
     assert spec.agent.name == "claude"
     assert spec.model == "glm-5.2:cloud"
     assert spec.auth == "literal"  # no token — ollama launch authenticates itself
+
+
+@pytest.mark.unit
+def test_agy_native_preset_uses_the_agent_native_shape():
+    """The Antigravity preset (issue #112): agy × antigravity via AGENT_NATIVE,
+    native OAuth — no token, no tiers, just the pinned model."""
+    spec = get_spec("agy-native")
+    assert spec.shape is ConfigShape.AGENT_NATIVE
+    assert spec.agent.name == "agy"
+    assert spec.agent.binary == "agy"
+    assert spec.provider.name == "antigravity"
+    assert spec.model == "gemini-3.8-flash-medium"
+    assert spec.auth == "none"  # no token — agy's Google OAuth applies
+    assert spec.tier_models is None
+
+
+@pytest.mark.unit
+def test_agent_native_wrapper_renders_a_bare_dispatch():
+    """The AGENT_NATIVE body is the whole point of the shape: NO env block,
+    NO token, NO config — one exec line pinning --model. The model is
+    single-quoted (it can originate outside the registry); the binary is
+    bare (import-time validated registry constant)."""
+    from codehelper.services.render import render_script
+
+    spec = get_spec("agy-native")
+    body = render_script(spec, token="")
+    marker = (
+        "# codehelper: managed wrapper (agent=agy, provider=antigravity, "
+        "shape=agent-native)"
+    )
+    lines = body.splitlines()
+    assert lines[0] == "#!/bin/bash"
+    assert lines[1] == marker
+    assert lines[2] == "exec agy --model 'gemini-3.8-flash-medium' \"$@\""
+    assert len(lines) == 3
+
+
+@pytest.mark.integration
+def test_agent_native_wrapper_round_trips_through_its_marker(tmp_path):
+    """An installed agy wrapper reconstructs from its marker + body — the
+    model comes back out of the `--model` flag (the launch-shape regex's
+    sibling), and a byte-identical re-install is a no-op, so the ownership
+    guard recognises its own output. auth "none" → normal 0o755."""
+    import stat
+
+    paths = Paths.from_home(tmp_path)
+
+    assert install_wrapper(paths, "agy-native", token="") is True
+    script = paths.script_for("agy-native")
+    assert stat.S_IMODE(script.stat().st_mode) == 0o755
+
+    spec = spec_from_installed(paths, "agy-native")
+    assert spec is not None
+    assert spec.shape is ConfigShape.AGENT_NATIVE
+    assert spec.agent.name == "agy"
+    assert spec.provider.name == "antigravity"
+    assert spec.model == "gemini-3.8-flash-medium"
+
+    assert install_wrapper(paths, "agy-native", token="") is False
 
 
 @pytest.mark.integration

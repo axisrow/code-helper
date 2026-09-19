@@ -56,30 +56,36 @@ _OPENAI_ONLY = Provider(
 def test_registry_covers_ollama_launch_integrations():
     """All 15 CLI integrations `ollama launch` supports are registered.
 
-    Superset (not equality) on the two hand-built agents, plus an exact count
+    Superset (not equality) on the hand-built agents, plus an exact count
     for the whole registry — this is the pin that would catch a launch-only
     agent silently dropped or duplicated, without being so exact it breaks the
     moment a future agent is added deliberately.
     """
     names = {a.name for a in AGENTS}
-    assert {"claude", "codex"} <= names
-    assert len(AGENTS) == 15
+    assert {"claude", "codex", "agy"} <= names
+    assert len(AGENTS) == 16
 
 
 @pytest.mark.unit
 def test_launch_only_agents_declare_exactly_ollama_launch():
-    """Every agent besides claude/codex is OLLAMA_LAUNCH-only.
+    """Every agent besides claude/codex/agy is OLLAMA_LAUNCH-only.
 
     None of them speaks Codex's `--profile <alias>` TOML convention or
     Claude's `ANTHROPIC_*` env vars — each has its own native config format
     that only `ollama launch` itself knows how to write. Declaring a second
     shape for one of them would silently create a wrapper `render.py` cannot
-    actually produce correctly.
+    actually produce correctly. agy is the deliberate third exception: it
+    launches DIRECTLY on its own native backend (AGENT_NATIVE) — it is not
+    an `ollama launch` integration at all (`ollama launch --help` lists no
+    agy/antigravity).
     """
     for agent in AGENTS:
-        if agent.name in ("claude", "codex"):
+        if agent.name in ("claude", "codex", "agy"):
             continue
         assert agent.shapes == frozenset({ConfigShape.OLLAMA_LAUNCH}), agent.name
+    agy = get_agent("agy")
+    assert agy.shapes == frozenset({ConfigShape.AGENT_NATIVE})
+    assert agy.binary == "agy"
 
 
 @pytest.mark.unit
@@ -104,6 +110,7 @@ def test_registry_has_builtin_providers():
         "deepseek-openai",
         "bai",
         "freellmapi",
+        "antigravity",
         "native",
     }
 
@@ -117,6 +124,74 @@ def test_no_shipped_provider_is_suspended():
     assert suspended == []
     for provider in PROVIDERS:
         assert provider.shapes, f"{provider.name} declares no shapes"
+
+
+@pytest.mark.unit
+def test_antigravity_is_a_native_oauth_provider_without_an_address():
+    """Portrait of Antigravity's native backend (issue #112): no endpoint to
+    configure and no credential to resolve — `agy` authenticates itself via
+    Google OAuth — paired only through AGENT_NATIVE. FIXED + empty base_url
+    is legal because its shapes consume no address."""
+    antigravity = get_provider("antigravity")
+    assert antigravity.shapes == frozenset({ConfigShape.AGENT_NATIVE})
+    assert antigravity.base_url == ""
+    assert antigravity.base_url_policy is BaseUrlPolicy.FIXED
+    assert antigravity.auth == "none"
+    assert antigravity.token_env_var == ""
+    assert antigravity.model_list_api is ModelListAPI.NONE
+    assert not antigravity.env_reset
+    assert not antigravity.suspended
+    # No HTTP discovery exists for the OAuth backend, so the verified
+    # `agy models` output IS the picker's only source.
+    assert "gemini-3.8-flash-medium" in antigravity.known_models
+    assert "claude-sonnet-4-6" in antigravity.known_models
+
+
+@pytest.mark.unit
+def test_agent_native_pairs_agy_with_antigravity_only():
+    """The one AGENT_NATIVE pairing — and its honesty guarantee: every other
+    provider refuses for agy with the "no common configuration mechanism"
+    error whose hint names what agy DOES work with."""
+    assert (
+        resolve_shape(get_agent("agy"), get_provider("antigravity"))
+        is ConfigShape.AGENT_NATIVE
+    )
+    for name in ("ollama-direct", "zai", "litellm", "deepseek", "bai"):
+        with pytest.raises(CodeHelperError, match="no common configuration"):
+            resolve_shape(get_agent("agy"), get_provider(name))
+    # The incompatibility hint points at the one real pairing.
+    try:
+        resolve_shape(get_agent("agy"), get_provider("zai"))
+    except CodeHelperError as exc:
+        assert "antigravity" in str(exc)
+
+
+@pytest.mark.unit
+def test_base_url_gate_is_keyed_on_address_consuming_shapes():
+    """The must-carry-a-base_url rule applies only to providers whose shapes
+    interpolate the address (ANTHROPIC_ENV/OPENAI_TOML); an AGENT_NATIVE-only
+    provider legitimately has none. Computed from the declared set, never a
+    name check."""
+    import codehelper.services.model as m
+
+    native_only = Provider(
+        name="native-only",
+        shapes=frozenset({ConfigShape.AGENT_NATIVE}),
+        auth="none",
+        model_list_api=ModelListAPI.NONE,
+    )
+    m._validate_provider(native_only)  # must not raise
+
+    address_consumer = Provider(
+        name="address-consumer",
+        shapes=frozenset({ConfigShape.OPENAI_TOML}),
+        auth="secret",
+        token_env_var="CONSUMER_API_KEY",
+        model_list_api=ModelListAPI.OPENAI_V1,
+        wire_api="responses",
+    )
+    with pytest.raises(CodeHelperError, match="no registry base_url"):
+        m._validate_provider(address_consumer)
 
 
 @pytest.mark.unit

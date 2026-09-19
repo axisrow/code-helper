@@ -337,6 +337,34 @@ def _render_openai_toml(spec: WrapperSpec, token: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_agent_native(spec: WrapperSpec, token: str) -> str:
+    """``exec <agent> --model <model> "$@"`` — the AGENT_NATIVE wrapper.
+
+    The honest minimal form: the agent's own native auth applies (for ``agy``,
+    Google OAuth against its ``~/.gemini`` config home), so there is NO env
+    block, NO token, NO config file — this tool writes nothing the agent would
+    have to be pointed with. ``token`` is therefore unused by contract: this
+    renderer is only ever dispatched for ``auth="none"`` providers, where
+    ``build_spec``/``_add_resolve_token`` have already skipped resolution —
+    a fake env var would be a lie, and an assertion-here would be dead code
+    for a state the shape system cannot produce.
+
+    ``spec.model`` goes through :func:`_shell_single_quote` like every value
+    that can originate outside the registry; ``agent.binary`` is interpolated
+    bare (registry constant, constrained at import time — same rule as the
+    other renderers). Only ``--model`` is threaded: it is the one documented
+    flag the wrapper exists to pin (agy's model ids encode the effort tier,
+    so a separate ``--effort`` would be redundant). Everything the user adds
+    rides ``"$@"`` untouched.
+    """
+    del token  # native auth: there is no credential to place anywhere
+    return (
+        f"#!/bin/bash\n"
+        f"{_marker(spec)}\n"
+        f'exec {spec.agent.binary} --model {_shell_single_quote(spec.model)} "$@"\n'
+    )
+
+
 def openai_base_url(provider_base_url: str) -> str:
     """Derive the OpenAI-compatible ``base_url`` for the TOML profile.
 
@@ -576,6 +604,7 @@ _RENDERERS: dict[ConfigShape, Callable[[WrapperSpec, str], str]] = {
     ConfigShape.ANTHROPIC_ENV: _render_anthropic_env,
     ConfigShape.OLLAMA_LAUNCH: _render_ollama_launch,
     ConfigShape.OPENAI_TOML: _render_openai_toml,
+    ConfigShape.AGENT_NATIVE: _render_agent_native,
 }
 
 

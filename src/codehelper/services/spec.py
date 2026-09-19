@@ -398,6 +398,24 @@ PRESETS: tuple[Preset, ...] = (
         # provider, which exists precisely to carry one.
         description="Claude Code → B.AI",
     ),
+    Preset(
+        # "agy-native", NOT "agy": the preset alias becomes a wrapper file
+        # name, and a wrapper named after the agent's own binary is a
+        # reserved name (naming.RESERVED_ALIASES — `exec agy` from
+        # ~/.local/bin/agy would re-invoke itself). `add agy` therefore
+        # lands on the agent-name teaching message pointing at the
+        # constructor form; this preset is the one-word install.
+        alias="agy-native",
+        agent="agy",
+        provider="antigravity",
+        shape=ConfigShape.AGENT_NATIVE,
+        # The current flagship generation's mid effort tier (`agy models`,
+        # verified 2026-09): the tier rides the model id as a suffix, so one
+        # model choice pins both. A different tier is one --model override
+        # away (`agy-native --model gemini-3.8-flash-high`).
+        model="gemini-3.8-flash-medium",
+        description="Google Antigravity CLI → native Google backend (OAuth)",
+    ),
 )
 
 

@@ -263,6 +263,89 @@ def test_add_bai_uses_the_registry_url_and_preset_model(tmp_path, monkeypatch):
     assert "export ANTHROPIC_AUTH_TOKEN='sk-test'" in body
 
 
+# --------------------------------------------------------------------------- #
+# agy-native — the Antigravity preset (issue #112): native OAuth, no token
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_add_agy_native_installs_without_any_token_step(tmp_path, monkeypatch):
+    """`add agy-native` must reach a completed install with NO credential:
+    the native backend is OAuth — if the token chain were ever consulted it
+    would hang on a hidden prompt (asserted by resolve_token exploding)."""
+    import codehelper.services.secrets as secrets
+
+    def _explode(*_a, **_kw):  # pragma: no cover - must not run
+        raise AssertionError("native OAuth wrapper must not resolve a token")
+
+    monkeypatch.setattr(secrets, "resolve_token", _explode)
+    assert main(["add", "agy-native", "--context-window", "none"]) == 0
+    body = _body(tmp_path, "agy-native")
+    assert "exec agy --model 'gemini-3.8-flash-medium' \"$@\"" in body
+    # No env block, no settings payload — the honest bare dispatch.
+    assert "export " not in body
+    assert "ANTHROPIC" not in body
+
+
+@pytest.mark.integration
+def test_add_agy_constructor_form(tmp_path):
+    code = main(
+        [
+            "add",
+            "--agent",
+            "agy",
+            "--provider",
+            "antigravity",
+            "--model",
+            "gemini-3.1-pro-high",
+            "--context-window",
+            "none",
+        ]
+    )
+    assert code == 0
+    assert "exec agy --model 'gemini-3.1-pro-high' \"$@\"" in _body(
+        tmp_path, "gemini-3.1-pro-high-agy"
+    )
+
+
+@pytest.mark.integration
+def test_add_agy_with_a_foreign_provider_refuses_honestly(capsys):
+    """agy has no documented OpenAI/Anthropic surface — every non-native
+    pairing must refuse with the normal incompatibility error (whose hint
+    names antigravity), never install a wrapper that cannot work."""
+    code = main(["add", "--agent", "agy", "--provider", "zai", "--model", "m"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "no common configuration" in err
+    assert "antigravity" in err
+
+
+@pytest.mark.integration
+def test_add_bare_agy_gets_the_agent_teaching_message(capsys):
+    """`add agy` names an AGENT, not the preset (the preset alias is
+    "agy-native" — a wrapper named after an agent's own binary is reserved).
+    The fallback must teach the constructor form, not say "unknown"."""
+    code = main(["add", "agy", "--context-window", "none"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "agy is an agent" in err
+    assert "--agent agy" in err
+
+
+@pytest.mark.integration
+def test_list_matrix_agy_row(capsys):
+    """agy's row: agent-native under antigravity, a gap everywhere else."""
+    assert main(["list", "matrix"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    header_cols = lines[0].split()
+    antigravity_idx = header_cols.index("antigravity")
+    zai_idx = header_cols.index("zai")
+    row = next(line for line in lines if line.startswith("agy")).split()
+    # +1: each data row's first word is the agent name, not a provider column.
+    assert row[antigravity_idx + 1] == "agent-native"
+    assert row[zai_idx + 1] == "—"
+
+
 @pytest.mark.integration
 def test_add_preset_base_url_never_injects_the_active_profile(tmp_path, monkeypatch):
     """The implicit active-profile injection is for the provider's OWN default

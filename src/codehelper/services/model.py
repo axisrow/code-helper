@@ -110,6 +110,26 @@ class ConfigShape(StrEnum):
     #: distinct from "incompatible", a different, honest error.
     OPENAI_TOML = "openai-toml"
 
+    #: Launch the agent binary DIRECTLY — ``exec <binary> --model <model> "$@"``
+    #: — with NO address, NO credential, and NO config file written by this
+    #: tool. The agent's own native auth (for ``agy``: Google OAuth against
+    #: its ``~/.gemini`` config home) applies, which is why the token
+    #: resolution step (env → cache → prompt) is SKIPPED for this shape, not
+    #: stubbed: ``auth="none"`` means "the launcher authenticates", and a fake
+    #: env var would be a lie that outlives this comment. Only ``--model`` is
+    #: threaded, and only because the agent documents the flag. A provider
+    #: that pairs through this shape therefore carries no base_url (see
+    #: ``_validate_provider``'s address-consuming rule) and no credential.
+    #:
+    #: Today declared only by the ``agy`` × ``antigravity`` pairing. The
+    #: documented endpoint override for ``agy`` (``GOOGLE_GEMINI_BASE_URL``,
+    #: per Google's Installation & Auth guide) speaks the GEMINI wire
+    #: protocol — no provider in this registry serves that on its frontend,
+    #: so no second pairing is offered: wiring one to an OpenAI/Anthropic
+    #: surface would install a wrapper that cannot work, the exact class of
+    #: bug the suspended gemini entry (#74) existed to prevent.
+    AGENT_NATIVE = "agent-native"
+
     #: Patches the ``env`` block of Claude Code's OWN ``~/.claude/settings.json``
     #: in place (``services/claude_settings.py``, the ``switch`` command) —
     #: instead of generating a wrapper script, it changes what an ALREADY
@@ -150,6 +170,7 @@ _SHAPE_PRIORITY: tuple[ConfigShape, ...] = (
     ConfigShape.ANTHROPIC_ENV,
     ConfigShape.OPENAI_TOML,
     ConfigShape.OLLAMA_LAUNCH,
+    ConfigShape.AGENT_NATIVE,
     # Last, and inert in practice: no Agent declares ANTHROPIC_SETTINGS (see
     # its docstring), so `common` can never contain it and this priority slot
     # is never actually consulted by resolve_shape. Listed anyway so the
@@ -372,6 +393,24 @@ AGENTS: tuple[Agent, ...] = (
         # `codex × z.ai` is (correctly) impossible today.
         shapes=frozenset({ConfigShape.OPENAI_TOML, ConfigShape.OLLAMA_LAUNCH}),
         description="OpenAI Codex CLI",
+    ),
+    Agent(
+        name="agy",
+        binary="agy",
+        # Antigravity (Google's agentic CLI) runs on its OWN native backend —
+        # Google OAuth against the `~/.gemini` config home, no API token — so
+        # its only honest pairing is AGENT_NATIVE: launch `agy` directly and
+        # thread the documented `--model` flag. Deliberately NOT
+        # OLLAMA_LAUNCH: `ollama launch --help` (ollama 0.32.13) lists no
+        # agy/antigravity integration, so the launcher cannot configure it.
+        # Deliberately NOT a base_url/token shape either: the agent DOES
+        # document an endpoint override (GOOGLE_GEMINI_BASE_URL +
+        # GEMINI_API_KEY + modelProvider="gemini", per Google's Installation
+        # & Auth guide), but that surface speaks the GEMINI wire protocol —
+        # no provider in this registry serves it, so any pairing built on it
+        # would be a wrapper that cannot work. See ConfigShape.AGENT_NATIVE.
+        shapes=frozenset({ConfigShape.AGENT_NATIVE}),
+        description="Google Antigravity CLI",
     ),
     # The remaining 13 are every OTHER *CLI* integration `ollama launch`
     # supports (verified against `ollama launch --help`, ollama 0.32.13) —
@@ -631,6 +670,45 @@ PROVIDERS: tuple[Provider, ...] = (
         description="FreeLLMAPI local proxy (one host, both protocols)",
     ),
     Provider(
+        name="antigravity",
+        # Antigravity's NATIVE backend: the Google-hosted service `agy`
+        # authenticates to itself via OAuth (`~/.gemini/oauth_creds.json`).
+        # It is not an address anyone configures — no base_url, no credential
+        # — and it pairs only through AGENT_NATIVE (see that shape's
+        # docstring for why the documented GOOGLE_GEMINI_BASE_URL override
+        # does NOT become a pairing). FIXED + empty base_url is legal here
+        # because its shapes consume no address (_validate_provider).
+        #
+        # model_list_api stays NONE: the backend is OAuth-protected and this
+        # tool does no subprocess discovery, so `agy models` output cannot be
+        # fetched over HTTP — these known_models (verified against
+        # `agy models`, agy 2026-09) ARE the only source for the picker, and
+        # the TUI labels them "known models — discovery unavailable". Model
+        # names encode the effort tier as a suffix, so `--model` alone
+        # carries the tier choice; the CLI's own `--effort` flag is redundant
+        # for these ids.
+        shapes=frozenset({ConfigShape.AGENT_NATIVE}),
+        auth="none",
+        model_list_api=ModelListAPI.NONE,
+        known_models=(
+            "gemini-3.8-flash-high",
+            "gemini-3.8-flash-medium",
+            "gemini-3.8-flash-low",
+            "gemini-3.7-flash-high",
+            "gemini-3.7-flash-medium",
+            "gemini-3.7-flash-low",
+            "gemini-3.6-flash-high",
+            "gemini-3.6-flash-medium",
+            "gemini-3.6-flash-low",
+            "gemini-3.1-pro-high",
+            "gemini-3.1-pro-low",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+            "gpt-oss-120b-medium",
+        ),
+        description="Google Antigravity (native OAuth — `agy`'s own backend)",
+    ),
+    Provider(
         name="native",
         # "native", not "anthropic": this entry does not represent a backend
         # (an address to send requests to) — it represents the ABSENCE of
@@ -650,6 +728,17 @@ PROVIDERS: tuple[Provider, ...] = (
         env_reset=True,
         description="native — clears the override, restores OAuth + stock models",
     ),
+)
+
+
+#: The shapes whose renderers interpolate ``provider.base_url`` into what they
+#: write — the ANTHROPIC env block and the Codex TOML profile. A provider
+#: serving ONLY shapes outside this set (AGENT_NATIVE: the agent's own native
+#: backend carries the endpoint, this tool writes nothing with an address in
+#: it) legitimately carries no ``base_url`` at all, and ``_validate_provider``
+#: keys its must-carry-an-address rule on this set, never on a name.
+_ADDRESS_CONSUMING_SHAPES: frozenset[ConfigShape] = frozenset(
+    {ConfigShape.ANTHROPIC_ENV, ConfigShape.OPENAI_TOML}
 )
 
 
@@ -744,11 +833,15 @@ def _validate_provider(provider: Provider) -> None:
         )
     # env_reset is exempt from this FIXED/OVERRIDABLE-must-carry-a-base_url
     # rule: it is checked, more specifically, by the env_reset block below —
-    # an env_reset provider is SUPPOSED to have no base_url at all.
+    # an env_reset provider is SUPPOSED to have no base_url at all. The same
+    # goes for a provider whose shapes consume no address (AGENT_NATIVE —
+    # see _ADDRESS_CONSUMING_SHAPES): there is nothing for a missing
+    # base_url to break.
     if (
         not provider.env_reset
         and provider.base_url_policy is not BaseUrlPolicy.REQUIRED
         and not provider.base_url
+        and provider.shapes & _ADDRESS_CONSUMING_SHAPES
     ):
         raise CodeHelperError(
             f"provider {provider.name!r} declares base_url_policy="

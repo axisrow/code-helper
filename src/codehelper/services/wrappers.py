@@ -572,9 +572,10 @@ def _model_from_body(body: str) -> str | None:
     """The model that NAMES a rendered wrapper, or None.
 
     The sonnet tier for the env shape (the mid tier is what a user means by
-    "the model" when tiers differ) and the ``--model`` argument for the launch
-    shape. This identifies the wrapper; it does not describe it — see
-    :func:`_tiers_from_body` for the full env-shape configuration.
+    "the model" when tiers differ) and the ``--model`` argument for the
+    launch and agent-native shapes. This identifies the wrapper; it does not
+    describe it — see :func:`_tiers_from_body` for the full env-shape
+    configuration.
 
     Returns None for the ``OPENAI_TOML`` shape: its wrapper body is just
     ``exec codex --profile <alias> "$@"`` and embeds no model — the model lives
@@ -584,7 +585,9 @@ def _model_from_body(body: str) -> str | None:
     sonnet = _env_value(body, "ANTHROPIC_DEFAULT_SONNET_MODEL")
     if sonnet is not None:
         return sonnet
-    found = re.search(r"--model '(.*?)' --", body)
+    # The launch shape's --model is followed by the load-bearing ` --`
+    # separator; the agent-native shape's by the forwarded-args `"$@"` quote.
+    found = re.search(r"--model '(.*?)' (?=--|\")", body)
     return found.group(1).replace("'\"'\"'", "'") if found else None
 
 

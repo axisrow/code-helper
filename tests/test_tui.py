@@ -970,6 +970,118 @@ def test_main_screen_chipset_apply_through_a_real_pty(tmp_path):
 
 @pytest.mark.integration
 @pytest.mark.skipif(os.name != "posix", reason="PTY tests require POSIX")
+def test_agy_add_flow_through_a_real_pty(tmp_path):
+    """Manual PTY verification for the agy add flow (issue #112): the agent
+    picker shows the agy row, its provider picker offers exactly antigravity,
+    the model picker is fed the known_models list and LABELLED
+    "discovery unavailable", and the completed install is the bare native
+    dispatch line. The injected-`read_key` suite (and the scripted
+    select_from_menu tests above) cannot see the raw-mode/ANSI interplay a
+    real terminal driver produces — repo convention requires this check for
+    new TUI rows."""
+    import errno
+    import fcntl
+    import pty
+    import select
+    import struct
+    import subprocess
+    import sys
+    import termios
+    import time
+
+    from codehelper.services.paths import Paths
+
+    environment = os.environ.copy()
+    environment["HOME"] = str(tmp_path)
+    source_dir = str(Path(__file__).resolve().parents[1] / "src")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (source_dir, environment.get("PYTHONPATH")) if part
+    )
+
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    child = subprocess.Popen(
+        [sys.executable, "-m", "codehelper", "tui"],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=environment,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+    output = bytearray()
+    search_from = 0
+
+    def read_until(marker: str) -> None:
+        nonlocal search_from
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            found = output.find(marker.encode(), search_from)
+            if found >= 0:
+                search_from = found + len(marker)
+                return
+            ready, _, _ = select.select([master_fd], [], [], 0.1)
+            if ready:
+                try:
+                    output.extend(os.read(master_fd, 4096))
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
+        raise AssertionError(output.decode(errors="replace")[-3000:])
+
+    def menu_key(value: str, marker: str) -> None:
+        deadline = time.monotonic() + 5
+        while True:
+            ready, _, _ = select.select([master_fd], [], [], 0.05)
+            if ready:
+                try:
+                    output.extend(os.read(master_fd, 4096))
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
+            elif not (termios.tcgetattr(master_fd)[3] & termios.ICANON):
+                break
+            elif time.monotonic() >= deadline:
+                raise AssertionError("TUI did not return to its raw read")
+        os.write(master_fd, value.encode())
+        read_until(marker)
+
+    try:
+        read_until("Esc quit")
+        # `a` on a chipset row is agent-SCOPED (straight to that agent's
+        # provider list), so move the row cursor onto the proxy row first —
+        # there `a` opens the unscoped "Wrapper or Agent?" choice. Then:
+        # wrapper → agent picker → agy (third row) → antigravity (the only
+        # provider row) → the known-models picker → first model → default
+        # alias → ctx "none".
+        menu_key("\x1b[B", "> codex")
+        menu_key("\x1b[B", "> proxy")
+        menu_key("a", "What do you want to add?")
+        menu_key("\r", "Add a wrapper for which agent?")
+        menu_key("\x1b[B", "> codex")
+        menu_key("\x1b[B", "> agy")
+        menu_key("\r", "Select a provider for agy")
+        menu_key("\r", "known models — discovery unavailable")
+        menu_key("\r", "Command name [gemini-3.8-flash-high-agy]")
+        menu_key("\r", "Context window for gemini-3.8-flash-high")
+        menu_key("\r", "Press any key to continue")
+        os.write(master_fd, b" ")  # acknowledge; teardown then kills the TUI
+        time.sleep(0.5)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=2)
+        os.close(master_fd)
+        os.close(slave_fd)
+
+    # The install really went through, as the bare native dispatch.
+    paths = Paths.from_home(tmp_path)
+    body = paths.script_for("gemini-3.8-flash-high-agy").read_text(encoding="utf-8")
+    assert "exec agy --model 'gemini-3.8-flash-high' \"$@\"" in body
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "posix", reason="PTY tests require POSIX")
 def test_set_default_confirmation_preview_is_visible_before_the_prompt(tmp_path):
     """Manual PTY verification for the ``_run`` tee fix: ``set-default``'s
     diff preview and ``[y/N]`` prompt must reach the real terminal BEFORE the
@@ -1402,6 +1514,72 @@ def test_tui_provider_list_offers_ollama_with_a_token(monkeypatch):
     # litellm/zai are FIXED — no second row for either.
     assert "litellm:secret" not in values
     assert "zai:secret" not in values
+
+
+@pytest.mark.integration
+def test_tui_agy_provider_list_is_antigravity_only(monkeypatch):
+    """agy's provider picker (issue #112): exactly one row — the native
+    backend — and no `:secret` twin (auth "none" is not OVERRIDABLE). This is
+    the honest-degradation mirror of the CLI: `add --agent agy` and the TUI
+    add flow both filter through compatible_providers."""
+    seen_items: list[list] = []
+    answers = iter(["add", "wrapper", "agy", "__back__", "quit"])
+
+    def _select(_items, *, prompt="", **_kwargs):
+        if str(prompt).startswith("Context window for"):
+            return "0"
+        seen_items.append(list(_items))
+        return next(answers)
+
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
+    assert main(["tui"]) == 0
+    agent_list = seen_items[2]
+    assert "agy" in [value for value, _label in agent_list]
+    provider_list = seen_items[3]
+    # Trailing "Back" row excluded — only antigravity is offered.
+    values = [value for value, _label in provider_list if value != "__back__"]
+    assert values == ["antigravity"]
+
+
+@pytest.mark.integration
+def test_tui_add_agy_flow_feeds_the_known_models_and_installs(monkeypatch):
+    """Full agy add flow through the SAME _handle_add path as the CLI: with
+    discovery structurally unavailable (no base URL, model_list_api NONE),
+    the model picker is fed the provider's known_models and LABELLED as
+    such; installing writes the bare native dispatch line."""
+    seen_prompts: list[str] = []
+    answers = iter(
+        [
+            "add",
+            "wrapper",
+            "agy",
+            "antigravity",
+            "gemini-3.1-pro-low",
+            "quit",
+        ]
+    )
+
+    def _select(_items, *, prompt="", **_kwargs):
+        if str(prompt).startswith("Context window for"):
+            return "0"
+        prompt_text = str(prompt() if callable(prompt) else prompt)
+        seen_prompts.append(prompt_text)
+        return next(answers)
+
+    def _read_line(_prompt, **_kwargs):
+        return ""  # the alias prompt — take the suggested default
+
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
+    monkeypatch.setattr("codehelper.cli.menu.read_line", _read_line)
+    monkeypatch.setattr("codehelper.cli.menu.press_any_key", lambda *_a, **_k: None)
+
+    assert main(["tui"]) == 0
+
+    model_prompt = next(p for p in seen_prompts if "Select a model" in p)
+    assert "known models — discovery unavailable" in model_prompt
+    paths = Paths.default()
+    body = paths.script_for("gemini-3.1-pro-low-agy").read_text(encoding="utf-8")
+    assert "exec agy --model 'gemini-3.1-pro-low' \"$@\"" in body
 
 
 @pytest.mark.integration
