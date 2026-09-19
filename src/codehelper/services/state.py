@@ -187,7 +187,9 @@ def _write_state(paths: Paths, state: dict, *, mode: int | None = None) -> None:
     atomic_write(paths.state_file(), json.dumps(state), mode=mode)
 
 
-def active_selection(paths: Paths) -> tuple[str, str] | None:
+def active_selection(
+    paths: Paths, *, state: dict[str, object] | None = None
+) -> tuple[str, str] | None:
     """The active ``(provider, profile)`` pair, or ``None`` when unset.
 
     Raw read — does NOT cross-check that the profile still exists for the
@@ -197,8 +199,15 @@ def active_selection(paths: Paths) -> tuple[str, str] | None:
     OLD ``active_provider`` + ``active_profiles`` shape so a pre-existing
     ``state.json`` is not silently ignored after an upgrade — that fallback
     is read-only, the old keys are never written again.
+
+    ``state`` is an optional preloaded :func:`load_state` result (issue
+    #110): the TUI main loop loads ``state.json`` once per iteration and
+    feeds it to every reader below, instead of paying one file read per
+    reader. ``None`` (the default) reads the file — the CLI path is
+    unchanged.
     """
-    state = load_state(paths)
+    if state is None:
+        state = load_state(paths)
     active = state.get("active")
     if isinstance(active, dict):
         provider = _string_or_none(active.get("provider"))
@@ -235,7 +244,7 @@ def set_active_selection(paths: Paths, provider_name: str, profile_name: str) ->
         _write_state(paths, state)
 
 
-def saved_proxy(paths: Paths) -> str | None:
+def saved_proxy(paths: Paths, *, state: dict[str, object] | None = None) -> str | None:
     """The proxy address remembered for the next ``proxy on``, or ``None``.
 
     A third independent top-level pointer, alongside ``active`` and
@@ -248,8 +257,12 @@ def saved_proxy(paths: Paths) -> str | None:
     restore. This is where it survives the round trip. Raw read, no
     validation: ``proxy.validate_proxy_url`` is the one gate, and it runs
     before any write rather than on every read.
+
+    ``state`` is an optional preloaded :func:`load_state` result (issue
+    #110); ``None`` reads the file.
     """
-    state = load_state(paths)
+    if state is None:
+        state = load_state(paths)
     proxy = state.get("proxy")
     if not isinstance(proxy, dict):
         return None
@@ -277,13 +290,19 @@ def set_saved_proxy(paths: Paths, url: str) -> None:
         _write_state(paths, state, mode=0o600)
 
 
-def default_wrapper(paths: Paths, agent_name: str) -> str | None:
+def default_wrapper(
+    paths: Paths, agent_name: str, *, state: dict[str, object] | None = None
+) -> str | None:
     """The saved default-wrapper alias for ``agent_name``, or ``None``.
 
     Raw read — no staleness check; that lives in ``wrappers.valid_default_wrapper``
     (see module docstring for the one-way-edge reason).
+
+    ``state`` is an optional preloaded :func:`load_state` result (issue
+    #110); ``None`` reads the file.
     """
-    state = load_state(paths)
+    if state is None:
+        state = load_state(paths)
     wrappers = state.get("default_wrapper")
     if not isinstance(wrappers, dict):
         return None
@@ -382,7 +401,9 @@ def set_context_window(paths: Paths, model: str, value: int) -> None:
         _write_state(paths, state)
 
 
-def disabled_providers(paths: Paths) -> frozenset[str]:
+def disabled_providers(
+    paths: Paths, *, state: dict[str, object] | None = None
+) -> frozenset[str]:
     """The set of provider names disabled at runtime, or an empty set.
 
     A fourth independent top-level key (``"disabled_providers": [names]``),
@@ -392,8 +413,12 @@ def disabled_providers(paths: Paths) -> frozenset[str]:
     (legacy "ollama" → registry "ollama-direct") is the CALLER's job via
     ``model.get_provider_for_legacy_read`` — this module must not depend on
     ``model.py``, so what is stored is taken as-is.
+
+    ``state`` is an optional preloaded :func:`load_state` result (issue
+    #110); ``None`` reads the file.
     """
-    state = load_state(paths)
+    if state is None:
+        state = load_state(paths)
     entries = state.get("disabled_providers")
     if not isinstance(entries, list):
         return frozenset()

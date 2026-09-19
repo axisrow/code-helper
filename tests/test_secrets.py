@@ -910,3 +910,61 @@ def test_token_for_discovery_uses_real_os_environ_by_default(tmp_path, monkeypat
     monkeypatch.setenv("LITELLM_API_KEY", "sk-real-env")
     provider = _Provider(auth="secret", token_env_var="LITELLM_API_KEY", name="litellm")
     assert token_for_discovery(_paths(tmp_path), provider) == "sk-real-env"
+
+
+# --------------------------------------------------------------------------- #
+# preloaded-creds kwarg (issue #110) — the TUI's one-load-per-iteration feed
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_preloaded_creds_answers_every_reader_without_a_file(tmp_path, monkeypatch):
+    """Every cache reader honours an explicit ``creds=`` snapshot: the answers
+    match a fresh read, and a ``creds=`` call never touches the file."""
+    paths = _paths(tmp_path)
+    from codehelper.services.state import set_active_selection
+
+    save_credential(paths, "zai", "sk-work", "work")
+    save_credential(paths, "zai", "sk-default")
+    set_active_selection(paths, "zai", "work")
+    snapshot = load_credentials(paths)
+
+    def _forbidden(_paths):
+        raise AssertionError("creds= call re-read the file")
+
+    monkeypatch.setattr("codehelper.services.secrets.load_credentials", _forbidden)
+    assert profile_names(paths, "zai", creds=snapshot) == ("default", "work")
+    assert credential_for(paths, "zai", "work", creds=snapshot) == "sk-work"
+    assert credential_for(paths, "zai", creds=snapshot) == "sk-default"
+    from codehelper.services.secrets import valid_active_profile
+
+    assert valid_active_profile(paths, "zai", creds=snapshot) == "work"
+
+    resolved = resolve_token(
+        env_var="ZAI_API_KEY",
+        prompt="p: ",
+        paths=paths,
+        provider_name="zai",
+        environ={},
+        getpass_fn=lambda _p: pytest.fail("prompted despite a cached token"),
+        creds=snapshot,
+    )
+    assert resolved == ResolvedToken("sk-default", SOURCE_CACHE)
+    conflict = env_cache_conflict(
+        ResolvedToken("sk-env", SOURCE_ENV),
+        env_var="ZAI_API_KEY",
+        paths=paths,
+        provider_name="zai",
+        creds=snapshot,
+    )
+    # The cached sk-default disagrees with the env value — named, not silent.
+    assert conflict is not None and "sk-default" not in conflict
+
+
+@pytest.mark.unit
+def test_preloaded_creds_none_reads_the_file(tmp_path):
+    paths = _paths(tmp_path)
+    save_credential(paths, "zai", "sk-default")
+    snapshot = load_credentials(paths)
+    assert credential_for(paths, "zai") == credential_for(paths, "zai", creds=snapshot)
+    assert profile_names(paths, "zai") == profile_names(paths, "zai", creds=snapshot)

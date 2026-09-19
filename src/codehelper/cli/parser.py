@@ -137,14 +137,27 @@ from codehelper.services.wrappers import (
 )
 
 
-def _refuse_disabled_provider(provider, paths) -> None:
+def _refuse_disabled_provider(provider, paths, *, state_snapshot=None) -> None:
     """The CLI-shaped delegate to :func:`model.refuse_disabled_provider`.
 
     The message and the ``enable`` hint have ONE owner (issue #89; hoisted
     by #100 so the service layer's ``edit_wrapper`` shares it) — this thin
     wrapper only supplies the ``state.json`` lookup.
+
+    ``state_snapshot`` is an optional preloaded :func:`state.load_state`
+    result (issue #110) — the TUI's per-iteration snapshot feeds the per-chip
+    gates so each chip press does not re-read ``state.json``; ``None`` (every
+    CLI caller) reads the file, through the exact pre-#110 one-arg call (the
+    lookup is monkeypatched by name in the suite). Named ``state_snapshot``
+    rather than ``state`` because this module imports the state MODULE at
+    top level.
     """
-    refuse_disabled_provider(provider, state.disabled_providers(paths))
+    if state_snapshot is None:
+        refuse_disabled_provider(provider, state.disabled_providers(paths))
+    else:
+        refuse_disabled_provider(
+            provider, state.disabled_providers(paths, state=state_snapshot)
+        )
 
 
 def _handle_list_axes(what: str) -> int:
@@ -1553,7 +1566,7 @@ def _handle_set_default(args: argparse.Namespace | SetDefaultRequest) -> int:
 
 
 def _switch_resolve_token(
-    provider, req: SwitchRequest, paths, *, non_interactive: bool = False
+    provider, req: SwitchRequest, paths, *, non_interactive: bool = False, creds=None
 ) -> str:
     """The token for a `switch --provider ...` (explicit-axes) invocation.
 
@@ -1567,6 +1580,10 @@ def _switch_resolve_token(
     token is taken from env/cache or the switch FAILS CLEANLY — it never
     prompts, because a prompt inside the running menu would swallow the
     user's keystrokes and block the very no-prompt apply the chip promises.
+
+    ``creds`` is an optional preloaded :func:`secrets.load_credentials`
+    result (issue #110) — the TUI chip readback passes its per-iteration
+    snapshot; ``None`` reads the file.
     """
     if provider.auth != "secret":
         return provider.auth_value
@@ -1591,12 +1608,13 @@ def _switch_resolve_token(
         profile_name=req.profile,
         base_url_policy=provider.base_url_policy,
         getpass_fn=getpass_fn,
+        creds=creds,
     )
     _print_token_conflict(conflict)
     return resolved.value
 
 
-def _switch_axes_from_wrapper(req: SwitchRequest, paths):
+def _switch_axes_from_wrapper(req: SwitchRequest, paths, *, state=None, spec=None):
     """Resolve ``(provider, tier_models, token, subagent_model, context_window)``
     from an already-installed wrapper — the ``--from-wrapper`` fast path.
 
@@ -1613,6 +1631,12 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
     ``switch`` drives a LIVE CLAUDE session, so a wrapper belonging to any
     other agent (codex shares Ollama) fails closed rather than retargeting
     claude to a foreign selection.
+
+    ``state`` / ``spec`` are optional preloaded :func:`state.load_state` /
+    :func:`wrappers.spec_from_installed` results (issue #110) — the TUI chip
+    readback passes its per-iteration snapshot and the memoized spec so the
+    wrapper file is not reconstructed (and re-read) a second time here and a
+    third time inside ``token_from_installed``; ``None`` reads from disk.
     """
     if not req.from_wrapper:
         raise CodeHelperError(
@@ -1620,7 +1644,8 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
             "--from-wrapper name"
         )  # pragma: no cover — _handle_switch only calls this when truthy
     name: str = req.from_wrapper
-    spec = spec_from_installed(paths, name)
+    if spec is None:
+        spec = spec_from_installed(paths, name)
     if spec is None:
         raise CodeHelperError(
             f"no installed wrapper named {name!r} — see `codehelper list`"
@@ -1634,11 +1659,11 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
     # disabled providers, but this resolver reads installed files that can
     # outlive a disable — carry the gate at the resolver itself so a future
     # surface cannot bypass it.
-    _refuse_disabled_provider(spec.provider, paths)
+    _refuse_disabled_provider(spec.provider, paths, state_snapshot=state)
     provider, tier_models, subagent_model = claude_settings.live_axes_for_spec(spec)
     token = ""
     if spec.auth == "secret":
-        token = token_from_installed(paths, name, spec.provider.name) or ""
+        token = token_from_installed(paths, name, spec.provider.name, spec=spec) or ""
         if not token:
             raise CodeHelperError(
                 f"could not recover a token from wrapper {name!r} "
@@ -1649,7 +1674,7 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths):
     return provider, tier_models, token, subagent_model, spec.context_window
 
 
-def _switch_axes_from_preset(req: SwitchRequest, paths):
+def _switch_axes_from_preset(req: SwitchRequest, paths, *, state=None, creds=None):
     """Resolve a curated Claude chip without consulting ``~/.local/bin``.
 
     Presets are backend choices in the chipset.  Their optional wrapper is a
@@ -1662,6 +1687,10 @@ def _switch_axes_from_preset(req: SwitchRequest, paths):
     resolved NON-interactively (env/cache or a clean error): a chip press is a
     no-prompt hot-apply, and a hidden prompt inside the running menu would
     swallow keystrokes.
+
+    ``state`` / ``creds`` are optional preloaded :func:`state.load_state` /
+    :func:`secrets.load_credentials` results (issue #110) — the TUI chip
+    readback passes its per-iteration snapshot; ``None`` reads the files.
     """
     if not req.from_preset:
         raise CodeHelperError("internal error: missing preset for chipset switch")
@@ -1670,12 +1699,12 @@ def _switch_axes_from_preset(req: SwitchRequest, paths):
         raise CodeHelperError(f"preset {spec.name!r} is not a Claude backend")
     # Same gate as the flags path: a preset is registry data that survives a
     # disable, so the resolver — not only the chip filter — must refuse.
-    _refuse_disabled_provider(spec.provider, paths)
+    _refuse_disabled_provider(spec.provider, paths, state_snapshot=state)
     provider, tier_models, subagent_model = claude_settings.live_axes_for_spec(spec)
     return (
         provider,
         tier_models,
-        _switch_resolve_token(provider, req, paths, non_interactive=True),
+        _switch_resolve_token(provider, req, paths, non_interactive=True, creds=creds),
         subagent_model,
         spec.context_window,  # None for every preset — catalog-derived
     )

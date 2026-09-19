@@ -481,7 +481,7 @@ def _redacted_preview(
     return preview
 
 
-def current_switch(paths: Paths) -> str | None:
+def current_switch(paths: Paths, *, env: dict | None = None) -> str | None:
     """Which provider ``settings.json`` is currently pointed at, or ``None``.
 
     Read-only, NEVER raises — a missing or corrupt file reads as ``None``,
@@ -498,10 +498,15 @@ def current_switch(paths: Paths) -> str | None:
     other provider that happens to share that same address are
     indistinguishable here — acceptable, and it resolves to whichever
     switchable provider matches first.
+
+    ``env`` is an optional preloaded :func:`read_env` result (issue #110) —
+    the TUI main loop reads ``settings.json`` once per iteration and feeds
+    it to every reader; the default ``None`` reads the file.
     """
     from codehelper.services.model import switchable_providers
 
-    env = read_env(paths)
+    if env is None:
+        env = read_env(paths)
     if env is None:
         return None
     live_base_url = env.get("ANTHROPIC_BASE_URL")
@@ -533,9 +538,16 @@ def read_env(paths: Paths) -> dict | None:
     return env
 
 
-def active_switch_env(paths: Paths) -> dict[str, str] | None:
-    """Snapshot managed live settings, or None when no override is present."""
-    env = read_env(paths)
+def active_switch_env(
+    paths: Paths, *, env: dict | None = None
+) -> dict[str, str] | None:
+    """Snapshot managed live settings, or None when no override is present.
+
+    ``env`` is an optional preloaded :func:`read_env` result (issue #110);
+    the default ``None`` reads the file.
+    """
+    if env is None:
+        env = read_env(paths)
     if env is None:
         return None
     managed = {key: value for key, value in env.items() if key in MANAGED_ENV_KEYS}

@@ -481,7 +481,9 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
         return None
 
 
-def token_from_installed(paths: Paths, name: str, provider_name: str) -> str | None:
+def token_from_installed(
+    paths: Paths, name: str, provider_name: str, *, spec: WrapperSpec | None = None
+) -> str | None:
     """Recover a secret token from an installed wrapper we can fully trust.
 
     The wrapper is the durable source of truth when the profile cache is
@@ -493,8 +495,14 @@ def token_from_installed(paths: Paths, name: str, provider_name: str) -> str | N
     Returns ``None`` for a missing, foreign, malformed, non-secret, or
     provider-mismatched wrapper. The token value is intentionally kept inside
     this service and is never logged.
+
+    ``spec`` is an optional preloaded :func:`spec_from_installed` result
+    (issue #110) — the chip readback already reconstructed the same spec and
+    would otherwise pay a second full re-read of the wrapper file here.
+    ``None`` reconstructs from disk, exactly as before.
     """
-    spec = spec_from_installed(paths, name)
+    if spec is None:
+        spec = spec_from_installed(paths, name)
     if spec is None or spec.auth != "secret" or spec.provider.name != provider_name:
         return None
 
@@ -2358,7 +2366,9 @@ def wrappers_for_provider(paths: Paths, provider: Provider) -> list[str]:
     )
 
 
-def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
+def valid_default_wrapper(
+    paths: Paths, agent_name: str, *, state: dict | None = None
+) -> str | None:
     """The saved default-wrapper alias for ``agent_name`` if it still exists.
 
     A saved alias can go stale (uninstalled/renamed), so a reader must fall
@@ -2373,10 +2383,14 @@ def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
     never be handed a wrapper that launches a different agent. And the read
     never raises: a malformed alias (path separator, ``.``/``..``) degrades to
     ``None`` before any path arithmetic.
+
+    ``state`` is an optional preloaded :func:`state.load_state` result (issue
+    #110) — the TUI main loop loads ``state.json`` once per iteration; the
+    default ``None`` reads the file.
     """
     from codehelper.services.state import default_wrapper
 
-    alias = default_wrapper(paths, agent_name)
+    alias = default_wrapper(paths, agent_name, state=state)
     if alias is None:
         return None
     if not _is_usable_alias(alias):

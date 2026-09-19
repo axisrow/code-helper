@@ -564,3 +564,36 @@ def test_a_password_never_reaches_the_preview(tmp_path, capsys):
     apply_proxy(paths, url="", dry_run=True)
 
     assert "hunter2" not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# preloaded env/state kwargs (issue #110) — the TUI's one-read-per-iteration
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_proxy_status_honours_preloaded_env_and_state(tmp_path, monkeypatch):
+    """``env=`` / ``state=`` answer exactly as fresh reads and touch no file
+    when supplied — the TUI feeds its per-iteration snapshots."""
+    from codehelper.services.claude_settings import read_env
+    from codehelper.services.state import load_state
+
+    paths = Paths.from_home(tmp_path)
+    _write(paths, {"env": {"https_proxy": _URL, "NO_PROXY": "localhost,.corp"}})
+    set_saved_proxy(paths, _URL)
+    env = read_env(paths)
+    state = load_state(paths)
+    fresh = proxy_status(paths)
+
+    def _forbidden(_paths):
+        raise AssertionError("preloaded call re-read a file")
+
+    monkeypatch.setattr("codehelper.services.proxy.read_env", _forbidden)
+    # saved_proxy honours state= without consulting the file: forbid the
+    # underlying load_state instead of saved_proxy itself.
+    monkeypatch.setattr("codehelper.services.state.load_state", _forbidden)
+    status = proxy_status(paths, env=env, state=state)
+    assert status == fresh
+    assert status.enabled is True
+    assert status.restorable_url == _URL
+    assert status.no_proxy == "localhost,.corp"

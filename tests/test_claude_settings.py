@@ -1137,3 +1137,39 @@ def test_apply_switch_threads_context_window(tmp_path):
     )
     _, settings = read_settings(paths)
     assert settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "750000"
+
+
+# --------------------------------------------------------------------------- #
+# preloaded-env kwarg (issue #110) — the TUI's one-read-per-iteration feed
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_preloaded_env_answers_the_readers_without_a_file(tmp_path, monkeypatch):
+    """``current_switch`` / ``active_switch_env`` honour an explicit ``env=``
+    snapshot and never re-read settings.json when one is supplied."""
+    from codehelper.services.claude_settings import read_env
+
+    paths = Paths.from_home(tmp_path)
+    apply_switch(
+        paths,
+        provider=ZAI,
+        tier_models=TierModels.uniform("glm-5.3"),
+        token="sk-test",
+        force=True,
+    )
+    env = read_env(paths)
+    fresh_switch = current_switch(paths)
+    fresh_managed = active_switch_env(paths)
+
+    def _forbidden(_paths):
+        raise AssertionError("env= call re-read the file")
+
+    monkeypatch.setattr("codehelper.services.claude_settings.read_env", _forbidden)
+    assert current_switch(paths, env=env) == fresh_switch
+    assert active_switch_env(paths, env=env) == fresh_managed
+    assert fresh_switch == "zai"
+    # An explicit empty env means "the file says no managed keys", which is
+    # exactly what both readers report for it — not a re-read.
+    assert current_switch(paths, env={}) is None
+    assert active_switch_env(paths, env={}) is None

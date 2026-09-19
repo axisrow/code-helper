@@ -212,21 +212,34 @@ def load_credentials(paths: Paths) -> dict[str, dict[str, str]]:
     return credentials
 
 
-def profile_names(paths: Paths, provider_name: str) -> tuple[str, ...]:
+def profile_names(
+    paths: Paths, provider_name: str, *, creds: dict[str, dict[str, str]] | None = None
+) -> tuple[str, ...]:
     """Return the provider's profiles in stable display order.
 
     Also includes any profile still stored under a RETIRED provider name
     (see :func:`_storage_names`) — a rename must not orphan profiles a user
     already saved under the old key.
+
+    ``creds`` is an optional preloaded :func:`load_credentials` result (issue
+    #110) — the TUI main loop loads ``credentials.json`` once per iteration;
+    the default ``None`` reads the file.
     """
-    creds = load_credentials(paths)
+    if creds is None:
+        creds = load_credentials(paths)
     names: set[str] = set()
     for name in _storage_names(provider_name):
         names |= set(creds.get(name, {}))
     return tuple(sorted(names, key=lambda name: (name != DEFAULT_PROFILE, name)))
 
 
-def valid_active_profile(paths: Paths, provider_name: str) -> str | None:
+def valid_active_profile(
+    paths: Paths,
+    provider_name: str,
+    *,
+    state: dict[str, object] | None = None,
+    creds: dict[str, dict[str, str]] | None = None,
+) -> str | None:
     """The stored active profile for ``provider_name`` if it still exists.
 
     Cross-checks ``state.active_selection`` against the live
@@ -240,10 +253,15 @@ def valid_active_profile(paths: Paths, provider_name: str) -> str | None:
     provider, so a profile only "belongs" to the provider it was last
     selected for. Lives here (not in ``state.py``) because it needs
     ``profile_names``, and ``state.py`` must not depend on this module.
+
+    ``state`` / ``creds`` are optional preloaded :func:`state.load_state` /
+    :func:`load_credentials` results (issue #110) — the TUI main loop loads
+    both files once per iteration; the default ``None`` reads the files, so
+    every other caller is unchanged.
     """
     from codehelper.services.state import active_selection
 
-    selection = active_selection(paths)
+    selection = active_selection(paths, state=state)
     if selection is None:
         return None
     active_provider_name, name = selection
@@ -252,7 +270,7 @@ def valid_active_profile(paths: Paths, provider_name: str) -> str | None:
     # every name this provider may be stored under (see _storage_names).
     if active_provider_name not in _storage_names(provider_name):
         return None
-    return name if name in profile_names(paths, provider_name) else None
+    return name if name in profile_names(paths, provider_name, creds=creds) else None
 
 
 def seed_default_profile(paths: Paths, provider_name: str, token: str) -> bool:
@@ -322,7 +340,11 @@ def seed_default_profile(paths: Paths, provider_name: str, token: str) -> bool:
 
 
 def credential_for(
-    paths: Paths, provider_name: str, profile_name: str = DEFAULT_PROFILE
+    paths: Paths,
+    provider_name: str,
+    profile_name: str = DEFAULT_PROFILE,
+    *,
+    creds: dict[str, dict[str, str]] | None = None,
 ) -> str:
     """The cached token for a profile, or ``""`` if none — never raises.
 
@@ -334,8 +356,12 @@ def credential_for(
     entry is left in place (harmless — merely unreachable under its own
     name going forward) until the next :func:`save_credential` for this
     provider naturally lands it under the current name.
+
+    ``creds`` is an optional preloaded :func:`load_credentials` result (issue
+    #110); the default ``None`` reads the file.
     """
-    creds = load_credentials(paths)
+    if creds is None:
+        creds = load_credentials(paths)
     for name in _storage_names(provider_name):
         hit = creds.get(name, {}).get(profile_name, "")
         if hit:
@@ -585,6 +611,7 @@ def resolve_token(
     environ: Mapping[str, str] = os.environ,
     getpass_fn: Callable[[str], str] = getpass.getpass,
     retries: int = 3,
+    creds: dict[str, dict[str, str]] | None = None,
 ) -> ResolvedToken:
     """Return a non-empty token from a selected or default profile.
 
@@ -607,6 +634,9 @@ def resolve_token(
         getpass_fn: Hidden-input source (default ``getpass.getpass``, NEVER
             echoed to the terminal).
         retries: How many empty-input attempts are tolerated before giving up.
+        creds: Optional preloaded :func:`load_credentials` result (issue #110)
+            — the TUI's per-iteration snapshot feeds the cache leg of the
+            resolution; ``None`` reads the file.
 
     Returns:
         A :class:`ResolvedToken` — a non-empty ``value`` and the ``source`` it
@@ -635,7 +665,7 @@ def resolve_token(
     which the profile feature explicitly supports — see the README).
     """
     if profile_name:
-        cached = credential_for(paths, provider_name, profile_name)
+        cached = credential_for(paths, provider_name, profile_name, creds=creds)
         if cached:
             return ResolvedToken(cached, SOURCE_CACHE)
         env_value = environ.get(env_var)
@@ -647,7 +677,7 @@ def resolve_token(
             return ResolvedToken(env_value, SOURCE_ENV)
 
         if base_url_policy == "fixed":
-            cached = credential_for(paths, provider_name)
+            cached = credential_for(paths, provider_name, creds=creds)
             if cached:
                 return ResolvedToken(cached, SOURCE_CACHE)
 
@@ -669,6 +699,7 @@ def env_cache_conflict(
     provider_name: str,
     profile_name: str | None = None,
     base_url_policy: str = "fixed",
+    creds: dict[str, dict[str, str]] | None = None,
 ) -> str | None:
     """A redacted warning line when an env-resolved token silently beat a
     DIFFERENT cached one — ``None`` when there is nothing to warn about.
@@ -706,7 +737,13 @@ def env_cache_conflict(
         return None
     if base_url_policy != "fixed":
         return None
-    cached = credential_for(paths, provider_name)
+    # A ``creds=`` snapshot rides along only when supplied (issue #110): with
+    # ``None`` the lookup is the exact pre-#110 call (monkeypatched by name in
+    # the suite).
+    if creds is None:
+        cached = credential_for(paths, provider_name)
+    else:
+        cached = credential_for(paths, provider_name, creds=creds)
     if not cached or cached == resolved.value:
         return None
     from codehelper.services.claude_settings import redact_credential
@@ -728,6 +765,7 @@ def resolve_with_conflict_check(
     profile_name: str | None = None,
     base_url_policy: str = "fixed",
     getpass_fn: Callable[[str], str] | None = None,
+    creds: dict[str, dict[str, str]] | None = None,
 ) -> tuple[ResolvedToken, str | None]:
     """Resolve a token AND its #71 env-vs-cache disagreement in one call.
 
@@ -737,6 +775,10 @@ def resolve_with_conflict_check(
     its conflict check cannot drift the way call sites each re-pairing the
     two could. Returns ``(resolved, conflict)`` where ``conflict`` is the
     redacted warning line from :func:`env_cache_conflict`, or ``None``.
+
+    ``creds`` is an optional preloaded :func:`load_credentials` result (issue
+    #110) — the TUI's chip readback passes its per-iteration snapshot; the
+    default ``None`` reads the file.
 
     Pure with respect to presentation: NOTHING is printed here — the caller
     owns the terminal. A CLI caller prints a non-``None`` ``conflict`` to
@@ -760,6 +802,7 @@ def resolve_with_conflict_check(
         provider_name=provider_name,
         profile_name=profile_name,
         base_url_policy=base_url_policy,
+        creds=creds,
         **passthrough,
     )
     conflict = env_cache_conflict(
@@ -769,6 +812,7 @@ def resolve_with_conflict_check(
         provider_name=provider_name,
         profile_name=profile_name,
         base_url_policy=base_url_policy,
+        creds=creds,
     )
     return resolved, conflict
 

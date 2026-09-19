@@ -22,14 +22,22 @@ __all__ = [
 ]
 
 
-def profile_slots(paths) -> list[tuple[str, str]]:
-    """Return up to ten stable ``(provider, profile)`` shortcut slots."""
+def profile_slots(
+    paths, *, creds: dict[str, dict[str, str]] | None = None
+) -> list[tuple[str, str]]:
+    """Return up to ten stable ``(provider, profile)`` shortcut slots.
+
+    ``creds`` is an optional preloaded
+    :func:`codehelper.services.secrets.load_credentials` result (issue #110)
+    — the TUI main loop loads ``credentials.json`` once per iteration; the
+    default ``None`` reads the file.
+    """
     from codehelper.services.model import PROVIDERS
     from codehelper.services.secrets import profile_names
 
     slots: list[tuple[str, str]] = []
     for provider in PROVIDERS:
-        for profile in profile_names(paths, provider.name):
+        for profile in profile_names(paths, provider.name, creds=creds):
             slots.append((provider.name, profile))
     return slots[:10]
 

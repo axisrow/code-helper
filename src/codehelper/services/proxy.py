@@ -386,7 +386,12 @@ def _verify_proxy_patch(original: dict, patched: dict, patch: dict[str, str]) ->
         )
 
 
-def proxy_status(paths: Paths) -> ProxyStatus:
+def proxy_status(
+    paths: Paths,
+    *,
+    env: dict | None = None,
+    state: dict[str, object] | None = None,
+) -> ProxyStatus:
     """What the proxy configuration currently is. Read-only, NEVER raises.
 
     A missing, unreadable, or corrupt settings.json reads as "off, nothing
@@ -398,10 +403,15 @@ def proxy_status(paths: Paths) -> ProxyStatus:
     non-empty value, and ``url`` reports the first such key in precedence
     order — i.e. the address Claude Code would actually use, not merely the
     one most recently written.
+
+    ``env`` / ``state`` are optional preloaded
+    :func:`claude_settings.read_env` / :func:`state.load_state` results
+    (issue #110) — the TUI main loop reads both files once per iteration;
+    the default ``None`` reads the files.
     """
     from codehelper.services.state import saved_proxy
 
-    env = read_env(paths) or {}
+    env = (read_env(paths) if env is None else env) or {}
     url = next(
         (
             value
@@ -410,7 +420,7 @@ def proxy_status(paths: Paths) -> ProxyStatus:
         ),
         None,
     )
-    saved = saved_proxy(paths)
+    saved = saved_proxy(paths, state=state)
     no_proxy = next(
         (
             value
