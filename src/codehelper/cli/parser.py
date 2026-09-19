@@ -70,7 +70,7 @@ from codehelper.services import (
 from codehelper.services.agents import all_agents, load_user_agents_strict
 from codehelper.services.agents import get_agent as get_any_agent
 from codehelper.services.claude_settings import current_switch
-from codehelper.services.codex_default import restore_default
+from codehelper.services.codex_default import clear_default, restore_default
 from codehelper.services.limits import MAX_CONTEXT_WINDOW, context_window_usable
 from codehelper.services.model import (
     PROVIDERS,
@@ -1477,6 +1477,14 @@ def _handle_set_default(args: argparse.Namespace | SetDefaultRequest) -> int:
         raise CodeHelperError(
             "--restore cannot be combined with --agent/--provider/--model/--base-url"
         )
+    if req.native and (req.agent or req.provider or req.model or req.base_url):
+        raise CodeHelperError(
+            "--native cannot be combined with --agent/--provider/--model/--base-url"
+        )
+    if req.native and req.restore:
+        raise CodeHelperError(
+            "--native and --restore are two different operations — give exactly one"
+        )
     if req.slot is not None and not req.restore:
         raise CodeHelperError("--slot only applies together with --restore")
 
@@ -1491,6 +1499,27 @@ def _handle_set_default(args: argparse.Namespace | SetDefaultRequest) -> int:
         )
         if not wrote:
             print("no changes")
+        return 0
+
+    if req.native:
+        # Codex's "native" (issue #47): remove this tool's managed region —
+        # "stop overriding", NOT "undo my last patch". Deliberately a distinct
+        # operation from --restore, never a fallback onto it: restore rolls
+        # the WHOLE file back to a backup snapshot (requires a ring slot to
+        # exist, undoes unrelated hand-edits made since), while the native
+        # path goes through codex_default.clear_default — a patch that drops
+        # ONLY the managed keys/table, needs no backup ring at all, and keeps
+        # every other byte of the user's file. Same write path as the patch
+        # operation (confirm/force gate, rotating backups, tomllib
+        # verification), so a reset is exactly as recoverable as a set.
+        clear_default(
+            paths,
+            dry_run=req.dry_run,
+            force=req.force,
+            confirm=_confirm_set_default,
+        )
+        # clear_default always reports its own outcome ("wrote ..." / "no
+        # changes to config.toml"); already-native is success, not an error.
         return 0
 
     if not req.agent or not req.provider:
@@ -2261,6 +2290,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="restore config.toml from a backup slot instead of patching",
+    )
+    p_set_default.add_argument(
+        "--native",
+        action="store_true",
+        default=False,
+        help="remove codehelper's override from config.toml instead of "
+        "patching — back to Codex's own stock default. Drops ONLY the "
+        "managed keys/table and keeps every other edit; unlike --restore it "
+        "needs no backup slot and never undoes your hand-edits",
     )
     p_set_default.add_argument(
         "--agent",

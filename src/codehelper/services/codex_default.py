@@ -783,6 +783,11 @@ def clear_default(
     so a live Claude Code session receives the reset,
     this drops the managed keys and provider table from ``config.toml``, so
     Codex falls back to whatever it did before ``set-default`` ever ran.
+    Reached from the CLI/TUI as the ``set-default --native`` operation
+    (issue #47) — modeled as an operation flag, not a Provider entry: there
+    is no backend here to name, and unlike ``switch`` (whose whole grammar
+    lives in provider space) ``set-default``'s axes all describe a patch this
+    operation carries none of.
 
     Deliberately NOT ``restore_default``: restore rolls the file back to a
     backup SNAPSHOT, undoing unrelated hand-edits made since. This removes
