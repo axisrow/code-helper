@@ -1306,19 +1306,20 @@ def test_add_env_sourced_install_invalidates_a_stale_cached_token(
 
     paths = Paths.from_home(tmp_path)
 
-    # Step 1: cache "old" via a prompt-typed install.
-    real_resolve_token = secrets.resolve_token
+    # Step 1: cache "old" via a prompt-typed install. The shared resolver
+    # (issue #109) is the add path's resolution seam — stub it there.
+    real_resolver = secrets.resolve_with_conflict_check
 
-    def _fake_resolve_token_old(**_kwargs):
-        return secrets.ResolvedToken("sk-old", secrets.SOURCE_PROMPT)
+    def _fake_resolve_old(**_kwargs):
+        return secrets.ResolvedToken("sk-old", secrets.SOURCE_PROMPT), None
 
-    monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token_old)
+    monkeypatch.setattr(secrets, "resolve_with_conflict_check", _fake_resolve_old)
     assert main(["add", "glm"]) == 0
     assert secrets.credential_for(paths, "zai") == "sk-old"
-    # Restore the real resolve_token for steps 2-3 — NOT monkeypatch.undo(),
+    # Restore the real resolver for steps 2-3 — NOT monkeypatch.undo(),
     # which would also roll back conftest.py's HOME-isolation fixture and
     # let this test escape into the real home directory.
-    monkeypatch.setattr(secrets, "resolve_token", real_resolve_token)
+    monkeypatch.setattr(secrets, "resolve_with_conflict_check", real_resolver)
 
     # Step 2: install with a NEW token via the env var. install_wrapper
     # actually changes the wrapper (different token -> not byte-identical).
@@ -1330,15 +1331,15 @@ def test_add_env_sourced_install_invalidates_a_stale_cached_token(
 
     # Step 3: a later run without the env var must NOT silently resolve "old"
     # from a stale cache and revert the wrapper. The cache was invalidated by
-    # step 2's fix, so resolve_token falls through to a fresh prompt here —
+    # step 2's fix, so the resolver falls through to a fresh prompt here —
     # simulate the user typing a new value; the point being proven is that
     # "sk-old" is never resolved from a stale cache.
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
 
-    def _fake_resolve_token_new(**_kwargs):
-        return secrets.ResolvedToken("sk-freshly-typed", secrets.SOURCE_PROMPT)
+    def _fake_resolve_new(**_kwargs):
+        return secrets.ResolvedToken("sk-freshly-typed", secrets.SOURCE_PROMPT), None
 
-    monkeypatch.setattr(secrets, "resolve_token", _fake_resolve_token_new)
+    monkeypatch.setattr(secrets, "resolve_with_conflict_check", _fake_resolve_new)
     assert main(["add", "glm"]) == 0
     assert "sk-old" not in _body(tmp_path, "glm")
     assert "sk-freshly-typed" in _body(tmp_path, "glm")

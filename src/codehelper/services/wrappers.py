@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 import stat
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from enum import StrEnum
@@ -1668,11 +1669,13 @@ def edit_wrapper(
 
     Token order mirrors ``add``: a supplied ``token`` wins, then
     ``token_from_installed`` recovery for a KEPT secret provider (never
-    prompts), then the ``env → cached profile → prompt`` chain. Dry-run
-    resolves non-interactively only and fails closed before ANY write when
-    the token cannot be found. A prompted token is cached after a
-    successful install (``cache_freshly_typed_token`` self-gates dry-run
-    and non-prompt sources).
+    prompts), then the ``env → cached profile → prompt`` chain — through the
+    shared conflict-checked resolver, so an env token that beat a different
+    cached one is named on stderr (issue #71), as ``add`` and ``switch``
+    already do. Dry-run resolves non-interactively only and fails closed
+    before ANY write when the token cannot be found. A prompted token is
+    cached after a successful install (``cache_freshly_typed_token``
+    self-gates dry-run and non-prompt sources).
 
     Args:
         provider: new provider name (a cross-provider switch), or None to
@@ -1707,7 +1710,7 @@ def edit_wrapper(
         ResolvedToken,
         cache_freshly_typed_token,
         credential_for,
-        resolve_token,
+        resolve_with_conflict_check,
     )
     from codehelper.services.state import disabled_providers
 
@@ -1890,6 +1893,43 @@ def edit_wrapper(
     # with the old profile's credential under the new profile's name.
     profile_changed = profile_name is not None and profile_name != old.profile_name
     resolved: ResolvedToken | None = None
+
+    def _resolve_edit_token(dry_run: bool) -> tuple[str, ResolvedToken | None]:
+        """One resolve arm for the two token paths below — they were
+        byte-identical pairs of dry-run/real branches (issue #109).
+
+        Dry-run stays non-interactive — the cached value, then the
+        environment, never a prompt — and resolves nothing (``None``), so
+        nothing is cached and no conflict is possible: a cache-first
+        fallback cannot beat the cache. A real run goes through the shared
+        env → cache → prompt resolver, and a non-``None`` conflict line —
+        an env token that beat a DIFFERENT cached one (issue #71), which
+        ``add`` and ``switch`` already name — prints to stderr here: edit
+        used to install that env token silently. stderr, not stdout, so a
+        TUI silent capture still surfaces it.
+        """
+        if dry_run:
+            token_value = (
+                credential_for(
+                    paths, new_spec.provider.name, profile or DEFAULT_PROFILE
+                )
+                or os.environ.get(new_spec.token_env_var)
+                or ""
+            )
+            return token_value, None
+        fresh, conflict = resolve_with_conflict_check(
+            env_var=new_spec.token_env_var,
+            prompt=f"{new_spec.provider.name} token ({new_spec.token_env_var}): ",
+            paths=paths,
+            provider_name=new_spec.provider.name,
+            profile_name=profile,
+            base_url_policy=provider_obj.base_url_policy,
+            getpass_fn=getpass_fn,
+        )
+        if conflict:
+            print(conflict, file=sys.stderr)
+        return fresh.value, fresh
+
     if new_spec.auth != "secret":
         token_value = new_spec.auth_value
     elif token is not None:
@@ -1904,42 +1944,10 @@ def edit_wrapper(
         )
         if recovered:
             token_value = recovered
-        elif dry_run:
-            token_value = (
-                credential_for(
-                    paths, new_spec.provider.name, profile or DEFAULT_PROFILE
-                )
-                or os.environ.get(new_spec.token_env_var)
-                or ""
-            )
         else:
-            resolved = resolve_token(
-                env_var=new_spec.token_env_var,
-                prompt=f"{new_spec.provider.name} token ({new_spec.token_env_var}): ",
-                paths=paths,
-                provider_name=new_spec.provider.name,
-                profile_name=profile,
-                base_url_policy=provider_obj.base_url_policy,
-                getpass_fn=getpass_fn,
-            )
-            token_value = resolved.value
-    elif dry_run:
-        token_value = (
-            credential_for(paths, new_spec.provider.name, profile or DEFAULT_PROFILE)
-            or os.environ.get(new_spec.token_env_var)
-            or ""
-        )
+            token_value, resolved = _resolve_edit_token(dry_run)
     else:
-        resolved = resolve_token(
-            env_var=new_spec.token_env_var,
-            prompt=f"{new_spec.provider.name} token ({new_spec.token_env_var}): ",
-            paths=paths,
-            provider_name=new_spec.provider.name,
-            profile_name=profile,
-            base_url_policy=provider_obj.base_url_policy,
-            getpass_fn=getpass_fn,
-        )
-        token_value = resolved.value
+        token_value, resolved = _resolve_edit_token(dry_run)
     if new_spec.auth == "secret" and not token_value:
         raise CodeHelperError(
             f"cannot resolve a token non-interactively under --dry-run — "

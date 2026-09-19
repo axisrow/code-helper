@@ -68,6 +68,7 @@ __all__ = [
     "DEFAULT_PROFILE",
     "resolve_token",
     "env_cache_conflict",
+    "resolve_with_conflict_check",
     "load_credentials",
     "mask_token",
     "profile_rows",
@@ -759,6 +760,60 @@ def env_cache_conflict(
         f"{redact_credential(cached)}) — using the environment value; unset "
         f"{env_var} to use the profile"
     )
+
+
+def resolve_with_conflict_check(
+    *,
+    env_var: str,
+    prompt: str,
+    paths: Paths,
+    provider_name: str,
+    profile_name: str | None = None,
+    base_url_policy: str = "fixed",
+    getpass_fn: Callable[[str], str] | None = None,
+) -> tuple[ResolvedToken, str | None]:
+    """Resolve a token AND its #71 env-vs-cache disagreement in one call.
+
+    Exactly :func:`resolve_token` + :func:`env_cache_conflict` with the same
+    arguments — the ONE combined entry point for every caller that resolves a
+    token for a write (``add``, ``switch``, ``edit``), so the resolution and
+    its conflict check cannot drift the way call sites each re-pairing the
+    two could. Returns ``(resolved, conflict)`` where ``conflict`` is the
+    redacted warning line from :func:`env_cache_conflict`, or ``None``.
+
+    Pure with respect to presentation: NOTHING is printed here — the caller
+    owns the terminal. A CLI caller prints a non-``None`` ``conflict`` to
+    stderr, so a TUI silent capture (stdout only) still surfaces it;
+    ``edit``'s service layer does the same (see
+    :func:`codehelper.services.wrappers.edit_wrapper`).
+
+    ``getpass_fn`` keeps :func:`resolve_token`'s seam: ``None`` leaves
+    :func:`resolve_token`'s own default hidden prompt in place (the default
+    lives in one signature, not re-stated here), and a caller with no
+    interactive terminal passes a raising closure instead (``switch``'s
+    chip hot-apply).
+    """
+    passthrough = {}
+    if getpass_fn is not None:
+        passthrough["getpass_fn"] = getpass_fn
+    resolved = resolve_token(
+        env_var=env_var,
+        prompt=prompt,
+        paths=paths,
+        provider_name=provider_name,
+        profile_name=profile_name,
+        base_url_policy=base_url_policy,
+        **passthrough,
+    )
+    conflict = env_cache_conflict(
+        resolved,
+        env_var=env_var,
+        paths=paths,
+        provider_name=provider_name,
+        profile_name=profile_name,
+        base_url_policy=base_url_policy,
+    )
+    return resolved, conflict
 
 
 def token_for_discovery(

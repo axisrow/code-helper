@@ -3861,6 +3861,37 @@ def test_edit_dry_run_writes_nothing_and_fails_closed_on_a_secret_switch(
 
 
 @pytest.mark.integration
+def test_edit_warns_when_env_token_differs_from_cached(tmp_path, monkeypatch, capsys):
+    """Issue #71 on the edit path — the one deliberate behavior change of
+    the shared-resolver item (#109): a provider-switch edit resolves
+    env → cache → prompt like add/switch do, so it now names an env token
+    that beat a different cached one on stderr instead of installing it
+    silently. Precedence is UNCHANGED — the env value still lands in the
+    wrapper; both sides of the warning stay redacted."""
+    import codehelper.services.secrets as secrets
+
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env-stale-token")
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "zai", "sk-cached-working")
+    claude = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="glm-5.3",
+        alias="glm-claude",
+    )
+    install_wrapper(paths, claude, token=_LITERAL_TOKEN)
+
+    edit_wrapper(paths, "glm-claude", provider="zai")
+
+    err = capsys.readouterr().err
+    assert "ZAI_API_KEY" in err
+    assert "sk-env-stale-token" not in err
+    assert "sk-cached-working" not in err
+    body = paths.script_for("glm-claude").read_text(encoding="utf-8")
+    assert "sk-env-stale-token" in body  # env value is what got installed
+
+
+@pytest.mark.integration
 def test_edit_cross_shape_rederive_is_surfaced(tmp_path):
     """A claude wrapper installed as `ollama launch`, edited onto zai:
     resolve_shape re-derives the env shape — mechanism change reported,
