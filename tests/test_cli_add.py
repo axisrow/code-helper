@@ -348,12 +348,28 @@ def test_add_agy_with_a_foreign_provider_refuses_honestly(capsys):
 def test_add_bare_agy_gets_the_agent_teaching_message(capsys):
     """`add agy` names an AGENT, not the preset (the preset alias is
     "agy-native" — a wrapper named after an agent's own binary is reserved).
-    The fallback must teach the constructor form, not say "unknown"."""
+    The teaching hint must name a command that WORKS for agy: its preset —
+    the constructor form with a guessed provider would fail with the very
+    "no common configuration mechanism" error add exists to prevent."""
     code = main(["add", "agy", "--context-window", "none"])
     assert code == 1
     err = capsys.readouterr().err
     assert "agy is an agent" in err
-    assert "--agent agy" in err
+    assert "try: codehelper add agy-native" in err
+
+
+@pytest.mark.integration
+def test_add_bare_launch_only_agent_suggests_a_compatible_provider(capsys):
+    """A launch-only agent has no preset, so the hint falls back to a provider
+    the agent actually pairs with — never the retired "ollama" spelling the
+    message once hard-coded (that suggested command fails with
+    "unknown provider" for new input)."""
+    code = main(["add", "opencode", "--context-window", "none"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "opencode is an agent" in err
+    assert "--provider ollama-direct" in err
+    assert "provider ollama " not in err
 
 
 @pytest.mark.integration

@@ -76,6 +76,7 @@ from codehelper.services.model import (
     BaseUrlPolicy,
     ConfigShape,
     active_providers,
+    compatible_providers,
     get_agent,
     get_provider,
     get_provider_for_legacy_read,
@@ -107,6 +108,7 @@ from codehelper.services.secrets import (
     valid_active_profile,
 )
 from codehelper.services.spec import (
+    PRESETS,
     REASONING_EFFORTS,
     build_spec,
     get_preset,
@@ -621,16 +623,39 @@ def _add_spec_from_preset(req, paths, profile_name):
         preset = get_preset(req.name)
     except CodeHelperError as unknown_preset:
         # A bare agent name is a likely mistake worth teaching, not just
-        # rejecting.
+        # rejecting. The hint must name a command that WORKS for THIS agent:
+        # its preset when one exists (agy → `add agy-native`), else a
+        # provider the agent actually pairs with (compatible_providers —
+        # the hard-coded "ollama" this message once suggested is a retired
+        # spelling for new input, and an agent-incompatible provider would
+        # make the suggested command fail with the very "no common
+        # configuration mechanism" error add exists to prevent).
         try:
-            get_any_agent(paths, req.name)
+            agent_obj = get_any_agent(paths, req.name)
         except CodeHelperError:
             # Re-raise get_preset's own message: it names the known presets,
             # and that hint matters most in exactly this case.
             raise unknown_preset from None
+        agent_presets = [p.alias for p in PRESETS if p.agent == req.name]
+        if agent_presets:
+            preset_hint = (
+                agent_presets[0]
+                if len(agent_presets) == 1
+                else (f"{agent_presets[0]} (one of: {', '.join(agent_presets)})")
+            )
+            raise CodeHelperError(
+                f"unknown wrapper name: {req.name} — {req.name} is an agent; "
+                f"try: codehelper add {preset_hint}, or the constructor form: "
+                f"codehelper add --agent {req.name} --provider <provider> "
+                f"--model <model>"
+            ) from None
+        compatible = compatible_providers(
+            agent_obj, disabled=state.disabled_providers(paths)
+        )
+        provider_hint = compatible[0].name if compatible else "<provider>"
         raise CodeHelperError(
             f"unknown wrapper name: {req.name} — {req.name} is an agent; "
-            f"try: codehelper add --agent {req.name} --provider ollama "
+            f"try: codehelper add --agent {req.name} --provider {provider_hint} "
             f"--model <model>"
         ) from None
     # Same disabled gate as the constructor path (issue #89) — a preset whose

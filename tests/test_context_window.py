@@ -48,6 +48,19 @@ def _select(choice: str):
 
 
 @pytest.mark.unit
+def test_catalog_keeps_the_migration_anchor_for_installed_gemini_wrappers():
+    """gemini-3.7-flash survives in the catalog even though the gemini story
+    (provider + preset) was removed with issue #112: its already-installed
+    wrappers carry no `ctx=` marker (the #82 rule for catalog-known models),
+    so removing the entry would make their next re-render (edit-token/edit)
+    silently lose the 1M declaration those wrappers still carry. Catalog
+    entries are per-model data, not provider story."""
+    from codehelper.services.render import MODEL_CONTEXT_WINDOWS
+
+    assert MODEL_CONTEXT_WINDOWS["gemini-3.7-flash"] == 1_000_000
+
+
+@pytest.mark.unit
 def test_catalog_hit_returns_none_without_prompting_or_writing(tmp_path):
     """A catalog-known model is the catalog's business — no menu, no state
     write; the caller keeps spec.context_window=None and the renderer derives."""

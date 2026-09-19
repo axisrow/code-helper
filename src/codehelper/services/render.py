@@ -142,6 +142,15 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "deepseek-v4-pro": 1_000_000,
     "deepseek-v4-flash": 1_000_000,
     "deepseek-v4-flash-vision-exp": 1_000_000,
+    # Kept for ALREADY-INSTALLED wrappers (issue #112 review): gemini-3.7-flash
+    # was the removed gemini-litellm preset's model — the preset and the
+    # gemini provider are dead history, but the MODEL is not, and its window
+    # is still 1M (ai.google.dev model docs). Its wrappers' markers carry no
+    # `ctx=` (the #82 rule: catalog-known models record nothing), so dropping
+    # this entry would make the next re-render (edit-token/edit) silently
+    # lose the 1M CLAUDE_CODE_MAX_CONTEXT_TOKENS declaration those wrappers
+    # still carry. Catalog entries are per-model data, not provider story.
+    "gemini-3.7-flash": 1_000_000,
     # B.AI's documented window for gpt-6-astra (docs.b.ai; 1,050,000 input /
     # 128,000 output) — the catalog's first non-1M value: windows are
     # per-model data, never a shared assumption.
