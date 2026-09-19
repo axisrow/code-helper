@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from conftest import write_settings
 
 from codehelper.__main__ import main
 from codehelper.services.paths import Paths
@@ -22,11 +23,9 @@ _URL = "http://127.0.0.1:8118"
 
 
 def _write_settings(tmp_path, env: dict) -> None:
-    paths = Paths.from_home(tmp_path)
-    paths.claude_dir.mkdir(parents=True, exist_ok=True)
-    paths.claude_settings().write_text(
-        json.dumps({"env": env, "hooks": {"PreToolUse": []}}), encoding="utf-8"
-    )
+    """This file's payload policy: env plus a foreign ``hooks`` key — the
+    two-owner settings file a real install carries."""
+    write_settings(Paths.from_home(tmp_path), {"env": env, "hooks": {"PreToolUse": []}})
 
 
 def _env(tmp_path) -> dict:

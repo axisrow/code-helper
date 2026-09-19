@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from conftest import write_settings as _write_settings
 
 from codehelper.__main__ import main
 from codehelper.cli.parser import _handle_switch
@@ -28,12 +29,6 @@ def _settings(tmp_path) -> dict:
     return json.loads(
         Paths.from_home(tmp_path).claude_settings().read_text(encoding="utf-8")
     )
-
-
-def _write_settings(tmp_path, data: dict) -> None:
-    paths = Paths.from_home(tmp_path)
-    paths.claude_dir.mkdir(parents=True, exist_ok=True)
-    paths.claude_settings().write_text(json.dumps(data), encoding="utf-8")
 
 
 def _preset_request(name: str) -> SwitchRequest:
@@ -100,7 +95,7 @@ def test_switch_native_never_reads_env_or_prompts(tmp_path, monkeypatch):
         "codehelper.cli.parser.secrets.resolve_with_conflict_check", _explode
     )
     _write_settings(
-        tmp_path,
+        Paths.from_home(tmp_path),
         {
             "env": {
                 "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
@@ -292,7 +287,7 @@ def test_switch_status_reports_native_when_no_override(capsys):
 @pytest.mark.integration
 def test_switch_dry_run_writes_nothing(tmp_path, monkeypatch):
     monkeypatch.setenv("ZAI_API_KEY", "sk-env")
-    _write_settings(tmp_path, {"env": {"HTTPS_PROXY": "http://x"}})
+    _write_settings(Paths.from_home(tmp_path), {"env": {"HTTPS_PROXY": "http://x"}})
     before = Paths.from_home(tmp_path).claude_settings().read_bytes()
 
     code = main(["switch", "zai", "--model", "glm-5.2", "--dry-run"])
@@ -304,7 +299,7 @@ def test_switch_dry_run_writes_nothing(tmp_path, monkeypatch):
 @pytest.mark.integration
 def test_switch_restore_without_flag_after_switch_and_restore(tmp_path, monkeypatch):
     monkeypatch.setenv("ZAI_API_KEY", "sk-env")
-    _write_settings(tmp_path, {"env": {"HTTPS_PROXY": "http://x"}})
+    _write_settings(Paths.from_home(tmp_path), {"env": {"HTTPS_PROXY": "http://x"}})
     main(["switch", "zai", "--model", "glm-5.2", "--force"])
     assert "ANTHROPIC_BASE_URL" in _settings(tmp_path)["env"]
 
@@ -361,7 +356,8 @@ def test_switch_from_wrapper_glm_has_no_subagent_model(tmp_path, monkeypatch):
     CLAUDE_CODE_SUBAGENT_MODEL, and must remove one left by a prior switch."""
     monkeypatch.setenv("ZAI_API_KEY", "sk-zai-secret")
     _write_settings(
-        tmp_path, {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "stale-from-deepseek"}}
+        Paths.from_home(tmp_path),
+        {"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "stale-from-deepseek"}},
     )
     assert main(["add", "glm"]) == 0
 

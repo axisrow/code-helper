@@ -14,6 +14,7 @@ import stat
 import threading
 
 import pytest
+from conftest import paths_from_home as _paths
 
 from codehelper.errors import CodeHelperError
 from codehelper.services.agents import (
@@ -24,10 +25,6 @@ from codehelper.services.agents import (
 )
 from codehelper.services.model import AGENTS, ConfigShape
 from codehelper.services.paths import Paths
-
-
-def _paths(tmp_path):
-    return Paths.from_home(tmp_path)
 
 
 def _write_agents_file(paths, text):

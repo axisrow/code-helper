@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, TypedDict
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from codehelper.services.paths import Paths
@@ -86,6 +86,33 @@ _REVERSE = "\033[7m"
 _BOLD = "\033[1m"
 _DIM = "\033[2m"
 _RESET = "\033[0m"
+
+
+def _paint_chip(
+    text: str, *, cursor: bool, applied: bool, dim: bool, ansi: bool
+) -> str:
+    """One chip's paint ladder, shared by every chip-strip renderer.
+
+    Reverse video marks the chip under the cursor, bold the applied one
+    elsewhere, dim an action chip so it reads as "not a backend"; plain
+    otherwise. ``cursor`` wins over ``applied`` — the focused chip shows its
+    selection, not its state (the `✓` already said that).
+    """
+    if cursor:
+        return f"{_REVERSE}{text}{_RESET}" if ansi else f"[{text}]"
+    if applied:
+        return f"{_BOLD}{text}{_RESET}" if ansi else text
+    if dim:
+        return f"{_DIM}{text}{_RESET}" if ansi else text
+    return text
+
+
+class _SessionFlags(TypedDict):
+    """The flag pair every handler request construction spreads in."""
+
+    dry_run: bool
+    debug: bool
+
 
 # profile name, token typed in this flow, old profile name, new old-profile name
 ProfileChoice = tuple[str, str | None, str | None, str | None]
@@ -800,8 +827,7 @@ class TuiSession:
                 profile_token=profile_token,
                 profile_rename_from=rename_from,
                 profile_rename_to=rename_to,
-                dry_run=getattr(self.args, "dry_run", False),
-                debug=getattr(self.args, "debug", False),
+                **self._session_flags(),
             ),
         )
 
@@ -864,12 +890,11 @@ class TuiSession:
             restore=False,
             slot=None,
             status=False,
-            dry_run=getattr(self.args, "dry_run", False),
+            **self._session_flags(),
             # Chips are hot-apply controls.  The target has already been
             # resolved and validated locally; a second interactive prompt
             # turns a one-key backend switch into a blocking CLI flow.
             force=True,
-            debug=getattr(self.args, "debug", False),
             from_preset=from_preset,
         )
 
@@ -895,9 +920,8 @@ class TuiSession:
                 ),
                 restore=False,
                 slot=None,
-                dry_run=getattr(self.args, "dry_run", False),
+                **self._session_flags(),
                 force=False,
-                debug=getattr(self.args, "debug", False),
             ),
             live=True,
         )
@@ -930,9 +954,8 @@ class TuiSession:
                 restore=False,
                 slot=None,
                 native=True,
-                dry_run=getattr(self.args, "dry_run", False),
+                **self._session_flags(),
                 force=False,
-                debug=getattr(self.args, "debug", False),
             ),
             live=True,
         )
@@ -1122,9 +1145,8 @@ class TuiSession:
                 profile_rename_from=rename_from,
                 profile_rename_to=rename_to,
                 list_models=False,
-                dry_run=getattr(self.args, "dry_run", False),
+                **self._session_flags(),
                 force=False,
-                debug=getattr(self.args, "debug", False),
             ),
             # live: the foreign-overwrite confirm must be visible before the
             # blocking read.
@@ -1358,8 +1380,7 @@ class TuiSession:
         while True:
             paths = Paths.default()
             disabled = disabled_providers(paths)
-            dry_run = getattr(self.args, "dry_run", False)
-            debug = getattr(self.args, "debug", False)
+            flags = self._session_flags()
             rows = []
             states = {}
             for provider in PROVIDERS:
@@ -1380,7 +1401,7 @@ class TuiSession:
             if states.get(choice):
                 self._run(
                     _handle_enable,
-                    EnableRequest(name=choice, dry_run=dry_run, debug=debug),
+                    EnableRequest(name=choice, **flags),
                 )
             else:
                 self._run(
@@ -1390,10 +1411,23 @@ class TuiSession:
                         # The submenu pick IS the confirmation.
                         yes=True,
                         force=False,
-                        dry_run=dry_run,
-                        debug=debug,
+                        **flags,
                     ),
                 )
+
+    def _session_flags(self) -> _SessionFlags:
+        """The ``--dry-run``/``--debug`` pair every request construction carries.
+
+        One owner for the two flag reads the TUI forwards into handler
+        requests: a construction site spreads this instead of re-deriving the
+        pair inline (ten near-identical ``getattr`` pairs was ten chances to
+        drift). Typed as a ``TypedDict`` so a spread is checked against the
+        request's actual fields, not as an any-keyed bool dict.
+        """
+        return {
+            "dry_run": getattr(self.args, "dry_run", False),
+            "debug": getattr(self.args, "debug", False),
+        }
 
     def _proxy_request(self, **overrides) -> object:
         """A ``ProxyRequest`` carrying this session's flags plus ``overrides``.
@@ -1411,9 +1445,8 @@ class TuiSession:
             "url": None,
             "no_proxy": None,
             "status": False,
-            "dry_run": getattr(self.args, "dry_run", False),
+            **self._session_flags(),
             "force": True,
-            "debug": getattr(self.args, "debug", False),
         }
         fields.update(overrides)
         return ProxyRequest(**fields)
@@ -1496,8 +1529,7 @@ class TuiSession:
                         provider=provider,
                         name=old_name,
                         new_name=new_name,
-                        dry_run=getattr(self.args, "dry_run", False),
-                        debug=getattr(self.args, "debug", False),
+                        **self._session_flags(),
                     ),
                     silent=True,
                 )
@@ -2110,19 +2142,19 @@ class TuiSession:
                 name = self._chip_name(chip)
                 applied = self._chip_is_applied(agent_name, chip)
                 text = f"✓ {name}" if applied else name
-                if selected and index == cursor:
-                    rendered.append(
-                        f"{_REVERSE}{text}{_RESET}" if ansi else f"[{text}]"
+                # Dim, never bold/`✓`, for the add chip: it is the one
+                # non-backend chip on the strip, so it must never be mistaken
+                # for one that's applied (see `_chip_is_applied`'s `_ADD_CHIP`
+                # case).
+                rendered.append(
+                    _paint_chip(
+                        text,
+                        cursor=selected and index == cursor,
+                        applied=applied,
+                        dim=is_add,
+                        ansi=ansi,
                     )
-                elif applied:
-                    rendered.append(f"{_BOLD}{text}{_RESET}" if ansi else text)
-                elif is_add:
-                    # Dim, never bold/`✓`: this is the one non-backend chip on
-                    # the strip, so it must never be mistaken for one that's
-                    # applied (see `_chip_is_applied`'s `_ADD_CHIP` case).
-                    rendered.append(f"{_DIM}{text}{_RESET}" if ansi else text)
-                else:
-                    rendered.append(text)
+                )
             return f"{agent_name:<8}{'  '.join(rendered)}"
 
         return label
@@ -2148,14 +2180,15 @@ class TuiSession:
                     self._proxy and self._proxy.enabled
                 )
                 text = f"✓ {chip}" if applied else chip
-                if selected and index == cursor:
-                    rendered.append(
-                        f"{_REVERSE}{text}{_RESET}" if ansi else f"[{text}]"
+                rendered.append(
+                    _paint_chip(
+                        text,
+                        cursor=selected and index == cursor,
+                        applied=applied,
+                        dim=False,
+                        ansi=ansi,
                     )
-                elif applied:
-                    rendered.append(f"{_BOLD}{text}{_RESET}" if ansi else text)
-                else:
-                    rendered.append(text)
+                )
             row = f"{'proxy':<8}{'  '.join(rendered)}"
             address = self._proxy.display_restorable_url if self._proxy else ""
             if address:
@@ -2273,10 +2306,13 @@ class TuiSession:
             return None
         return f"edit:{self._chip_name(chip)}"
 
-    def _on_rename(self, alias: str) -> bool:
-        """`e` on a wrapper row: move the wrapper to a new alias (issue #95)."""
-        from codehelper.cli.parser import _handle_rename
-        from codehelper.cli.requests import RenameRequest
+    def _require_installed_managed(self, alias: str, *, message: str) -> bool:
+        """The installed+managed guard shared by rename/edit/default-Enter.
+
+        The not-installed refusal is the same "use Add first" line everywhere;
+        the unmanaged one names the verb, so it arrives as ``message``. True
+        only when the wrapper may be acted on.
+        """
         from codehelper.services.paths import Paths
         from codehelper.services.wrappers import is_installed, is_managed
 
@@ -2285,7 +2321,18 @@ class TuiSession:
             self._notify("Wrapper not installed — use Add first.")
             return False
         if not is_managed(paths, alias):
-            self._notify("Refusing to rename an unmanaged wrapper file.")
+            self._notify(message)
+            return False
+        return True
+
+    def _on_rename(self, alias: str) -> bool:
+        """`e` on a wrapper row: move the wrapper to a new alias (issue #95)."""
+        from codehelper.cli.parser import _handle_rename
+        from codehelper.cli.requests import RenameRequest
+
+        if not self._require_installed_managed(
+            alias, message="Refusing to rename an unmanaged wrapper file."
+        ):
             return False
         new_name = self._read_text(f"New name for {alias}: ")
         if not new_name or new_name == alias:
@@ -2302,8 +2349,7 @@ class TuiSession:
                 provider=None,
                 name=alias,
                 new_name=new_name,
-                dry_run=getattr(self.args, "dry_run", False),
-                debug=getattr(self.args, "debug", False),
+                **self._session_flags(),
             ),
             silent=True,
         )
@@ -2315,15 +2361,9 @@ class TuiSession:
 
     def _run_edit(self, alias: str) -> None:
         """`e` on a wrapper row or highlighted chip: the edit screen."""
-        from codehelper.services.paths import Paths
-        from codehelper.services.wrappers import is_installed, is_managed
-
-        paths = Paths.default()
-        if not is_installed(paths, alias):
-            self._notify("Wrapper not installed — use Add first.")
-            return
-        if not is_managed(paths, alias):
-            self._notify("Refusing to edit an unmanaged wrapper file.")
+        if not self._require_installed_managed(
+            alias, message="Refusing to edit an unmanaged wrapper file."
+        ):
             return
         self._run_edit_screen(alias)
 
@@ -2488,8 +2528,7 @@ class TuiSession:
             base_url=None
             if isinstance(draft["base_url"], Unset)
             else draft["base_url"],
-            dry_run=getattr(self.args, "dry_run", False),
-            debug=getattr(self.args, "debug", False),
+            **self._session_flags(),
         )
         wrote = self._run(_handle_edit_wrapper, req, silent=self._chip_silent())
         if not wrote:
@@ -2604,11 +2643,10 @@ class TuiSession:
     def _pick_edit_ctx(self, spec, draft) -> None:
         from codehelper.cli.parser import _parse_context_window
         from codehelper.errors import CodeHelperError
+        from codehelper.services.context_window import CONTEXT_WINDOW_PRESETS
 
         items = [
-            ("0", "no declaration — the agent's native fallback"),
-            ("1000000", "1,000,000 tokens (1M)"),
-            ("2000000", "2,000,000 tokens (2M)"),
+            *CONTEXT_WINDOW_PRESETS,
             ("__custom__", "custom…"),
             (_BACK, "Back"),
         ]
@@ -2802,9 +2840,8 @@ class TuiSession:
                         _handle_remove,
                         RemoveRequest(
                             name=choice.removeprefix("remove:"),
-                            dry_run=getattr(self.args, "dry_run", False),
+                            **self._session_flags(),
                             force=False,
-                            debug=getattr(self.args, "debug", False),
                         ),
                         # live: the file-list confirm must be visible before
                         # the blocking y/N read.
@@ -2815,25 +2852,21 @@ class TuiSession:
                     # agent. `set_default_wrapper` is the raw store (#28);
                     # `choice` came from `_wrapper_rows`, which only yields
                     # real aliases, so the write is always of a real alias.
-                    from codehelper.services.wrappers import is_installed, is_managed
-
                     spec = self._resolve_spec(choice)
                     if spec is None:
                         continue
-                    if not is_installed(paths, choice):
-                        self._notify("Wrapper not installed — use Add first.")
-                        continue
-                    if not is_managed(paths, choice):
-                        # valid_default_wrapper (the only reader that
-                        # matters — the `●` marker and set-default both go
-                        # through it) requires is_installed AND is_managed.
-                        # Writing a default for an unmanaged file would
-                        # "succeed" here and silently vanish on the very
-                        # next read.
-                        self._notify(
+                    # valid_default_wrapper (the only reader that matters —
+                    # the `●` marker and set-default both go through it)
+                    # requires is_installed AND is_managed. Writing a default
+                    # for an unmanaged file would "succeed" here and silently
+                    # vanish on the very next read.
+                    if not self._require_installed_managed(
+                        choice,
+                        message=(
                             f"{choice} is not a codehelper-managed wrapper "
                             "— cannot set it as default."
-                        )
+                        ),
+                    ):
                         continue
                     set_default_wrapper(paths, spec.agent.name, choice)
                     self._notify(f"Default wrapper set to {choice}.")
