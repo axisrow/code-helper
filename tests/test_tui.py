@@ -2745,6 +2745,42 @@ def test_spec_memo_consumers_match_a_fresh_read_including_agy(monkeypatch):
 
 
 @pytest.mark.integration
+def test_all_wrapper_specs_state_kwarg_matches_chips_for_semantics(monkeypatch):
+    """``_all_wrapper_specs`` shares `_chips_for`'s ``state=`` semantics: the
+    parameter is the CALLER's snapshot, ``None`` reads ``state.json``, and an
+    explicitly passed dict — an empty one included — is honoured as-is. The
+    session snapshot is passed by `_wrapper_rows` like any other preload;
+    nothing falls through to it implicitly (review fix on PR #124)."""
+    from types import SimpleNamespace as NS
+
+    from codehelper.cli.tui import TuiSession
+    from codehelper.services.state import set_provider_disabled
+    from codehelper.services.wrappers import install_wrapper
+
+    install_wrapper(Paths.default(), "glm", token="test-token")
+    session = TuiSession(cast(argparse.Namespace, NS(debug=False, dry_run=False)))
+    session._refresh_active_label()
+    # Snapshot taken BEFORE the disable: it now disagrees with the disk on
+    # purpose, so which answer a call produces tells the sources apart.
+    stale_snapshot = session._state_snapshot
+    set_provider_disabled(
+        paths=Paths.default(),
+        name="zai",
+        disabled=True,
+        storage_names=frozenset({"zai"}),
+    )
+
+    assert "glm" in [
+        spec.name for spec in session._all_wrapper_specs(state=stale_snapshot)
+    ]
+    assert "glm" in [spec.name for spec in session._all_wrapper_specs(state={})]
+    # state=None reads the disk, where zai is now disabled: glm is excluded —
+    # and the sibling read-through kwargs behave the same as a bare call.
+    assert "glm" not in [spec.name for spec in session._all_wrapper_specs(state=None)]
+    assert "glm" not in [spec.name for spec in session._all_wrapper_specs()]
+
+
+@pytest.mark.integration
 def test_chip_cursor_is_independent_per_agent(monkeypatch):
     """Each agent row remembers its own chip, so moving away and back does
     not reset where the user was."""

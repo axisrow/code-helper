@@ -672,11 +672,10 @@ class TuiSession:
         the provider vanishes from the chipset and this list together.
 
         ``state`` is the per-iteration snapshot (issue #110) for the
-        disabled-provider filter (default: the session's
-        :attr:`_state_snapshot`); ``managed``/``specs`` are the per-iteration
-        bin scan and spec memo, so the per-iteration row builder re-reads
-        neither ``state.json`` nor the wrapper bodies. ``None`` values read
-        from disk, so a direct call behaves exactly as before.
+        disabled-provider filter; ``None`` reads ``state.json``. The
+        per-iteration row builder passes :attr:`_state_snapshot` explicitly,
+        same as it passes ``managed``/``specs`` — so a direct call with no
+        kwargs reads from disk, exactly as before.
         """
         from codehelper.services.model import is_provider_disabled
         from codehelper.services.paths import Paths
@@ -688,7 +687,7 @@ class TuiSession:
         )
 
         paths = Paths.default()
-        disabled = disabled_providers(paths, state=state or self._state_snapshot)
+        disabled = disabled_providers(paths, state=state)
 
         def _installed_spec(name: str):
             return (
@@ -725,7 +724,9 @@ class TuiSession:
         )
 
         agents = all_agents(paths)
-        specs = self._all_wrapper_specs(managed=self._managed, specs=self._spec_memo)
+        specs = self._all_wrapper_specs(
+            state=self._state_snapshot, managed=self._managed, specs=self._spec_memo
+        )
         # Columns are aligned across ALL agents in one describe_all_columns
         # call, not one call per agent — a per-agent call would compute its
         # own name/provider widths from only that agent's wrappers, and the
@@ -1896,10 +1897,11 @@ class TuiSession:
         one instead of reading as empty/broken.
 
         ``state`` is the per-iteration snapshot (issue #110) for the
-        disabled-provider filter; ``managed``/``specs`` are the per-iteration
-        bin scan and spec memo — one scan and one read per wrapper body per
-        iteration instead of one per agent row. ``None`` reads from disk, so
-        a direct call behaves exactly as before.
+        disabled-provider filter; ``None`` reads ``state.json``.
+        ``managed``/``specs`` are the per-iteration bin scan and spec memo —
+        one scan and one read per wrapper body per iteration instead of one
+        per agent row. Any of them left ``None`` reads from disk, so a
+        direct call behaves exactly as before.
         """
         from codehelper.services.model import is_provider_disabled
         from codehelper.services.spec import PRESETS, spec_from_preset
