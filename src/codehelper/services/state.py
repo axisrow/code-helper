@@ -73,7 +73,7 @@ from __future__ import annotations
 import contextlib
 import json
 
-from codehelper.backends._atomic import atomic_write, file_lock
+from codehelper.backends._atomic import atomic_write, file_lock, read_json_object
 from codehelper.errors import CodeHelperError
 from codehelper.services.paths import Paths
 
@@ -104,16 +104,8 @@ def load_state(paths: Paths) -> dict[str, object]:
     a round-trip. Does NOT migrate the old ``active_provider``/
     ``active_profiles`` shape — see :func:`active_selection` for that.
     """
-    path = paths.state_file()
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return {}
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return {}
-    if not isinstance(data, dict):
+    data = read_json_object(paths.state_file())
+    if data is None:
         return {}
     return {key: value for key, value in data.items() if isinstance(key, str)}
 

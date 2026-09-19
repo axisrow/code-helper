@@ -51,12 +51,10 @@ correct, not a gap to fill.
 
 from __future__ import annotations
 
-import fcntl
 import json
 from dataclasses import dataclass
-from pathlib import Path
 
-from codehelper.backends._atomic import atomic_write
+from codehelper.backends._atomic import atomic_write, file_lock, read_json_object
 from codehelper.errors import CodeHelperError
 from codehelper.services.model import AGENTS, Agent, ConfigShape, validate_agent_binary
 from codehelper.services.naming import RESERVED_ALIASES
@@ -137,22 +135,14 @@ def _entries_to_agents(entries: list[object]) -> tuple[Agent, ...]:
 def load_user_agents(paths: Paths) -> tuple[Agent, ...]:
     """Read ``agents.json`` as a tuple of :class:`Agent`.
 
-    **Never raises.** A missing, unreadable, malformed, or oddly-shaped file
-    degrades to "no user agents" — see the module docstring. Every returned
-    entry is :attr:`ConfigShape.OLLAMA_LAUNCH`-only, by construction: this is
-    the sole shape a user-defined agent can declare (see the module
-    docstring's Scope section).
+    **Never raises.** A missing, unreadable, malformed, non-UTF-8, or
+    oddly-shaped file degrades to "no user agents" — see the module
+    docstring. Every returned entry is :attr:`ConfigShape.OLLAMA_LAUNCH`-only,
+    by construction: this is the sole shape a user-defined agent can declare
+    (see the module docstring's Scope section).
     """
-    path = paths.agents_file()
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError:
-        return ()
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return ()
-    if not isinstance(data, dict):
+    data = read_json_object(paths.agents_file())
+    if data is None:
         return ()
     entries = data.get("agents")
     if not isinstance(entries, list):
@@ -182,7 +172,10 @@ def load_user_agents_strict(paths: Paths) -> tuple[Agent, ...]:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return ()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # Bad UTF-8 is corruption like any other: surface the CodeHelperError
+        # contract, never a raw UnicodeDecodeError (the mutation-path twin of
+        # load_user_agents' #108 gap).
         raise CodeHelperError(f"cannot read agents registry: {exc}") from exc
     try:
         data = json.loads(raw)
@@ -247,18 +240,6 @@ def get_agent(paths: Paths, name: str) -> Agent:
     raise CodeHelperError(f"unknown agent: {name} (known: {known})")
 
 
-def _agents_lock(paths: Paths) -> Path:
-    """Return the lock-file path guarding ``agents.json``.
-
-    A SEPARATE file from ``agents.json`` itself: ``atomic_write`` replaces the
-    destination inode, so a lock held on ``agents.json`` would silently point
-    at the stale pre-replace inode after the first write. The lock file is
-    never replaced, only flock-ed, so its inode is stable for the process's
-    lifetime.
-    """
-    return paths.agents_file().with_suffix(".json.lock")
-
-
 def add_user_agent(
     paths: Paths, name: str, binary: str | None = None, description: str = ""
 ) -> Agent:
@@ -270,12 +251,16 @@ def add_user_agent(
     launch`` integration name are the same thing for every built-in entry
     today.
 
-    The read-modify-write (load → validate → replace) runs under an exclusive
-    ``fcntl.flock`` on a sibling lock file, so two concurrent invocations
-    (two TUI/process instances) cannot each read the same registry, both pass
-    the duplicate checks, and the later writer silently delete the earlier
-    agent. ``atomic_write`` prevents torn JSON, not this lost-update race; the
-    lock closes that gap.
+    The read-modify-write (load → validate → replace) runs under
+    :func:`~codehelper.backends._atomic.file_lock` on a sibling
+    ``agents.json.lock`` file, so two concurrent invocations (two TUI/process
+    instances) cannot each read the same registry, both pass the duplicate
+    checks, and the later writer silently delete the earlier agent. The lock
+    file is deliberately a SIBLING, never ``agents.json`` itself:
+    ``atomic_write`` replaces the destination inode, so a lock held on the
+    destination would silently point at the stale pre-replace inode after the
+    first write. ``file_lock`` also applies the ``0o600`` chmod the lock file
+    always should have carried (the pre-#108 hand-rolled ``open`` never did).
 
     Raises:
         CodeHelperError: ``name``/``binary`` fails
@@ -287,54 +272,48 @@ def add_user_agent(
     validate_agent_binary(name)
     validate_agent_binary(binary)
 
-    lock_path = _agents_lock(paths)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a+") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            # Strict read: a corrupt registry must fail closed here, not read
-            # as "no agents" and be overwritten with just the new entry.
-            user_agents = load_user_agents_strict(paths)
-            existing = AGENTS + user_agents
-            existing_names = {a.name for a in existing}
-            existing_binaries = {a.binary for a in existing}
-            if name in existing_names:
-                raise CodeHelperError(f"an agent named {name!r} already exists")
-            # RESERVED_ALIASES already contains every built-in binary, but
-            # checking it explicitly (rather than relying solely on
-            # existing_binaries) also covers "codehelper" itself and stays
-            # correct even if that set's derivation ever changes shape.
-            if name in RESERVED_ALIASES or binary in RESERVED_ALIASES:
-                raise CodeHelperError(
-                    f"{name!r} collides with a reserved name — an agent named "
-                    f"after an existing binary on PATH would either re-invoke "
-                    f"itself forever or permanently shadow the real one"
-                )
-            if binary in existing_binaries:
-                raise CodeHelperError(
-                    f"an agent with binary {binary!r} already exists — two "
-                    f"agents sharing a binary would make wrapper generation "
-                    f"ambiguous"
-                )
-
-            agent = Agent(
-                name=name,
-                binary=binary,
-                shapes=frozenset({ConfigShape.OLLAMA_LAUNCH}),
-                description=description,
+    with file_lock(paths.agents_file()):
+        # Strict read: a corrupt registry must fail closed here, not read
+        # as "no agents" and be overwritten with just the new entry.
+        user_agents = load_user_agents_strict(paths)
+        existing = AGENTS + user_agents
+        existing_names = {a.name for a in existing}
+        existing_binaries = {a.binary for a in existing}
+        if name in existing_names:
+            raise CodeHelperError(f"an agent named {name!r} already exists")
+        # RESERVED_ALIASES already contains every built-in binary, but
+        # checking it explicitly (rather than relying solely on
+        # existing_binaries) also covers "codehelper" itself and stays
+        # correct even if that set's derivation ever changes shape.
+        if name in RESERVED_ALIASES or binary in RESERVED_ALIASES:
+            raise CodeHelperError(
+                f"{name!r} collides with a reserved name — an agent named "
+                f"after an existing binary on PATH would either re-invoke "
+                f"itself forever or permanently shadow the real one"
+            )
+        if binary in existing_binaries:
+            raise CodeHelperError(
+                f"an agent with binary {binary!r} already exists — two "
+                f"agents sharing a binary would make wrapper generation "
+                f"ambiguous"
             )
 
-            payload = {
-                "agents": [
-                    {"name": a.name, "binary": a.binary, "description": a.description}
-                    for a in (*user_agents, agent)
-                ]
-            }
-            atomic_write(
-                paths.agents_file(),
-                json.dumps(payload, indent=2, sort_keys=True) + "\n",
-                mode=None,
-            )
-            return agent
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        agent = Agent(
+            name=name,
+            binary=binary,
+            shapes=frozenset({ConfigShape.OLLAMA_LAUNCH}),
+            description=description,
+        )
+
+        payload = {
+            "agents": [
+                {"name": a.name, "binary": a.binary, "description": a.description}
+                for a in (*user_agents, agent)
+            ]
+        }
+        atomic_write(
+            paths.agents_file(),
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            mode=None,
+        )
+        return agent

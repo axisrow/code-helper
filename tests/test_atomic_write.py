@@ -16,6 +16,10 @@ Cross-cutting: the helper never emits ``data`` via print/stdout/stderr
 (secrets discipline — tokens pass through it), and it creates missing parent
 directories.
 
+This file also pins the module's other primitives: :func:`file_lock` /
+:func:`best_effort_lock` (the locking seam) and :func:`read_json_object`
+(the never-raises JSON-object read).
+
 All dests live under ``tmp_path`` (the autouse ``_isolate_home`` fixture
 already redirects ``HOME`` to a tmp sandbox).
 """
@@ -23,6 +27,7 @@ already redirects ``HOME`` to a tmp sandbox).
 from __future__ import annotations
 
 import builtins
+import fcntl
 import os
 import stat
 import sys
@@ -348,6 +353,136 @@ def test_atomic_write_over_symlink_does_not_clear_target(tmp_path):
     assert not dest.is_symlink()
     assert dest.read_bytes() == b"canonical"
     assert (target / "keep.txt").read_text() == "precious"  # target untouched
+
+
+# --------------------------------------------------------------------------- #
+# best_effort_lock — file_lock that degrades to unlocked on OSError
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_best_effort_lock_creates_a_0600_sibling_lock_file(tmp_path):
+    """The lock rides file_lock's ``<name>.lock`` suffix idiom and its 0o600
+    chmod — best_effort_lock wraps file_lock, it is not a second lock."""
+    target = tmp_path / "data.json"
+    with atomic_mod.best_effort_lock(target):
+        lock_path = tmp_path / "data.json.lock"
+        assert lock_path.is_file()
+        assert stat.S_IMODE(os.stat(lock_path).st_mode) == 0o600
+
+
+@pytest.mark.unit
+def test_best_effort_lock_actually_excludes_a_second_holder(tmp_path):
+    """While held, a non-blocking flock probe on a second descriptor must
+    fail (BlockingIOError); after the with block it must succeed — proving
+    the best-effort path still takes a REAL lock when one is available."""
+    target = tmp_path / "data.json"
+    lock_path = tmp_path / "data.json.lock"
+
+    def _probe() -> bool:
+        with open(lock_path, "a") as probe:
+            try:
+                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            return True
+
+    with atomic_mod.best_effort_lock(target):
+        assert _probe() is False
+    assert _probe() is True
+
+
+@pytest.mark.unit
+def test_best_effort_lock_degrades_when_acquisition_raises(tmp_path, monkeypatch):
+    """Any OSError from acquisition degrades to an unlocked yield, not a
+    propagation — the posture ``state._locked_update`` established for its
+    re-pickable writers, and the seam its degradation test patches too."""
+    ran = []
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("no locking here")
+
+    monkeypatch.setattr(atomic_mod, "file_lock", _boom)
+    with atomic_mod.best_effort_lock(tmp_path / "data.json"):
+        ran.append(1)
+    assert ran == [1]
+
+
+@pytest.mark.unit
+def test_best_effort_lock_degrades_when_a_directory_sits_on_the_lock_name(tmp_path):
+    """The real-world failure shape, no mock: a directory at the ``.lock``
+    name makes file_lock's open raise IsADirectoryError (an OSError) — the
+    body must still run, unlocked."""
+    target = tmp_path / "data.json"
+    (tmp_path / "data.json.lock").mkdir()
+
+    ran = []
+    with atomic_mod.best_effort_lock(target):
+        ran.append(1)
+    assert ran == [1]
+
+
+@pytest.mark.unit
+def test_best_effort_lock_propagates_body_exceptions_once(tmp_path):
+    """A raised body propagates untouched and runs EXACTLY once — the
+    acquire-before-yield shape; a try/except wrapped around the yield would
+    swallow an OSError body and run the block a second time."""
+    target = tmp_path / "data.json"
+    ran = []
+    with pytest.raises(_Boom):
+        with atomic_mod.best_effort_lock(target):
+            ran.append(1)
+            raise _Boom("from the body")
+    assert ran == [1]
+
+
+# --------------------------------------------------------------------------- #
+# read_json_object — never-raises JSON-object read
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_read_json_object_round_trips_a_valid_object(tmp_path):
+    path = tmp_path / "data.json"
+    path.write_text('{"agents": [{"name": "x"}]}', encoding="utf-8")
+    assert atomic_mod.read_json_object(path) == {"agents": [{"name": "x"}]}
+
+
+@pytest.mark.unit
+def test_read_json_object_missing_file_is_none(tmp_path):
+    assert atomic_mod.read_json_object(tmp_path / "absent.json") is None
+
+
+@pytest.mark.unit
+def test_read_json_object_malformed_json_is_none(tmp_path):
+    path = tmp_path / "data.json"
+    path.write_text("{not valid json", encoding="utf-8")
+    assert atomic_mod.read_json_object(path) is None
+
+
+@pytest.mark.unit
+def test_read_json_object_non_object_payload_is_none(tmp_path):
+    path = tmp_path / "data.json"
+    path.write_text('["a", "b"]', encoding="utf-8")
+    assert atomic_mod.read_json_object(path) is None
+
+
+@pytest.mark.unit
+def test_read_json_object_null_payload_is_none(tmp_path):
+    path = tmp_path / "data.json"
+    path.write_text("null", encoding="utf-8")
+    assert atomic_mod.read_json_object(path) is None
+
+
+@pytest.mark.unit
+def test_read_json_object_bad_utf8_is_none(tmp_path):
+    """A file that is not valid UTF-8 degrades like every other corruption —
+    the exact gap that bit ``agents.load_user_agents`` before #108."""
+    path = tmp_path / "data.json"
+    path.write_bytes(b'{"k": "\xff\xfe"}')
+    assert atomic_mod.read_json_object(path) is None
+
+
+@pytest.mark.unit
+def test_read_json_object_directory_at_the_path_is_none(tmp_path):
+    """The OSError shape without permission gambles: a DIRECTORY at the path."""
+    assert atomic_mod.read_json_object(tmp_path) is None
 
 
 # --------------------------------------------------------------------------- #
