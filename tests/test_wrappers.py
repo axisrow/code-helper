@@ -4166,6 +4166,169 @@ def test_edit_retry_converges_after_an_interrupted_companion_write(
     ).read_text(encoding="utf-8")
 
 
+# --------------------------------------------------------------------------- #
+# Issue #102 — the OPENAI_TOML install commits its two files as ONE pair.
+# The plan order stays companion-first (that is the #101 retry story); what
+# is added is a cross-process lock spanning both writes and a rollback of
+# the companion if a later step fails.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_openai_toml_failure_between_writes_restores_old_pair(tmp_path, monkeypatch):
+    """A write failure between the companion write and the wrapper write
+    must not leave the pair mixed — the companion bytes captured before the
+    plan ran are restored, so the pair on disk stays old+old and a plain
+    retry converges. The old pair here is a literal wrapper, the new one a
+    secret one: BOTH slots differ, so the injected failure really lands
+    between the two writes."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+    companion = paths.codex_config_for("glm-codex")
+    wrapper = paths.script_for("glm-codex")
+    old_companion = companion.read_text(encoding="utf-8")
+    old_wrapper = wrapper.read_text(encoding="utf-8")
+
+    from codehelper.backends import _atomic
+
+    real_write = _atomic.atomic_write
+
+    def failing_on_wrapper(path, data, mode=None):
+        if path == wrapper:
+            raise OSError("injected between the two writes")
+        real_write(path, data, mode=mode)
+
+    monkeypatch.setattr("codehelper.services.wrappers.atomic_write", failing_on_wrapper)
+
+    with pytest.raises(CodeHelperError, match="failed to write"):
+        install_wrapper(
+            paths,
+            build_spec(
+                agent="codex",
+                provider="deepseek-openai",
+                model="deepseek-v4-pro",
+                alias="glm-codex",
+            ),
+            token=_SECRET_TOKEN,
+        )
+
+    assert companion.read_text(encoding="utf-8") == old_companion
+    assert wrapper.read_text(encoding="utf-8") == old_wrapper
+
+
+@pytest.mark.integration
+def test_openai_toml_failure_between_writes_removes_fresh_companion(
+    tmp_path, monkeypatch
+):
+    """The same injection on a FIRST install: there is no previous companion
+    to restore, so the rollback removes the freshly created one — no half
+    pair survives to look installed."""
+    paths = Paths.from_home(tmp_path)
+    companion = paths.codex_config_for("glm-codex")
+    wrapper = paths.script_for("glm-codex")
+
+    from codehelper.backends import _atomic
+
+    real_write = _atomic.atomic_write
+
+    def failing_on_wrapper(path, data, mode=None):
+        if path == wrapper:
+            raise OSError("injected between the two writes")
+        real_write(path, data, mode=mode)
+
+    monkeypatch.setattr("codehelper.services.wrappers.atomic_write", failing_on_wrapper)
+
+    with pytest.raises(CodeHelperError, match="failed to write"):
+        install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+
+    assert not companion.exists()
+    assert not wrapper.exists()
+
+
+@pytest.mark.integration
+def test_openai_toml_install_holds_lock_across_the_two_writes(tmp_path, monkeypatch):
+    """The concurrency half of #102: while the install sits between the two
+    writes, the companion lock is HELD — a concurrent add/edit on the same
+    alias blocks until the pair is committed, so nothing can interleave.
+    Probed non-blocking at the seam: acquiring must fail."""
+    import fcntl
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+    companion = paths.codex_config_for("glm-codex")
+    lock_path = companion.with_suffix(companion.suffix + ".lock")
+
+    from codehelper.backends import _atomic
+
+    real_write = _atomic.atomic_write
+    probed: dict[str, bool] = {}
+
+    def probe_at_the_seam(path, data, mode=None):
+        real_write(path, data, mode=mode)
+        if path == companion:
+            with lock_path.open("a") as handle:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    probed["held"] = True  # the install's own lock
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    probed["held"] = False
+            raise OSError("stop before the wrapper write")
+
+    monkeypatch.setattr("codehelper.services.wrappers.atomic_write", probe_at_the_seam)
+
+    with pytest.raises(CodeHelperError, match="failed to write"):
+        install_wrapper(
+            paths,
+            _toml_spec(model="other-m", alias="glm-codex"),
+            token=_LITERAL_TOKEN,
+        )
+
+    assert probed == {"held": True}
+
+
+@pytest.mark.integration
+def test_openai_toml_install_refuses_drift_under_the_lock(tmp_path, monkeypatch):
+    """The #107/B ground rule, carried over to the plan: the lock alone is
+    not enough — a writer that commits in the decide→lock gap must not be
+    acted on with decisions taken against the older snapshot. The decisions
+    are re-derived under the lock and ANY drift refuses (here: a foreign
+    file appeared in the companion slot after the confirm gate ran — it must
+    surface as a refusal, not an overwrite); the rerun converges."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+    companion = paths.codex_config_for("glm-codex")
+    wrapper = paths.script_for("glm-codex")
+    old_wrapper = wrapper.read_text(encoding="utf-8")
+
+    from codehelper.backends import _atomic
+    from codehelper.services import wrappers as wrappers_module
+
+    real_lock = wrappers_module.file_lock
+
+    def racing_lock(path):
+        # The concurrent writer commits a FOREIGN companion in the gap
+        # between this install's decision pass and its lock acquisition.
+        _atomic.atomic_write(path, 'model = "foreign-m"\n', mode=0o600)
+        return real_lock(path)
+
+    monkeypatch.setattr("codehelper.services.wrappers.file_lock", racing_lock)
+
+    with pytest.raises(
+        CodeHelperError, match="changed while the install was being prepared"
+    ):
+        install_wrapper(
+            paths,
+            _toml_spec(model="other-m", alias="glm-codex"),
+            token=_LITERAL_TOKEN,
+        )
+
+    # The racer's file survived untouched and no wrapper was written.
+    assert companion.read_text(encoding="utf-8") == 'model = "foreign-m"\n'
+    assert wrapper.read_text(encoding="utf-8") == old_wrapper
+
+
 @pytest.mark.unit
 def test_edit_refuses_missing_and_unmanaged_targets(tmp_path):
     paths = Paths.from_home(tmp_path)
