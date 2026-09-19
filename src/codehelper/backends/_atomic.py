@@ -33,10 +33,13 @@ import stat
 import tempfile
 from pathlib import Path
 
+from codehelper.errors import CodeHelperError
+
 __all__ = [
     "atomic_write",
     "best_effort_lock",
     "file_lock",
+    "guarded_replace",
     "read_json_object",
     "read_text_or_none",
     "remove_file",
@@ -239,6 +242,59 @@ def rotate_backups(slots: tuple[Path, Path, Path], *, current: str) -> None:
         atomic_write(slot2, body1, mode=None)
 
     atomic_write(slot1, current, mode=None)
+
+
+def guarded_replace(
+    path: str | Path,
+    *,
+    expected: str,
+    new_text: str,
+    stale_message: str,
+    backup_slots: tuple[Path, Path, Path] | None = None,
+    mode: int | None = None,
+) -> None:
+    """The one commit tail every config writer shares: lock → stale-snapshot
+    refusal → backup rotation → :func:`atomic_write`, all under ONE lock.
+
+    Six writers (``codex_default`` ×3, ``claude_settings`` ×2, ``proxy`` ×1)
+    used to carry copy-pasted versions of exactly this sequence. The ordering
+    is load-bearing and now has a single owner:
+
+    1. :func:`file_lock` covers the WHOLE tail — the re-check, the rotation,
+       and the write. Locking only the stale check would still let two
+       cooperating writers both pass it and then rotate/write stale
+       snapshots.
+    2. The stale-snapshot refusal: re-read under the lock; anything other
+       than ``expected`` (the text the caller computed its patch, preview
+       and confirm prompt against) raises ``CodeHelperError(stale_message)``
+       before anything is rotated or written — a concurrent writer or
+       hand-edit wins the race instead of being silently clobbered.
+       ``stale_message`` is OWNER-OWNED: each writer keeps its own wording;
+       only the "changed since it was read" substring is shared contract.
+    3. One rotation rule for every ring: rotate iff ``backup_slots`` is given
+       AND ``expected`` is non-empty. A restore passes no slots — restoring
+       is the "put it back" operation, not a fresh edit to archive. An empty
+       ``expected`` means a fresh install (no prior state worth archiving):
+       ``claude_settings``/``proxy`` already skipped the ring in that case,
+       and codex's writers — whose flows guarantee a non-empty ``original``
+       except on an empty/absent config.toml — previously archived an empty
+       string into slot 1 there. That empty archive is the one observable
+       difference of the unification, and an improvement: restoring it would
+       have restored nothing.
+    4. :func:`atomic_write` with the caller's ``mode``.
+
+    The confirm/force gate is deliberately NOT part of this tail: patch flows
+    and restore-from-backup flows confirm differently (different preview, different
+    wording), so the gate stays with each caller — this function only runs
+    after the caller has already been given leave to write.
+    """
+    with file_lock(path):
+        current = read_text_or_none(path) or ""
+        if current != expected:
+            raise CodeHelperError(stale_message)
+        if backup_slots is not None and expected:
+            rotate_backups(backup_slots, current=expected)
+        atomic_write(path, new_text, mode=mode)
 
 
 def read_text_or_none(path: str | Path) -> str | None:

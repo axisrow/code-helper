@@ -35,7 +35,8 @@ import sys
 import pytest
 
 import codehelper.backends._atomic as atomic_mod
-from codehelper.backends._atomic import atomic_write
+from codehelper.backends._atomic import atomic_write, guarded_replace
+from codehelper.errors import CodeHelperError
 
 
 class _Boom(RuntimeError):
@@ -500,6 +501,104 @@ def test_read_json_object_bad_utf8_is_none(tmp_path):
 def test_read_json_object_directory_at_the_path_is_none(tmp_path):
     """The OSError shape without permission gambles: a DIRECTORY at the path."""
     assert atomic_mod.read_json_object(tmp_path) is None
+
+
+# --------------------------------------------------------------------------- #
+# guarded_replace — the one commit tail: lock → stale-refusal → rotate → write
+# --------------------------------------------------------------------------- #
+@pytest.mark.unit
+def test_guarded_replace_writes_and_rotates_the_previous_content(tmp_path):
+    dest = tmp_path / "cfg.toml"
+    dest.write_text("before\n", encoding="utf-8")
+    slots = (tmp_path / "b3", tmp_path / "b2", tmp_path / "b1")
+
+    guarded_replace(
+        dest,
+        expected="before\n",
+        new_text="after\n",
+        stale_message="cfg.toml changed since it was read — refusing without confirmation",
+        backup_slots=slots,
+        mode=0o600,
+    )
+
+    assert dest.read_text(encoding="utf-8") == "after\n"
+    assert slots[2].read_text(encoding="utf-8") == "before\n"
+    assert (stat.S_IMODE(dest.stat().st_mode)) == 0o600
+
+
+@pytest.mark.unit
+def test_guarded_replace_refuses_a_stale_snapshot_and_writes_nothing(tmp_path):
+    """expected ≠ on-disk → the caller's stale_message raises, nothing is
+    rotated or written — the concurrent edit survives."""
+    dest = tmp_path / "cfg.toml"
+    dest.write_text("edited concurrently\n", encoding="utf-8")
+    slots = (tmp_path / "b3", tmp_path / "b2", tmp_path / "b1")
+
+    with pytest.raises(CodeHelperError, match="changed since it was read"):
+        guarded_replace(
+            dest,
+            expected="before\n",
+            new_text="after\n",
+            stale_message=(
+                "cfg.toml changed since it was read — the owner's own wording"
+            ),
+            backup_slots=slots,
+        )
+
+    assert dest.read_text(encoding="utf-8") == "edited concurrently\n"
+    assert not any(slot.exists() for slot in slots)
+
+
+@pytest.mark.unit
+def test_guarded_replace_rotate_policy_slots_and_nonempty_expected(tmp_path):
+    """One rule for every ring: rotate iff slots are given AND expected is
+    non-empty. Covers the three non-rotating shapes the six migrated writers
+    bring: a restore (no slots), a fresh install (empty/absent prior file),
+    and the normal rotate."""
+    slots = (tmp_path / "b3", tmp_path / "b2", tmp_path / "b1")
+
+    # backup_slots=None → never rotates (restore_default/restore_settings).
+    dest = tmp_path / "a.toml"
+    dest.write_text("prior\n", encoding="utf-8")
+    guarded_replace(dest, expected="prior\n", new_text="next\n", stale_message="stale")
+    assert dest.read_text(encoding="utf-8") == "next\n"
+    assert not any(slot.exists() for slot in slots)
+
+    # slots + empty expected (existing empty file) → skip the ring: there is
+    # no prior state worth archiving.
+    dest.write_text("", encoding="utf-8")
+    guarded_replace(
+        dest,
+        expected="",
+        new_text="next\n",
+        stale_message="stale",
+        backup_slots=slots,
+    )
+    assert dest.read_text(encoding="utf-8") == "next\n"
+    assert not any(slot.exists() for slot in slots)
+
+    # slots + ABSENT file, expected="" → same fresh-install shape.
+    dest.unlink()
+    guarded_replace(
+        dest,
+        expected="",
+        new_text="next\n",
+        stale_message="stale",
+        backup_slots=slots,
+    )
+    assert dest.read_text(encoding="utf-8") == "next\n"
+    assert not any(slot.exists() for slot in slots)
+
+    # slots + non-empty expected → the one rotating shape.
+    dest.write_text("prior\n", encoding="utf-8")
+    guarded_replace(
+        dest,
+        expected="prior\n",
+        new_text="next\n",
+        stale_message="stale",
+        backup_slots=slots,
+    )
+    assert slots[2].read_text(encoding="utf-8") == "prior\n"
 
 
 # --------------------------------------------------------------------------- #

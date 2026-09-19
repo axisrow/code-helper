@@ -69,12 +69,7 @@ import contextlib
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
 
-from codehelper.backends._atomic import (
-    atomic_write,
-    file_lock,
-    read_text_or_none,
-    rotate_backups,
-)
+from codehelper.backends._atomic import guarded_replace
 from codehelper.errors import CodeHelperError
 from codehelper.services.claude_settings import (
     credential_values,
@@ -444,9 +439,10 @@ def apply_proxy(
 
     Flow, deliberately identical to ``claude_settings.apply_switch``: resolve
     the patch -> read + parse (refuse outright on a corrupt file) -> patch
-    (pure) -> verify (before any write) -> gate (force/confirm) -> lock ->
-    re-check for a concurrent change -> rotate backups -> ``atomic_write`` at
-    ``0o600``. ``--dry-run`` prints the redacted diff and touches nothing.
+    (pure) -> verify (before any write) -> gate (force/confirm) ->
+    :func:`guarded_replace` (lock, stale-snapshot refusal, rotate backups,
+    ``atomic_write`` at ``0o600``). ``--dry-run`` prints the redacted diff
+    and touches nothing.
 
     ``0o600`` matches what ``apply_switch`` leaves the file at, and is
     warranted on its own terms: a proxy URL may embed basic-auth credentials.
@@ -509,23 +505,18 @@ def apply_proxy(
             f"(use --force, or re-run interactively)"
         )
 
-    # Re-read immediately before writing. `original_text` was captured at
-    # entry, and an interactive confirm prompt gives a concurrent `switch`,
-    # `proxy`, or hand-edit a window to change the file. The lock must cover
-    # the check, the rotation and the replacement together — locking only the
-    # check would let two writers both pass it and then write stale snapshots.
-    with file_lock(settings_path):
-        current_text = read_text_or_none(settings_path) or ""
-        if current_text != original_text:
-            raise CodeHelperError(
-                f"{settings_path} changed since it was read — refusing to write "
-                f"a patch computed off a stale snapshot (a concurrent switch or "
-                f"hand-edit may have run; re-run to patch the current file)"
-            )
-
-        if original_text:
-            rotate_backups(settings_backup_slots(paths), current=original_text)
-        atomic_write(settings_path, patched_text, mode=0o600)
+    guarded_replace(
+        settings_path,
+        expected=original_text,
+        new_text=patched_text,
+        stale_message=(
+            f"{settings_path} changed since it was read — refusing to write "
+            f"a patch computed off a stale snapshot (a concurrent switch or "
+            f"hand-edit may have run; re-run to patch the current file)"
+        ),
+        backup_slots=settings_backup_slots(paths),
+        mode=0o600,
+    )
 
     action = "disabled proxy in" if url == "" else "wrote"
     print(f"{action} {settings_path} (backup: {paths.claude_settings_backup(1)})")

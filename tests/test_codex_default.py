@@ -13,12 +13,12 @@ from typing import Any
 
 import pytest
 
+from codehelper.backends._atomic import rotate_backups
 from codehelper.errors import CodeHelperError
 from codehelper.services.codex_default import (
     DefaultPatch,
     _config_backup_slots,
     _render_model_providers_table,
-    _rotate_backups,
     apply_set_default,
     clear_default,
     current_default,
@@ -548,7 +548,7 @@ def test_rotate_backups_archives_the_passed_in_content_not_a_fresh_disk_read(
     # read earlier and is passing in as `current`.
     paths.codex_main_config().write_text("on_disk = true\n", encoding="utf-8")
 
-    _rotate_backups(
+    rotate_backups(
         _config_backup_slots(paths), current="already_read_by_caller = true\n"
     )
 
