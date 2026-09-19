@@ -397,6 +397,35 @@ backend-clearing entry) cannot be disabled. If any wrapper cannot be removed,
 the whole `disable` is refused with `state.json` untouched — retry after
 fixing the cause (`--force` for files `codehelper` did not create).
 
+## Proxying
+
+`base_url` and a network proxy are two different things. A profile's
+`base_url` (and `ANTHROPIC_BASE_URL`) is the **API endpoint** — which server
+the agent talks to. It is never a proxy, and nothing here derives a proxy
+setting from it.
+
+A generated wrapper is **environment-transparent**: it inherits the invoking
+process's environment verbatim and adds only its own token/endpoint exports —
+it never sets, changes, or unsets a proxy variable (`https_proxy`,
+`HTTPS_PROXY`, `http_proxy`, `HTTP_PROXY`, `ALL_PROXY`, `all_proxy`,
+`NO_PROXY`, `no_proxy`). To route a wrapper through a proxy, set the standard
+names in the shell or launcher that runs it, or prefix one invocation:
+
+```bash
+https_proxy=http://proxy.lan:8118 glm-5-codex
+```
+
+`codehelper proxy` is **Claude Code-scoped**, not a machine-wide switch: it
+edits the proxy keys in `~/.claude/settings.json`'s `env` block, so it
+reaches Claude Code sessions and nothing else. A Codex wrapper gets its proxy
+exclusively from its process environment — `proxy on` does not change what it
+does.
+
+`codehelper doctor` reports, for each installed Codex wrapper, which proxy
+variables your current environment supplies, the effective address, and
+whether the wrapper's endpoint host is in `NO_PROXY` (i.e. bypassed) — the
+read-only answer to "why is my wrapper not going through the proxy?".
+
 ## Safety
 
 - **Your other executables are protected.** A wrapper carries a marker

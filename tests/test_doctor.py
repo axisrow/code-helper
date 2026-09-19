@@ -16,8 +16,10 @@ import pytest
 
 from codehelper.services import doctor, secrets
 from codehelper.services.doctor import CheckRow, DoctorReport
-from codehelper.services.model import get_provider
+from codehelper.services.model import get_provider, with_base_url
 from codehelper.services.paths import Paths
+from codehelper.services.spec import build_spec
+from codehelper.services.wrappers import install_wrapper
 
 FREELLMAPI = get_provider("freellmapi")
 
@@ -402,3 +404,198 @@ def test_launchctl_getenv_reads_as_empty_without_the_binary(monkeypatch):
     # unit seam proves the never-raise branch without spawning anything.
     monkeypatch.setattr(doctor.shutil, "which", lambda _name: None)
     assert doctor._launchctl_getenv("CODEHELPER_NOT_SET_ANYWHERE_XYZ") == ""
+
+
+# ---------------------------------------------------------------------------
+# the proxy-env report (issue #76 §4) — pure rows, WARN/INFO only
+# ---------------------------------------------------------------------------
+
+
+def _proxy_report(environ, host: str | None = "api.example.net") -> CheckRow:
+    return doctor.proxy_env_row("demo-codex", host, environ)
+
+
+@pytest.mark.unit
+def test_proxy_row_with_no_proxy_env_is_informational():
+    """An empty proxy environment is LEGITIMATE (the wrapper runs direct) —
+    the row is INFO-flavoured OK, never a failure, and the hint points at the
+    caller's shell, not at `codehelper proxy` (C4: that toggle is
+    Claude-Code-scoped)."""
+    row = _proxy_report({})
+    assert row.status == doctor.OK
+    assert "runs direct" in row.detail
+    assert "codehelper proxy" in row.hint
+
+
+@pytest.mark.unit
+def test_proxy_row_lists_the_present_names_and_the_effective_address():
+    row = _proxy_report(
+        {
+            "https_proxy": "http://low:1",
+            "HTTP_PROXY": "http://up:2",
+            "NO_PROXY": "localhost",
+        }
+    )
+    assert row.status == doctor.OK
+    assert "https_proxy" in row.detail
+    assert "HTTP_PROXY" in row.detail
+    assert "NO_PROXY" in row.detail
+    # The effective address is the FIRST NON-EMPTY of the Claude-Code-style
+    # chain — lowercase https_proxy here — and only that one is reported.
+    assert "http://low:1" in row.detail
+    assert "http://up:2" not in row.detail
+    # The caveat is the point (contract §4): one consumer's order, worded as
+    # such, because every agent reads these names in its own order.
+    assert "each agent reads these names in its own order" in row.detail
+
+
+@pytest.mark.unit
+def test_proxy_row_masks_a_password_in_the_effective_address():
+    row = _proxy_report({"https_proxy": "http://bob:hunter2@proxy:8118"})
+    assert "hunter2" not in row.detail
+    assert "bob:***@proxy:8118" in row.detail
+
+
+@pytest.mark.unit
+def test_proxy_row_warns_when_case_spellings_diverge():
+    """Two values behind two case spellings is the harmful case proxy.py's
+    docstring documents — consumers disagree on which spelling wins."""
+    row = _proxy_report({"https_proxy": "http://a:1", "HTTPS_PROXY": "http://a:2"})
+    assert row.status == doctor.WARN
+    assert "https_proxy vs HTTPS_PROXY" in row.detail
+    assert "different values" in row.detail
+
+
+@pytest.mark.unit
+def test_proxy_row_warns_when_the_endpoint_is_bypassed_exact_host():
+    row = _proxy_report(
+        {"https_proxy": "http://p:1", "NO_PROXY": "localhost,api.example.net"}
+    )
+    assert row.status == doctor.WARN
+    assert "api.example.net" in row.detail
+    assert "NO_PROXY" in row.detail
+
+
+@pytest.mark.unit
+def test_proxy_row_bypass_match_is_exact_host_or_domain_suffix_only():
+    """.example.net matches api.example.net; a bare-suffix entry matches its
+    subdomains and the bare host; an unrelated host that merely CONTAINS the
+    entry never matches — and no CIDR or port forms exist here."""
+    env = {"https_proxy": "http://p:1"}
+    assert _proxy_report({**env, "no_proxy": ".example.net"}).status == doctor.WARN
+    assert (
+        _proxy_report({**env, "no_proxy": "example.net"}, host="api.example.net").status
+        == doctor.WARN
+    )
+    assert (
+        _proxy_report({**env, "no_proxy": "example.net"}, host="example.net").status
+        == doctor.WARN
+    )
+    assert (
+        _proxy_report({**env, "no_proxy": "example.net"}, host="notexample.net").status
+        == doctor.OK
+    )
+
+
+@pytest.mark.unit
+def test_proxy_row_reports_an_inert_bypass_list_without_a_proxy():
+    """A bypass list with no forward-proxy address proxies nothing — the row
+    must not claim traffic "bypasses the proxy", and must not warn: NO_PROXY
+    outliving `proxy off` is proxy.py's designed behaviour, not a fault."""
+    row = _proxy_report({"NO_PROXY": "api.example.net"})
+    assert row.status == doctor.OK
+    assert "inert" in row.detail
+    assert "bypasses the proxy" not in row.detail
+    assert "remove" not in row.hint
+
+    # ALL_PROXY alone IS a configured address (curl-style consumers), so the
+    # bypass claim becomes true again even without a claude-chain address.
+    row = _proxy_report({"ALL_PROXY": "http://p:1", "NO_PROXY": "api.example.net"})
+    assert row.status == doctor.WARN
+    assert "bypasses the proxy" in row.detail
+
+
+@pytest.mark.unit
+def test_proxy_row_skips_the_bypass_check_without_an_endpoint_host():
+    """No readable base_url (a REQUIRED provider that lost its profile) means
+    no bypass verdict — the row keeps its env report and says so."""
+    row = _proxy_report({"https_proxy": "http://p:1"}, host=None)
+    assert row.status == doctor.OK
+    assert "bypass check skipped" in row.detail
+
+
+@pytest.mark.unit
+def test_proxy_row_is_never_a_failure():
+    """WARN/INFO at most, over the whole matrix: proxy-less, healthy,
+    divergent, bypassed."""
+    for environ in (
+        {},
+        {"https_proxy": "http://p:1"},
+        {"https_proxy": "http://a:1", "HTTPS_PROXY": "http://a:2"},
+        {"NO_PROXY": "api.example.net", "https_proxy": "http://p:1"},
+        {"NO_PROXY": "api.example.net"},  # inert list, no proxy
+    ):
+        assert _proxy_report(environ).status in (doctor.OK, doctor.WARN)
+
+
+@pytest.mark.unit
+def test_proxy_row_never_raises_on_a_hostile_environment():
+    """The never-raise contract, hostile-input edition: a mapping that raises
+    on ``get``, one that hands back non-strings, ``None`` values, an int
+    value, and a ``None`` endpoint host all read as answers."""
+
+    class Raises:
+        def get(self, _name, _default=""):
+            raise RuntimeError("boom")
+
+    class Junk:
+        def get(self, _name, default=""):
+            return object()  # never a str
+
+    for environ in (Raises(), Junk(), {None: None}, {"https_proxy": 123}):
+        row = _proxy_report(environ)
+        assert row.status in (doctor.OK, doctor.WARN)
+
+
+@pytest.mark.integration
+def test_doctor_reports_a_proxy_row_for_installed_openai_toml_wrappers(tmp_path):
+    """The wiring, not the pure logic: an installed OPENAI_TOML wrapper gets
+    one row keyed by its alias, and the endpoint host comes from the wrapper's
+    OWN profile — litellm's registry base_url is an empty placeholder, so
+    reading the registry instead of the profile would find no host and miss
+    the bypass."""
+    paths = Paths.from_home(tmp_path)
+    provider = with_base_url(get_provider("litellm"), "http://lit.example.net:4000/v1")
+    install_wrapper(
+        paths,
+        build_spec(agent="codex", provider=provider, model="gpt-4o", alias="lm"),
+    )
+
+    report = doctor.run(
+        paths,
+        environ={"https_proxy": "http://p:1", "NO_PROXY": "lit.example.net"},
+        launchctl_fn=_no_gui,
+        fetch=_fetch_models,
+    )
+
+    row = _row(report, "lm: proxy")
+    assert row.status == doctor.WARN
+    assert "lit.example.net" in row.detail
+    assert not report.has_failure
+
+
+@pytest.mark.integration
+def test_doctor_gives_no_proxy_row_to_other_shapes(tmp_path):
+    """The report is scoped to OPENAI_TOML wrappers (contract §4) — an
+    installed ANTHROPIC_ENV wrapper adds no proxy row."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "deepseek-ollama", token="ollama")
+
+    report = doctor.run(
+        paths,
+        environ={"https_proxy": "http://p:1"},
+        launchctl_fn=_no_gui,
+        fetch=_fetch_models,
+    )
+
+    assert not any(r.name.endswith(": proxy") for r in report.rows)

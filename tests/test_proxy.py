@@ -182,6 +182,27 @@ def test_the_two_owners_key_sets_are_disjoint():
 
 
 @pytest.mark.unit
+def test_no_standard_proxy_env_name_is_in_the_claude_managed_key_set():
+    """issue #76 (C4, T5): the eight standard proxy-env names — the contract's
+    whole C2 universe, wider than ``proxy.py``'s own four — must never join
+    ``MANAGED_ENV_KEYS``. ``switch native`` blanks everything that tuple owns,
+    so one proxy key there means the user's proxy turns itself off on every
+    backend change; this is the cheap pin standing next to the disjointness
+    test above."""
+    proxy_env_names = {
+        "https_proxy",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    }
+    assert not proxy_env_names & set(MANAGED_ENV_KEYS)
+
+
+@pytest.mark.unit
 def test_a_foreign_credential_is_redacted_in_the_preview(tmp_path, capsys):
     """A unified diff carries CONTEXT lines, so owning only the proxy keys
     does not stop this command printing the OTHER owner's token."""
