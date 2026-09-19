@@ -1556,8 +1556,20 @@ def rename_wrapper(
     if not dry_run:
         # Dry-run is "never writes anything" — the pointers included: repointing
         # them here would aim defaults at a wrapper that is never created.
+        # A failing pointer write is reported with context (issue #122), never
+        # a raw OSError traceback: the committed destination is correct and
+        # every pointer reader degrades to None, so there is nothing to roll
+        # back — the same posture as remove_wrapper's pointer clear and the
+        # profile path's active-pointer write.
         for agent_name in agents_to_repoint:
-            set_default_wrapper(paths, agent_name, new_alias)
+            try:
+                set_default_wrapper(paths, agent_name, new_alias)
+            except OSError as exc:
+                raise CodeHelperError(
+                    f"renamed {old_alias} -> {new_alias} but failed to repoint the "
+                    f"default-wrapper pointer for {agent_name} "
+                    f"({paths.state_file()}): {exc}"
+                ) from exc
 
     try:
         remove_wrapper(paths, old_alias, dry_run=dry_run)

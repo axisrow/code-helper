@@ -3250,6 +3250,43 @@ def test_rename_wrapper_default_pointer_follows(tmp_path):
 
 
 @pytest.mark.integration
+def test_rename_wrapper_repoint_failure_raises_with_context(tmp_path, monkeypatch):
+    """A failing default-pointer repoint must surface as the house-style
+    contextual error (issue #122) — operation, failing pointer and state path
+    named, OSError chained — not a raw traceback: the committed destination is
+    correct and every pointer reader degrades to None, so there is no
+    rollback (window W7 — a retry converges)."""
+    import codehelper.services.state as state_mod
+    from codehelper.services.state import set_default_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token=_SECRET_TOKEN)
+    set_default_wrapper(paths, "claude", "glm")
+    set_default_wrapper(paths, "codex", "glm")
+
+    def _boom(*_a, **_kw):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(state_mod, "set_default_wrapper", _boom)
+
+    with pytest.raises(CodeHelperError) as caught:
+        rename_wrapper(paths, "glm", "glm-moved")
+
+    message = str(caught.value)
+    assert "failed to repoint" in message
+    assert "default-wrapper pointer" in message
+    assert "glm-moved" in message
+    assert "state.json" in message  # the failing path
+    assert "permission denied" in message
+    assert isinstance(caught.value.__cause__, OSError)
+
+    # The destination is committed and correct; the repoint raised before the
+    # source removal, so the old file legitimately remains (retry converges).
+    assert is_installed(paths, "glm-moved")
+    assert is_managed(paths, "glm-moved")
+
+
+@pytest.mark.integration
 def test_rename_wrapper_openai_toml_moves_companion_and_rewrites_exec(tmp_path):
     """OPENAI_TOML is the alias-referencing shape: the companion moves and the
     exec line launches the NEW profile name."""
