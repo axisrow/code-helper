@@ -206,8 +206,14 @@ def test_tokens_env_row_printed_once_for_shared_env_vars(monkeypatch, capsys):
 
 @pytest.mark.integration
 def test_tokens_with_an_empty_store_reports_nothing_saved(capsys, monkeypatch):
-    for var in ("LITELLM_API_KEY", "ZAI_API_KEY", "OLLAMA_API_KEY", "DEEPSEEK_API_KEY"):
-        monkeypatch.delenv(var, raising=False)
+    # Cleared DYNAMICALLY off the registry: a hand-listed set goes stale with
+    # every new secret provider, and a variable set in the developer's real
+    # environment would leak into the view and fail the "nothing saved" claim.
+    from codehelper.services.model import PROVIDERS
+
+    for provider in PROVIDERS:
+        if provider.token_env_var:
+            monkeypatch.delenv(provider.token_env_var, raising=False)
 
     assert main(["tokens"]) == 0
 

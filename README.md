@@ -1,9 +1,10 @@
 # codehelper
 
 Generates and manages small bash wrapper scripts in `~/.local/bin` that point a
-coding agent — [Claude Code](https://claude.ai/code) or
-[Codex](https://developers.openai.com/codex/cli/) — at a model backend of your
-choice, without touching either tool's own configuration — except the
+coding agent — [Claude Code](https://claude.ai/code),
+[Codex](https://developers.openai.com/codex/cli/), or
+[Antigravity](https://antigravity.google) (`agy`) — at a model backend of your
+choice, without touching any tool's own configuration — except the
 explicit `set-default` command below, which patches Codex's own default and
 always backs it up first.
 
@@ -52,6 +53,11 @@ codehelper add --agent claude --provider litellm \
                 --base-url http://localhost:4000/v1 --model gpt-4o
 codehelper add --agent codex  --provider litellm \
                 --base-url http://localhost:4000/v1 --model gpt-4o
+
+# Antigravity (Google's agy): native Google OAuth — no API key at all;
+# see the "Google Antigravity (agy)" section below
+codehelper add agy-native                                  # -> gemini-3.8-flash-medium
+codehelper add agy-native --model gemini-3.8-flash-high    # tier rides the model id
 
 # discover what's available
 codehelper list                          # wrappers + install state
@@ -115,8 +121,8 @@ token-profile association.
 | `deepseek-ollama` | Claude Code | local Ollama daemon, `deepseek-v4-flash:0731-cloud` | literal token (`ollama`) |
 | `glm` | Claude Code | Z.ai (`https://api.z.ai/api/anthropic`), `glm-5.3` | secret (`ZAI_API_KEY`) |
 | `glm-ollama` | Claude Code | `ollama launch claude --model glm-5.2:cloud` | none — `ollama launch` authenticates itself |
-| `gemini-litellm` | Claude Code | LiteLLM proxy (see [Google Gemini via LiteLLM](#google-gemini-via-litellm)), `gemini-3.7-flash` | secret (`LITELLM_API_KEY`) |
 | `bai` | Claude Code | B.AI (`https://api.b.ai`), `qwen3.8-flash` (see [B.AI](#bai)) | secret (`BAI_API_KEY`) |
+| `agy-native` | Antigravity (`agy`) | Google's native Antigravity backend (see [Google Antigravity (agy)](#google-antigravity-agy)), `gemini-3.8-flash-medium` | none — native Google OAuth |
 
 There is no preset for the cloud DeepSeek API (`deepseek`/`deepseek-openai`
 providers) — use the constructor, as shown above.
@@ -125,64 +131,55 @@ Presets exist alongside the constructor because they pin a curated model
 choice, not just "an agent and a provider". There is no general `litellm`
 preset — a preset bundles a fixed provider address, and `litellm`'s whole
 point is that its address is yours, not this project's to bundle; use the
-constructor with `--base-url` instead (see below). `gemini-litellm` is the
-one exception: it exists precisely to bundle one concrete LiteLLM instance's
-address, and `--base-url` retargets it to yours. `bai` sits on the opposite
+constructor with `--base-url` instead (see below). `bai` sits on the opposite
 pole: its address is fixed registry data, so the preset bundles no URL and
 `--base-url` is refused.
 
-## Google Gemini via LiteLLM
+## Google Antigravity (agy)
 
-`gemini-litellm` gets Google's models into Claude Code and Codex — through a
-translating proxy, because **Google serves neither protocol the agents
-speak**: its OpenAI-compatible endpoint is chat-completions only (no
-`/responses`, which is all current Codex accepts), and there is no
-Anthropic-compatible endpoint at all (which is what Claude Code needs). The
-conversion is [LiteLLM](https://docs.litellm.ai/)'s job — codehelper only
-does the addressing, and never translates formats itself:
-
-```
-Claude Code ──(ANTHROPIC_BASE_URL=<litellm>, /v1/messages)──► LiteLLM ──► Google chat/completions
-Codex       ──(base_url=<litellm>/v1,       responses)  ──► LiteLLM ──► Google chat/completions
-```
+[Antigravity](https://antigravity.google) is Google's supported agentic CLI
+(binary `agy`). It is a first-class agent here, but with an honest limit:
+**its only pairing is its own native backend.**
 
 ```bash
-# claude: the preset carries its curated LiteLLM address and model
-codehelper add gemini-litellm                # prompts for LITELLM_API_KEY
-
-# point it at a different LiteLLM instance
-codehelper add gemini-litellm --base-url https://my-proxy.example.com
-
-# codex: the constructor form over the same proxy
-codehelper add --agent codex --provider litellm \
-                --base-url https://my-proxy.example.com --model gemini-3.7-flash
+codehelper add agy-native              # pins gemini-3.8-flash-medium
+codehelper add agy-native --model gemini-3.1-pro-high
 ```
 
-The proxy's `config.yaml` needs one entry per model, e.g.:
+The generated wrapper is deliberately bare — one dispatch line, nothing
+else:
 
-```yaml
-model_list:
-  - model_name: gemini-3.7-flash
-    litellm_params:
-      model: gemini/gemini-3.7-flash
-      api_key: os.environ/GEMINI_API_KEY
+```bash
+exec agy --model 'gemini-3.8-flash-medium' "$@"
 ```
 
-**Trust boundary, stated plainly:** the preset embeds a concrete proxy address,
-so `add gemini-litellm` resolves `LITELLM_API_KEY` and bakes it into a wrapper
-that sends every prompt to that address — press Enter on its chip and an
-already-running session is retargeted there too. If you serve several LiteLLM
-instances, note that token profiles are keyed by provider name (`litellm`),
-not by host: a profile cached for one instance will be offered for the other.
-Point the wrapper at a different instance with `--base-url`, and check `list`
-or the script itself for the `ANTHROPIC_BASE_URL` line whenever in doubt.
-
-Direct `codex × gemini` (and `claude × gemini` without a proxy) is
-impossible, not merely unbuilt: the `gemini` provider entry is **suspended**
-— `codehelper list providers` marks it, and `add` refuses the pairing with
-the normal "no common configuration mechanism" error instead of installing a
-wrapper that cannot work. If Google ever ships `/v1beta/openai/responses`,
-unsuspending is a one-line registry change.
+- **Auth is native Google OAuth** (`~/.gemini/` is agy's config home). There
+  is no API key to resolve, so the whole token step (env → cache → prompt)
+  is skipped, not stubbed — `codehelper tokens` lists nothing for it, and
+  the wrapper is a normal `0o755` script with no secret inside.
+- **`--model` is the only threaded flag** — agy documents it, and its model
+  ids encode the effort tier as a suffix (`gemini-3.8-flash-{high,medium,low}`
+  — `agy models` lists the current set, which is also what the TUI's model
+  picker falls back to, labelled "discovery unavailable"). Everything else
+  you type rides `"$@"`.
+- **No other provider pairs with agy, on purpose.** agy *does* document an
+  endpoint/API-key override (`GOOGLE_GEMINI_BASE_URL` + `GEMINI_API_KEY` +
+  `modelProvider: "gemini"` in `~/.gemini/antigravity-cli/settings.json`,
+  per Google's Installation & Auth guide) — but that surface speaks the
+  **Gemini wire protocol**, and no provider in this registry serves that
+  (LiteLLM's proxy speaks OpenAI and Anthropic formats on its frontend, not
+  Gemini's). Wiring `agy × litellm` anyway would install a wrapper that
+  cannot work — the exact failure class the old suspended `gemini` entry
+  existed to prevent. `add --agent agy --provider <anything-else>` refuses
+  with the normal "no common configuration mechanism" error. If a
+  Gemini-format frontend ever appears, it is one provider entry plus one
+  shape declaration away.
+- **No chipset row / no `set-default` equivalent yet.** The TUI lists agy
+  in `add`/`list`/`remove` in full; the live-toggle chipset row and a
+  `set-default`-style default-model patch are deliberately absent — agy's
+  `~/.gemini/settings.json` does carry a `model.name` key, but committing
+  this project as a second writer of that file is a decision that has not
+  been made (propose it before building it).
 
 ## Parallel sessions: native `claude` + wrappers at the same time
 

@@ -572,9 +572,10 @@ def _model_from_body(body: str) -> str | None:
     """The model that NAMES a rendered wrapper, or None.
 
     The sonnet tier for the env shape (the mid tier is what a user means by
-    "the model" when tiers differ) and the ``--model`` argument for the launch
-    shape. This identifies the wrapper; it does not describe it — see
-    :func:`_tiers_from_body` for the full env-shape configuration.
+    "the model" when tiers differ) and the ``--model`` argument for the
+    launch and agent-native shapes. This identifies the wrapper; it does not
+    describe it — see :func:`_tiers_from_body` for the full env-shape
+    configuration.
 
     Returns None for the ``OPENAI_TOML`` shape: its wrapper body is just
     ``exec codex --profile <alias> "$@"`` and embeds no model — the model lives
@@ -584,7 +585,9 @@ def _model_from_body(body: str) -> str | None:
     sonnet = _env_value(body, "ANTHROPIC_DEFAULT_SONNET_MODEL")
     if sonnet is not None:
         return sonnet
-    found = re.search(r"--model '(.*?)' --", body)
+    # The launch shape's --model is followed by the load-bearing ` --`
+    # separator; the agent-native shape's by the forwarded-args `"$@"` quote.
+    found = re.search(r"--model '(.*?)' (?=--|\")", body)
     return found.group(1).replace("'\"'\"'", "'") if found else None
 
 
@@ -1721,7 +1724,7 @@ def edit_wrapper(
         # Distinguish a corrupt marker from a SUSPENDED provider: the marker
         # parses fine, but the recorded pairing has no shape any more, so
         # the reconstruction fails. rename's "not recognisable" wording
-        # would lie about a gemini-style wrapper (#74).
+        # would lie about a suspended-provider wrapper.
         fields = _marker_fields(paths, alias)
         suspended: Provider | None = None
         if fields.get("provider"):
@@ -1841,6 +1844,7 @@ def edit_wrapper(
             effort_value = None
 
     # --- context window ----------------------------------------------------
+    window_set_changed = False
     if isinstance(context_window, _Unset):
         # Recorded answers are per-MODEL data (state.json keys on the model):
         # a changed covered set resets the answer and re-resolves below;
@@ -1851,10 +1855,8 @@ def edit_wrapper(
             model_edited or tiers_edited or subagent_edited or shape_changed
         )
         ctx_value: int | None = None if window_set_changed else old.context_window
-        ctx_reresolve = window_set_changed
     else:
         ctx_value = context_window
-        ctx_reresolve = False
 
     new_spec = build_spec(
         agent=old.agent,
@@ -1868,6 +1870,13 @@ def edit_wrapper(
         context_window=ctx_value,
         effort=effort_value,
     )
+    # Re-resolution is gated on the TARGET spec having a declaration surface
+    # (the same predicate the add path and the TUI edit screen's ctx row
+    # apply): a shape whose renderer emits no declaration must not prompt
+    # for an answer nothing renders. An EXPLICIT --context-window (the else
+    # branch above) bypasses the gate — the user decided, and the answer
+    # rides the spec and the marker even where nothing consumes it.
+    ctx_reresolve = window_set_changed and new_spec.can_declare_context_window
     if ctx_reresolve:
         resolved_ctx = resolve_context_window(
             paths, new_spec.window_models, interactive=not dry_run

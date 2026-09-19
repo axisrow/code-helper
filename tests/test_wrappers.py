@@ -88,36 +88,43 @@ def test_registry_has_the_five_curated_presets():
         "deepseek-ollama",
         "glm",
         "glm-ollama",
-        "gemini-litellm",
         "bai",
+        "agy-native",
     }
 
 
 @pytest.mark.unit
-def test_gemini_litellm_preset_targets_the_proxy_with_its_default_url():
-    """Issue #86: Google serves no Anthropic-compatible endpoint, so the
-    preset points claude at a LiteLLM instance — whose address is REQUIRED
-    by the provider and therefore ships IN the preset (mirror of
-    deepseek-ollama's local ollama default). --base-url overrides it; the
-    wrapper itself stays a self-contained ANTHROPIC_ENV script."""
-    from codehelper.services.spec import spec_from_preset
+def test_a_preset_can_carry_its_providers_required_url():
+    """Issue #86 mechanism, kept generic: a preset for a provider whose
+    address is REQUIRED ships that address IN the preset (--base-url
+    overrides it). No shipped preset carries one since the gemini story was
+    removed (issue #112), so this builds the preset locally — the mechanism
+    is spec-layer, not registry-layer."""
+    from codehelper.services.spec import Preset, TierModels, spec_from_preset
 
-    spec = spec_from_preset(get_preset("gemini-litellm"))
+    relay = Preset(
+        alias="relay",
+        agent="claude",
+        provider="litellm",
+        shape=ConfigShape.ANTHROPIC_ENV,
+        model="relay-model",
+        tier_models=TierModels.uniform("relay-model"),
+        base_url="https://relay.example.com",
+    )
+    spec = spec_from_preset(relay)
     assert spec.shape is ConfigShape.ANTHROPIC_ENV
-    assert spec.model == "gemini-3.7-flash"
-    assert spec.provider.base_url == "https://litellm.78.47.183.125.sslip.io"
+    assert spec.model == "relay-model"
+    assert spec.provider.base_url == "https://relay.example.com"
     assert spec.provider.base_url_policy == BaseUrlPolicy.REQUIRED
 
     # The override wins over the preset's curated address.
-    overridden = spec_from_preset(
-        get_preset("gemini-litellm"), base_url_override="https://mine.invalid"
-    )
+    overridden = spec_from_preset(relay, base_url_override="https://mine.invalid")
     assert overridden.provider.base_url == "https://mine.invalid"
 
 
 @pytest.mark.unit
 def test_bai_preset_targets_the_fixed_host_and_refuses_a_url_override():
-    """The mirror image of the gemini-litellm preset: bai's address is FIXED
+    """The mirror image of a carried-URL preset: bai's address is FIXED
     registry data (the one documented production host), so the preset ships
     no base_url and with_base_url refuses an override instead of retargeting."""
     spec = spec_from_preset(get_preset("bai"))
@@ -141,6 +148,65 @@ def test_glm_ollama_uses_the_launcher_shape():
     assert spec.agent.name == "claude"
     assert spec.model == "glm-5.2:cloud"
     assert spec.auth == "literal"  # no token — ollama launch authenticates itself
+
+
+@pytest.mark.unit
+def test_agy_native_preset_uses_the_agent_native_shape():
+    """The Antigravity preset (issue #112): agy × antigravity via AGENT_NATIVE,
+    native OAuth — no token, no tiers, just the pinned model."""
+    spec = get_spec("agy-native")
+    assert spec.shape is ConfigShape.AGENT_NATIVE
+    assert spec.agent.name == "agy"
+    assert spec.agent.binary == "agy"
+    assert spec.provider.name == "antigravity"
+    assert spec.model == "gemini-3.8-flash-medium"
+    assert spec.auth == "none"  # no token — agy's Google OAuth applies
+    assert spec.tier_models is None
+
+
+@pytest.mark.unit
+def test_agent_native_wrapper_renders_a_bare_dispatch():
+    """The AGENT_NATIVE body is the whole point of the shape: NO env block,
+    NO token, NO config — one exec line pinning --model. The model is
+    single-quoted (it can originate outside the registry); the binary is
+    bare (import-time validated registry constant)."""
+    from codehelper.services.render import render_script
+
+    spec = get_spec("agy-native")
+    body = render_script(spec, token="")
+    marker = (
+        "# codehelper: managed wrapper (agent=agy, provider=antigravity, "
+        "shape=agent-native)"
+    )
+    lines = body.splitlines()
+    assert lines[0] == "#!/bin/bash"
+    assert lines[1] == marker
+    assert lines[2] == "exec agy --model 'gemini-3.8-flash-medium' \"$@\""
+    assert len(lines) == 3
+
+
+@pytest.mark.integration
+def test_agent_native_wrapper_round_trips_through_its_marker(tmp_path):
+    """An installed agy wrapper reconstructs from its marker + body — the
+    model comes back out of the `--model` flag (the launch-shape regex's
+    sibling), and a byte-identical re-install is a no-op, so the ownership
+    guard recognises its own output. auth "none" → normal 0o755."""
+    import stat
+
+    paths = Paths.from_home(tmp_path)
+
+    assert install_wrapper(paths, "agy-native", token="") is True
+    script = paths.script_for("agy-native")
+    assert stat.S_IMODE(script.stat().st_mode) == 0o755
+
+    spec = spec_from_installed(paths, "agy-native")
+    assert spec is not None
+    assert spec.shape is ConfigShape.AGENT_NATIVE
+    assert spec.agent.name == "agy"
+    assert spec.provider.name == "antigravity"
+    assert spec.model == "gemini-3.8-flash-medium"
+
+    assert install_wrapper(paths, "agy-native", token="") is False
 
 
 @pytest.mark.integration
@@ -1378,41 +1444,6 @@ def test_openai_toml_body_for_non_ollama_provider_pins_extension_point():
     assert 'base_url = "https://api.acme.invalid/v1/"' in body
     assert "/v1/v1/" not in body
     assert 'wire_api = "chat"' in body
-
-
-@pytest.mark.unit
-def test_openai_toml_body_openai_root_provider_keeps_full_root():
-    """A base_url that IS the complete OpenAI root gets NO /v1/ appended.
-
-    openai_base_url would otherwise rewrite
-    https://generativelanguage.googleapis.com/v1beta/openai/ (Gemini's real
-    documented endpoint) to a nonexistent .../openai/v1/ and every Codex
-    request would 404. The provider declares base_url_is_openai_root=True
-    (data, not a name check) and the renderer honours it.
-
-    Built on an out-of-registry provider: gemini itself is suspended (#74)
-    and can no longer back a build_spec call — but the renderer feature is
-    not gemini's, it is any provider's with the flag set.
-    """
-    provider = Provider(
-        name="openai-root",
-        shapes=frozenset({ConfigShape.OPENAI_TOML}),
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        base_url_is_openai_root=True,
-        auth="secret",
-        token_env_var="ROOT_API_KEY",
-        model_list_api=ModelListAPI.OPENAI_V1,
-        wire_api="responses",
-    )
-    spec = build_spec(agent="codex", provider=provider, model="gem-2.5", alias="gem")
-    body = openai_toml_body(spec)
-    assert 'model_provider = "openai-root"' in body
-    assert "[model_providers.openai-root]" in body
-    assert (
-        'base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"' in body
-    )
-    assert "/v1beta/openai/v1/" not in body
-    assert 'wire_api = "responses"' in body
 
 
 @pytest.mark.unit
@@ -4007,15 +4038,33 @@ def test_edit_own_provider_disabled_gate(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
-def test_edit_a_suspended_provider_wrapper_gets_an_honest_message(tmp_path):
-    """A marker naming a suspended provider (gemini, #74) reconstructs to
-    None — the refusal must say WHY, not claim the marker is unreadable."""
+def test_edit_a_suspended_provider_wrapper_gets_an_honest_message(
+    tmp_path, monkeypatch
+):
+    """A marker naming a suspended provider reconstructs to None — the
+    refusal must say WHY, not claim the marker is unreadable. No shipped
+    entry is suspended since the gemini removal (issue #112), so a suspended
+    provider is registered for the test — the mechanism is generic."""
+    import codehelper.services.model as model_module
+    from codehelper.services.model import Provider
+
+    suspended = Provider(
+        name="suspended",
+        shapes=frozenset(),
+        suspended=True,
+        base_url="https://documented.invalid/surface/",
+        auth="secret",
+        token_env_var="SUSPENDED_API_KEY",
+        model_list_api=ModelListAPI.OPENAI_V1,
+    )
+    monkeypatch.setattr(model_module, "PROVIDERS", (*model_module.PROVIDERS, suspended))
+
     paths = Paths.from_home(tmp_path)
     install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
     script = paths.script_for("glm-codex")
     script.write_text(
         script.read_text(encoding="utf-8").replace(
-            "provider=ollama-direct", "provider=gemini"
+            "provider=ollama-direct", "provider=suspended"
         ),
         encoding="utf-8",
     )

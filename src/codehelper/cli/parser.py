@@ -76,6 +76,7 @@ from codehelper.services.model import (
     BaseUrlPolicy,
     ConfigShape,
     active_providers,
+    compatible_providers,
     get_agent,
     get_provider,
     get_provider_for_legacy_read,
@@ -107,6 +108,7 @@ from codehelper.services.secrets import (
     valid_active_profile,
 )
 from codehelper.services.spec import (
+    PRESETS,
     REASONING_EFFORTS,
     build_spec,
     get_preset,
@@ -500,10 +502,16 @@ def _add_resolve_context_window(spec, req, paths, explicit_window: int | None):
 
     An explicit ``--context-window`` is complete in itself: no prompt, no
     state write — scripted use already said what it means (``none`` maps to
-    0, an explicit suppression). Otherwise the service resolver decides:
+    0, an explicit suppression), and it is honored for EVERY shape (the
+    answer rides the spec and the marker even where no renderer consumes
+    it — the user decided). Otherwise the service resolver decides:
     a catalog-known model derives silently, a recorded answer is reused,
     an unknown model is asked once and remembered — unless ``--dry-run``
     is in effect, which never prompts (and therefore never records).
+    Resolution is GATED on ``spec.can_declare_context_window``: a shape
+    whose renderer has no surface for the declaration (agent-native) never
+    runs the ask/derive machinery, so its unknown-model models are never
+    prompted for an answer nothing would render.
 
     ``MenuCancelled`` (Esc at the window menu) propagates — ``main`` prints
     "cancelled" and exits; nothing is recorded, so the model is asked again
@@ -512,6 +520,8 @@ def _add_resolve_context_window(spec, req, paths, explicit_window: int | None):
     """
     if explicit_window is not None:
         return replace(spec, context_window=explicit_window)
+    if not spec.can_declare_context_window:
+        return spec
     # The model set comes from the SPEC — the same source the renderer
     # derives from — so the question covers every shape's declaration
     # (single-model shapes included; review round 3, PR #84).
@@ -613,16 +623,39 @@ def _add_spec_from_preset(req, paths, profile_name):
         preset = get_preset(req.name)
     except CodeHelperError as unknown_preset:
         # A bare agent name is a likely mistake worth teaching, not just
-        # rejecting.
+        # rejecting. The hint must name a command that WORKS for THIS agent:
+        # its preset when one exists (agy → `add agy-native`), else a
+        # provider the agent actually pairs with (compatible_providers —
+        # the hard-coded "ollama" this message once suggested is a retired
+        # spelling for new input, and an agent-incompatible provider would
+        # make the suggested command fail with the very "no common
+        # configuration mechanism" error add exists to prevent).
         try:
-            get_any_agent(paths, req.name)
+            agent_obj = get_any_agent(paths, req.name)
         except CodeHelperError:
             # Re-raise get_preset's own message: it names the known presets,
             # and that hint matters most in exactly this case.
             raise unknown_preset from None
+        agent_presets = [p.alias for p in PRESETS if p.agent == req.name]
+        if agent_presets:
+            preset_hint = (
+                agent_presets[0]
+                if len(agent_presets) == 1
+                else (f"{agent_presets[0]} (one of: {', '.join(agent_presets)})")
+            )
+            raise CodeHelperError(
+                f"unknown wrapper name: {req.name} — {req.name} is an agent; "
+                f"try: codehelper add {preset_hint}, or the constructor form: "
+                f"codehelper add --agent {req.name} --provider <provider> "
+                f"--model <model>"
+            ) from None
+        compatible = compatible_providers(
+            agent_obj, disabled=state.disabled_providers(paths)
+        )
+        provider_hint = compatible[0].name if compatible else "<provider>"
         raise CodeHelperError(
             f"unknown wrapper name: {req.name} — {req.name} is an agent; "
-            f"try: codehelper add --agent {req.name} --provider ollama "
+            f"try: codehelper add --agent {req.name} --provider {provider_hint} "
             f"--model <model>"
         ) from None
     # Same disabled gate as the constructor path (issue #89) — a preset whose
@@ -827,10 +860,10 @@ def _handle_add(args: argparse.Namespace | AddRequest) -> int:
     if not using_axes and req.base_url:
         # Checked before the preset branch so the message stays about the
         # flag, not about an unrecognised preset name. One exception
-        # (issue #86): a preset curated against a REQUIRED-provider instance
-        # (gemini-litellm) carries that instance's address as a DEFAULT —
-        # --base-url may retarget it, exactly the override the constructor
-        # form takes.
+        # (issue #86): a preset whose provider takes a runtime URL
+        # (REQUIRED/OVERRIDABLE policy) accepts a carried or defaulted
+        # address — --base-url may retarget it, exactly the override the
+        # constructor form takes.
         preset_takes_url = False
         if req.name:
             try:

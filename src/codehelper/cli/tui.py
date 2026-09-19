@@ -2736,13 +2736,12 @@ def _register_edit_axes() -> None:
         return getattr(spec, "tier_models", None) is not None
 
     def _launch_ctx(spec: object) -> bool:
-        # The ctx declaration rides the env (and TOML) sinks; a launch
-        # wrapper declares it only when the AGENT itself has an env-capable
-        # provider surface — data off agent.shapes, never a name check.
-        from codehelper.services.model import ConfigShape as _CS
-
-        agent = spec.agent
-        return _CS.ANTHROPIC_ENV in agent.shapes
+        # Delegates to the ONE predicate (WrapperSpec.can_declare_context_window):
+        # the ctx declaration rides the env (and TOML) sinks; a launch wrapper
+        # declares it only when the AGENT itself has an env-capable provider
+        # surface — data off shape + agent.shapes, never a name check. The add
+        # path and edit_wrapper's re-resolve gate on the same property.
+        return getattr(spec, "can_declare_context_window", False)
 
     _EDIT_AXES.update(
         {

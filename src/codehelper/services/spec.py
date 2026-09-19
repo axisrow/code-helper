@@ -165,6 +165,33 @@ class WrapperSpec:
             models.append(self.subagent_model)
         return models
 
+    @property
+    def can_declare_context_window(self) -> bool:
+        """Whether ANY writer of this spec's shape can emit the declaration.
+
+        The ONE gate on context-window resolution: the interactive question
+        (and the state-backed re-derivation) is worth running only when the
+        rendered output has a surface to carry the answer — the env block
+        plus ``--settings`` payload (ANTHROPIC_ENV), the TOML profile's
+        ``model_context_window`` (OPENAI_TOML), or the ``--settings``
+        payload a launch wrapper forwards to a claude-like agent
+        (OLLAMA_LAUNCH, conditional on the agent declaring ANTHROPIC_ENV —
+        the same predicate the TUI edit screen's ``_launch_ctx`` row gate
+        has always applied). AGENT_NATIVE emits nothing with an address or
+        an env in it, so its question would never render: ask-only-when-
+        declarable, mirroring ``window_models`` being the single ask/derive
+        set. An EXPLICIT ``--context-window`` answer bypasses this gate —
+        the user decided, the answer rides the spec and the ``ctx=``
+        marker even where no renderer consumes it.
+        """
+        if self.shape is ConfigShape.ANTHROPIC_ENV:
+            return True
+        if self.shape is ConfigShape.OPENAI_TOML:
+            return True
+        if self.shape is ConfigShape.OLLAMA_LAUNCH:
+            return ConfigShape.ANTHROPIC_ENV in self.agent.shapes
+        return False
+
 
 def suggest_alias(model: str, agent_name: str, profile_name: str | None = None) -> str:
     """Derive a default alias, e.g. ``glm-5:cloud`` + ``codex`` -> ``glm-5-codex``.
@@ -351,13 +378,6 @@ class Preset:
 
 _DEEPSEEK_MODEL = "deepseek-v4-flash:0731-cloud"
 
-# The current Gemini flash, as served by the LiteLLM proxy the
-# gemini-litellm preset is curated against (model_name in the proxy's
-# config.yaml → litellm_params.model: gemini/gemini-3.7-flash).
-_GEMINI_MODEL = "gemini-3.7-flash"
-
-_LITELLM_PROXY_URL = "https://litellm.78.47.183.125.sslip.io"
-
 
 PRESETS: tuple[Preset, ...] = (
     Preset(
@@ -389,22 +409,6 @@ PRESETS: tuple[Preset, ...] = (
         description="Claude Code → glm-5.2:cloud via `ollama launch claude`",
     ),
     Preset(
-        alias="gemini-litellm",
-        agent="claude",
-        provider="litellm",
-        shape=ConfigShape.ANTHROPIC_ENV,
-        model=_GEMINI_MODEL,
-        tier_models=TierModels.uniform(_GEMINI_MODEL),
-        # Google serves no Anthropic-compatible endpoint (#74), so Gemini
-        # reaches Claude Code only through a translating proxy — this preset
-        # is curated against the user's own LiteLLM instance, whose address
-        # rides in base_url below (--base-url points it at a different one).
-        # The proxy also carries the /v1/responses codex needs, so the codex
-        # pairing is `add --agent codex --provider litellm --base-url …`.
-        base_url=_LITELLM_PROXY_URL,
-        description=f"Claude Code → {_GEMINI_MODEL} via the LiteLLM proxy",
-    ),
-    Preset(
         alias="bai",
         agent="claude",
         provider="bai",
@@ -417,9 +421,27 @@ PRESETS: tuple[Preset, ...] = (
         # subagent_model stays None (the glm-preset convention). base_url
         # stays empty — mandatory for a FIXED-address provider (the bai
         # registry entry carries the only documented host; --base-url is
-        # refused), the mirror image of the gemini-litellm preset, which
-        # exists precisely to carry one.
+        # refused), the mirror image of a preset for a REQUIRED-policy
+        # provider, which exists precisely to carry one.
         description="Claude Code → B.AI",
+    ),
+    Preset(
+        # "agy-native", NOT "agy": the preset alias becomes a wrapper file
+        # name, and a wrapper named after the agent's own binary is a
+        # reserved name (naming.RESERVED_ALIASES — `exec agy` from
+        # ~/.local/bin/agy would re-invoke itself). `add agy` therefore
+        # lands on the agent-name teaching message pointing at the
+        # constructor form; this preset is the one-word install.
+        alias="agy-native",
+        agent="agy",
+        provider="antigravity",
+        shape=ConfigShape.AGENT_NATIVE,
+        # The current flagship generation's mid effort tier (`agy models`,
+        # verified 2026-09): the tier rides the model id as a suffix, so one
+        # model choice pins both. A different tier is one --model override
+        # away (`agy-native --model gemini-3.8-flash-high`).
+        model="gemini-3.8-flash-medium",
+        description="Google Antigravity CLI → native Google backend (OAuth)",
     ),
 )
 

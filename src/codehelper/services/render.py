@@ -142,8 +142,14 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "deepseek-v4-pro": 1_000_000,
     "deepseek-v4-flash": 1_000_000,
     "deepseek-v4-flash-vision-exp": 1_000_000,
-    # Google's documented window for the gemini-litellm preset's model
-    # (ai.google.dev/gemini-api/docs/latest-model).
+    # Kept for ALREADY-INSTALLED wrappers (issue #112 review): gemini-3.7-flash
+    # was the removed gemini-litellm preset's model — the preset and the
+    # gemini provider are dead history, but the MODEL is not, and its window
+    # is still 1M (ai.google.dev model docs). Its wrappers' markers carry no
+    # `ctx=` (the #82 rule: catalog-known models record nothing), so dropping
+    # this entry would make the next re-render (edit-token/edit) silently
+    # lose the 1M CLAUDE_CODE_MAX_CONTEXT_TOKENS declaration those wrappers
+    # still carry. Catalog entries are per-model data, not provider story.
     "gemini-3.7-flash": 1_000_000,
     # B.AI's documented window for gpt-6-astra (docs.b.ai; 1,050,000 input /
     # 128,000 output) — the catalog's first non-1M value: windows are
@@ -340,7 +346,35 @@ def _render_openai_toml(spec: WrapperSpec, token: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def openai_base_url(provider_base_url: str, is_openai_root: bool = False) -> str:
+def _render_agent_native(spec: WrapperSpec, token: str) -> str:
+    """``exec <agent> --model <model> "$@"`` — the AGENT_NATIVE wrapper.
+
+    The honest minimal form: the agent's own native auth applies (for ``agy``,
+    Google OAuth against its ``~/.gemini`` config home), so there is NO env
+    block, NO token, NO config file — this tool writes nothing the agent would
+    have to be pointed with. ``token`` is therefore unused by contract: this
+    renderer is only ever dispatched for ``auth="none"`` providers, where
+    ``build_spec``/``_add_resolve_token`` have already skipped resolution —
+    a fake env var would be a lie, and an assertion-here would be dead code
+    for a state the shape system cannot produce.
+
+    ``spec.model`` goes through :func:`_shell_single_quote` like every value
+    that can originate outside the registry; ``agent.binary`` is interpolated
+    bare (registry constant, constrained at import time — same rule as the
+    other renderers). Only ``--model`` is threaded: it is the one documented
+    flag the wrapper exists to pin (agy's model ids encode the effort tier,
+    so a separate ``--effort`` would be redundant). Everything the user adds
+    rides ``"$@"`` untouched.
+    """
+    del token  # native auth: there is no credential to place anywhere
+    return (
+        f"#!/bin/bash\n"
+        f"{_marker(spec)}\n"
+        f'exec {spec.agent.binary} --model {_shell_single_quote(spec.model)} "$@"\n'
+    )
+
+
+def openai_base_url(provider_base_url: str) -> str:
     """Derive the OpenAI-compatible ``base_url`` for the TOML profile.
 
     A dual-shape provider like ollama serves both the Anthropic protocol and
@@ -350,21 +384,12 @@ def openai_base_url(provider_base_url: str, is_openai_root: bool = False) -> str
     would double it (``.../v1/v1/``) and every request 404s. Detect the suffix
     and append only when it is absent — one renderer serving both shapes.
 
-    ``is_openai_root`` is the third case: a provider whose ``base_url`` IS the
-    complete OpenAI-compatible root (e.g. Gemini's
-    ``https://generativelanguage.googleapis.com/v1beta/openai/``) must be
-    returned unchanged — appending ``/v1/`` would rewrite it to a nonexistent
-    ``.../openai/v1/`` and every request 404s. It is declared data
-    (``Provider.base_url_is_openai_root``), never a provider-name check.
-
     Public (not ``_``-prefixed): ``services/codex_default.py`` reuses this
     exact derivation for ``set-default``, so the two OPENAI_TOML writers (a
     per-alias profile here, Codex's own default config there) cannot disagree
     on how a provider's ``base_url`` becomes a ``/v1/`` endpoint.
     """
     root = provider_base_url.rstrip("/")
-    if is_openai_root:
-        return root + "/"
     if root.endswith("/v1"):
         return root + "/"
     return root + "/v1/"
@@ -516,9 +541,7 @@ def openai_toml_body(spec: WrapperSpec) -> str:
     """
     table = spec.provider.name
     display_name = spec.provider.description or spec.provider.name
-    base_url = openai_base_url(
-        spec.provider.base_url, spec.provider.base_url_is_openai_root
-    )
+    base_url = openai_base_url(spec.provider.base_url)
     lines = [
         f"{_marker(spec)}\n",
         f'model = "{toml_string(spec.model)}"\n',
@@ -590,6 +613,7 @@ _RENDERERS: dict[ConfigShape, Callable[[WrapperSpec, str], str]] = {
     ConfigShape.ANTHROPIC_ENV: _render_anthropic_env,
     ConfigShape.OLLAMA_LAUNCH: _render_ollama_launch,
     ConfigShape.OPENAI_TOML: _render_openai_toml,
+    ConfigShape.AGENT_NATIVE: _render_agent_native,
 }
 
 

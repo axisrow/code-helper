@@ -206,7 +206,7 @@ def list_models(
         # openai_base_url always returns a trailing "/" (e.g. ".../v1/") — this
         # rstrip is NOT redundant with the one above: without it the "url ="
         # concatenation below doubles the slash (".../v1//models").
-        base = openai_base_url(base, provider.base_url_is_openai_root).rstrip("/")
+        base = openai_base_url(base).rstrip("/")
     url = base + _PATHS[api]
 
     auth_token = token if provider.auth == "secret" else ""

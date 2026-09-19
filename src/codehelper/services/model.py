@@ -110,6 +110,26 @@ class ConfigShape(StrEnum):
     #: distinct from "incompatible", a different, honest error.
     OPENAI_TOML = "openai-toml"
 
+    #: Launch the agent binary DIRECTLY — ``exec <binary> --model <model> "$@"``
+    #: — with NO address, NO credential, and NO config file written by this
+    #: tool. The agent's own native auth (for ``agy``: Google OAuth against
+    #: its ``~/.gemini`` config home) applies, which is why the token
+    #: resolution step (env → cache → prompt) is SKIPPED for this shape, not
+    #: stubbed: ``auth="none"`` means "the launcher authenticates", and a fake
+    #: env var would be a lie that outlives this comment. Only ``--model`` is
+    #: threaded, and only because the agent documents the flag. A provider
+    #: that pairs through this shape therefore carries no base_url (see
+    #: ``_validate_provider``'s address-consuming rule) and no credential.
+    #:
+    #: Today declared only by the ``agy`` × ``antigravity`` pairing. The
+    #: documented endpoint override for ``agy`` (``GOOGLE_GEMINI_BASE_URL``,
+    #: per Google's Installation & Auth guide) speaks the GEMINI wire
+    #: protocol — no provider in this registry serves that on its frontend,
+    #: so no second pairing is offered: wiring one to an OpenAI/Anthropic
+    #: surface would install a wrapper that cannot work, the exact class of
+    #: bug the suspended gemini entry (#74) existed to prevent.
+    AGENT_NATIVE = "agent-native"
+
     #: Patches the ``env`` block of Claude Code's OWN ``~/.claude/settings.json``
     #: in place (``services/claude_settings.py``, the ``switch`` command) —
     #: instead of generating a wrapper script, it changes what an ALREADY
@@ -150,6 +170,7 @@ _SHAPE_PRIORITY: tuple[ConfigShape, ...] = (
     ConfigShape.ANTHROPIC_ENV,
     ConfigShape.OPENAI_TOML,
     ConfigShape.OLLAMA_LAUNCH,
+    ConfigShape.AGENT_NATIVE,
     # Last, and inert in practice: no Agent declares ANTHROPIC_SETTINGS (see
     # its docstring), so `common` can never contain it and this priority slot
     # is never actually consulted by resolve_shape. Listed anyway so the
@@ -295,16 +316,6 @@ class Provider:
     #: See :class:`BaseUrlPolicy`. Constrains what ``base_url`` may hold —
     #: enforced at import time by :func:`_validate_provider`.
     base_url_policy: BaseUrlPolicy = BaseUrlPolicy.FIXED
-    #: ``base_url`` is already the complete OpenAI-compatible root, so the
-    #: OPENAI_TOML renderer must NOT append ``/v1/`` to it. Most OpenAI-only
-    #: providers follow the ``/v1``-suffix convention (``render.openai_base_url``
-    #: appends ``/v1/`` to a bare root and ``/`` to a ``/v1``-suffixed one), but
-    #: a provider whose documented endpoint IS the full OpenAI surface (e.g.
-    #: Gemini's ``https://generativelanguage.googleapis.com/v1beta/openai/``)
-    #: would otherwise be rewritten to a nonexistent ``.../openai/v1/`` and
-    #: every request 404s. Declared data, never a provider-name check — the
-    #: renderer branches on this field, exactly like ``env_reset``.
-    base_url_is_openai_root: bool = False
     #: ``"literal"`` — a non-secret token baked into the script (Ollama's local
     #: daemon accepts ``"ollama"``); ``"secret"`` — resolved from env/prompt and
     #: the script is written 0o700; ``"none"`` — the launcher authenticates.
@@ -347,12 +358,10 @@ class Provider:
     #: data (mirror of ``env_reset``), never a name check: the only reader is
     #: ``_validate_provider``, which permits empty ``shapes`` solely when this
     #: flag is set — an accidental shapeless entry stays an import error.
-    #: Today's one case is ``gemini`` (#74): Google's OpenAI-compat surface is
-    #: chat-completions only while Codex accepts ``wire_api="responses"``
-    #: alone, and no Anthropic-compatible surface exists at all — so the
-    #: direct pairing is impossible until Google ships ``/responses``. The
-    #: entry keeps its endpoint/auth/model-list fields so unsuspending is one
-    #: commit: restore the shape + its ``wire_api`` and drop this flag.
+    #: No shipped entry carries this flag today (the ``gemini`` entry it
+    #: existed for was removed with issue #112); it stays as the declared
+    #: escape hatch for a future documented endpoint whose real surfaces
+    #: match no shape.
     suspended: bool = False
     #: Fallback model names offered when :func:`~codehelper.services.
     #: models_api.list_models` returns none — either because the provider
@@ -384,6 +393,24 @@ AGENTS: tuple[Agent, ...] = (
         # `codex × z.ai` is (correctly) impossible today.
         shapes=frozenset({ConfigShape.OPENAI_TOML, ConfigShape.OLLAMA_LAUNCH}),
         description="OpenAI Codex CLI",
+    ),
+    Agent(
+        name="agy",
+        binary="agy",
+        # Antigravity (Google's agentic CLI) runs on its OWN native backend —
+        # Google OAuth against the `~/.gemini` config home, no API token — so
+        # its only honest pairing is AGENT_NATIVE: launch `agy` directly and
+        # thread the documented `--model` flag. Deliberately NOT
+        # OLLAMA_LAUNCH: `ollama launch --help` (ollama 0.32.13) lists no
+        # agy/antigravity integration, so the launcher cannot configure it.
+        # Deliberately NOT a base_url/token shape either: the agent DOES
+        # document an endpoint override (GOOGLE_GEMINI_BASE_URL +
+        # GEMINI_API_KEY + modelProvider="gemini", per Google's Installation
+        # & Auth guide), but that surface speaks the GEMINI wire protocol —
+        # no provider in this registry serves it, so any pairing built on it
+        # would be a wrapper that cannot work. See ConfigShape.AGENT_NATIVE.
+        shapes=frozenset({ConfigShape.AGENT_NATIVE}),
+        description="Google Antigravity CLI",
     ),
     # The remaining 13 are every OTHER *CLI* integration `ollama launch`
     # supports (verified against `ollama launch --help`, ollama 0.32.13) —
@@ -521,44 +548,6 @@ PROVIDERS: tuple[Provider, ...] = (
         description="LiteLLM proxy (user-supplied base URL)",
     ),
     Provider(
-        name="gemini",
-        # SUSPENDED (issue #74): the direct pairing is impossible in both
-        # directions, so the entry declares NO shapes — every `add` cell
-        # resolves to "no common configuration mechanism" instead of
-        # installing a wrapper that cannot work:
-        #   - Google's OpenAI-compat surface
-        #     (https://generativelanguage.googleapis.com/v1beta/openai/) is
-        #     chat-completions only — `/responses` 404s (confirmed by Google
-        #     on the developer forum, still true as of 2026-08) — while Codex
-        #     hard-rejects `wire_api="chat"` at config load (its WireApi enum
-        #     has a single Responses variant; openai/codex#7782). Both values
-        #     this profile could carry are dead.
-        #   - Google exposes no Anthropic-compatible /v1/messages, so
-        #     claude x gemini has no shape either (and never did).
-        # The working path for Google models is a translating proxy: the
-        # `gemini-litellm` preset points claude at a LiteLLM instance
-        # (preset-supplied base_url, `--base-url` overrides), and
-        # `codex × litellm` rides the same proxy's /v1/responses.
-        # UNSUSPENDING (when Google actually serves /v1beta/openai/responses
-        # — verify with curl, not rumors): set
-        # `shapes=frozenset({ConfigShape.OPENAI_TOML})` and drop
-        # `suspended=True`. Everything below is kept exactly as the un
-        # suspended entry needs it — endpoint fields, credential, discovery,
-        # and the wire_api the restored profile will carry.
-        shapes=frozenset(),
-        suspended=True,
-        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        # The stored base_url IS the complete OpenAI-compatible root — the
-        # renderer must not append /v1/ to it (that would 404). See the field
-        # docstring on Provider.base_url_is_openai_root.
-        base_url_is_openai_root=True,
-        auth="secret",
-        token_env_var="GEMINI_API_KEY",
-        model_list_api=ModelListAPI.OPENAI_V1,
-        wire_api="responses",
-        description="Google Gemini (suspended — needs a proxy, see #74)",
-    ),
-    Provider(
         name="deepseek",
         # DeepSeek's Anthropic-compatible surface (https://api.deepseek.com/anthropic)
         # drives Claude Code directly — the same two shapes as zai: a generated
@@ -585,13 +574,13 @@ PROVIDERS: tuple[Provider, ...] = (
     Provider(
         name="deepseek-openai",
         # DeepSeek's OpenAI-compatible surface (https://api.deepseek.com, /v1 is
-        # a path alias) feeds Codex's TOML profile — the same single shape as
-        # gemini. DeepSeek natively serves the Responses API (POST /responses,
+        # a path alias) feeds Codex's TOML profile — a single OPENAI_TOML
+        # shape. DeepSeek natively serves the Responses API (POST /responses,
         # added for Codex), so wire_api="responses" is the documented value.
         shapes=frozenset({ConfigShape.OPENAI_TOML}),
         base_url="https://api.deepseek.com",
-        # A bare root, NOT is_openai_root: openai_base_url appends /v1/ (the
-        # documented OpenAI surface), exactly like litellm's bare-root handling.
+        # A bare root: openai_base_url appends /v1/ (the documented OpenAI
+        # surface), exactly like litellm's bare-root handling.
         auth="secret",
         token_env_var="DEEPSEEK_API_KEY",
         model_list_api=ModelListAPI.OPENAI_V1,
@@ -623,9 +612,9 @@ PROVIDERS: tuple[Provider, ...] = (
             }
         ),
         base_url="https://api.b.ai",
-        # A bare root, NOT is_openai_root — deepseek-openai's documented
-        # convention: /v1/ is appended for the TOML profile and discovery,
-        # never for the Anthropic surface.
+        # A bare root — deepseek-openai's documented convention: /v1/ is
+        # appended for the TOML profile and discovery, never for the
+        # Anthropic surface.
         auth="secret",
         token_env_var="BAI_API_KEY",
         model_list_api=ModelListAPI.OPENAI_V1,
@@ -662,7 +651,7 @@ PROVIDERS: tuple[Provider, ...] = (
             }
         ),
         base_url="http://127.0.0.1:3002",
-        # A bare root, NOT is_openai_root — same handling as bai above.
+        # A bare root — same handling as bai above.
         auth="secret",
         token_env_var="FREELLMAPI_API_KEY",
         model_list_api=ModelListAPI.OPENAI_V1,
@@ -679,6 +668,45 @@ PROVIDERS: tuple[Provider, ...] = (
             "deepseek-v4-flash",
         ),
         description="FreeLLMAPI local proxy (one host, both protocols)",
+    ),
+    Provider(
+        name="antigravity",
+        # Antigravity's NATIVE backend: the Google-hosted service `agy`
+        # authenticates to itself via OAuth (`~/.gemini/oauth_creds.json`).
+        # It is not an address anyone configures — no base_url, no credential
+        # — and it pairs only through AGENT_NATIVE (see that shape's
+        # docstring for why the documented GOOGLE_GEMINI_BASE_URL override
+        # does NOT become a pairing). FIXED + empty base_url is legal here
+        # because its shapes consume no address (_validate_provider).
+        #
+        # model_list_api stays NONE: the backend is OAuth-protected and this
+        # tool does no subprocess discovery, so `agy models` output cannot be
+        # fetched over HTTP — these known_models (verified against
+        # `agy models`, agy 2026-09) ARE the only source for the picker, and
+        # the TUI labels them "known models — discovery unavailable". Model
+        # names encode the effort tier as a suffix, so `--model` alone
+        # carries the tier choice; the CLI's own `--effort` flag is redundant
+        # for these ids.
+        shapes=frozenset({ConfigShape.AGENT_NATIVE}),
+        auth="none",
+        model_list_api=ModelListAPI.NONE,
+        known_models=(
+            "gemini-3.8-flash-high",
+            "gemini-3.8-flash-medium",
+            "gemini-3.8-flash-low",
+            "gemini-3.7-flash-high",
+            "gemini-3.7-flash-medium",
+            "gemini-3.7-flash-low",
+            "gemini-3.6-flash-high",
+            "gemini-3.6-flash-medium",
+            "gemini-3.6-flash-low",
+            "gemini-3.1-pro-high",
+            "gemini-3.1-pro-low",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+            "gpt-oss-120b-medium",
+        ),
+        description="Google Antigravity (native OAuth — `agy`'s own backend)",
     ),
     Provider(
         name="native",
@@ -703,6 +731,28 @@ PROVIDERS: tuple[Provider, ...] = (
 )
 
 
+#: The shapes whose writers derive an endpoint from ``provider.base_url`` —
+#: the ANTHROPIC env block (``render._render_anthropic_env``), the Codex TOML
+#: profile (``render.openai_toml_body`` and ``codex_default``), the
+#: ``--settings`` payload ``render._render_ollama_launch`` forwards to
+#: claude-like agents (conditional on the agent declaring ANTHROPIC_ENV), and
+#: the ``switch`` patch (``claude_settings.resolve_switch_patch``).
+#: AGENT_NATIVE is the one shape that reads no address — the agent's own
+#: native backend carries the endpoint and this tool writes nothing with an
+#: address in it — so a provider is legitimately address-free exactly when
+#: ``env_reset`` is set or its shapes intersect none of these.
+#: ``_validate_provider`` keys its must-carry-an-address rule on this set,
+#: never on a name.
+_ADDRESS_CONSUMING_SHAPES: frozenset[ConfigShape] = frozenset(
+    {
+        ConfigShape.ANTHROPIC_ENV,
+        ConfigShape.OPENAI_TOML,
+        ConfigShape.OLLAMA_LAUNCH,
+        ConfigShape.ANTHROPIC_SETTINGS,
+    }
+)
+
+
 def _validate_provider(provider: Provider) -> None:
     """Fail on a malformed :class:`Provider` entry.
 
@@ -715,10 +765,9 @@ def _validate_provider(provider: Provider) -> None:
     if not _BINARY_RE.match(provider.name):
         raise CodeHelperError(f"invalid provider name in registry: {provider.name!r}")
     # A shapeless provider pairs with nothing, so it is an authoring mistake —
-    # UNLESS it is declared suspended (#74): a documented endpoint whose real
-    # surfaces currently match no shape (gemini: chat-only compat while Codex
-    # accepts responses alone) stays registered and visible, honestly inert.
-    # The flag is the proof the emptiness is deliberate; an accidental
+    # UNLESS it is declared suspended: a documented endpoint whose real
+    # surfaces currently match no shape stays registered and visible, honestly
+    # inert. The flag is the proof the emptiness is deliberate; an accidental
     # shapeless entry still fails here at import time.
     if not provider.shapes and not provider.suspended:
         raise CodeHelperError(
@@ -795,11 +844,15 @@ def _validate_provider(provider: Provider) -> None:
         )
     # env_reset is exempt from this FIXED/OVERRIDABLE-must-carry-a-base_url
     # rule: it is checked, more specifically, by the env_reset block below —
-    # an env_reset provider is SUPPOSED to have no base_url at all.
+    # an env_reset provider is SUPPOSED to have no base_url at all. The same
+    # goes for a provider whose shapes consume no address (AGENT_NATIVE —
+    # see _ADDRESS_CONSUMING_SHAPES): there is nothing for a missing
+    # base_url to break.
     if (
         not provider.env_reset
         and provider.base_url_policy is not BaseUrlPolicy.REQUIRED
         and not provider.base_url
+        and provider.shapes & _ADDRESS_CONSUMING_SHAPES
     ):
         raise CodeHelperError(
             f"provider {provider.name!r} declares base_url_policy="

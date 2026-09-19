@@ -332,3 +332,48 @@ def test_edit_request_from_namespace_sentinel_contract():
 def test_edit_request_rejects_a_malformed_tier():
     with pytest.raises(Exception, match="TIER=MODEL"):
         EditWrapperRequest.from_namespace(SimpleNamespace(name="glm", tier=["haiku"]))
+
+
+@pytest.mark.integration
+def test_edit_agy_native_model_change_never_prompts_for_a_context_window(
+    tmp_path, monkeypatch
+):
+    """A model edit resets the covered set, which used to re-run the ctx
+    resolver — for an AGENT_NATIVE wrapper that resolver can only ever ask
+    (every antigravity model is catalog-unknown) and the answer would never
+    render. The re-resolve is gated on the same declaration-surface
+    predicate as add; an EXPLICIT --context-window still rides."""
+    import codehelper.services.context_window as context_window_service
+
+    def _explode(*_a, **_kw):  # pragma: no cover - must not run
+        raise AssertionError("agent-native wrappers must not resolve a window")
+
+    monkeypatch.setattr(context_window_service, "resolve_context_window", _explode)
+
+    assert main(["add", "agy-native"]) == 0
+
+    assert main(["edit", "agy-native", "--model", "gemini-3.1-pro-low"]) == 0
+    body = (
+        Paths.from_home(tmp_path).script_for("agy-native").read_text(encoding="utf-8")
+    )
+    assert "exec agy --model 'gemini-3.1-pro-low' \"$@\"" in body
+    assert "ctx=" not in body
+
+    # Explicit flag: honored and recorded, resolver still untouched.
+    assert (
+        main(
+            [
+                "edit",
+                "agy-native",
+                "--model",
+                "gemini-3.1-pro-low",
+                "--context-window",
+                "none",
+            ]
+        )
+        == 0
+    )
+    body = (
+        Paths.from_home(tmp_path).script_for("agy-native").read_text(encoding="utf-8")
+    )
+    assert "ctx=0)" in body

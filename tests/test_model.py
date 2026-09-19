@@ -56,30 +56,36 @@ _OPENAI_ONLY = Provider(
 def test_registry_covers_ollama_launch_integrations():
     """All 15 CLI integrations `ollama launch` supports are registered.
 
-    Superset (not equality) on the two hand-built agents, plus an exact count
+    Superset (not equality) on the hand-built agents, plus an exact count
     for the whole registry — this is the pin that would catch a launch-only
     agent silently dropped or duplicated, without being so exact it breaks the
     moment a future agent is added deliberately.
     """
     names = {a.name for a in AGENTS}
-    assert {"claude", "codex"} <= names
-    assert len(AGENTS) == 15
+    assert {"claude", "codex", "agy"} <= names
+    assert len(AGENTS) == 16
 
 
 @pytest.mark.unit
 def test_launch_only_agents_declare_exactly_ollama_launch():
-    """Every agent besides claude/codex is OLLAMA_LAUNCH-only.
+    """Every agent besides claude/codex/agy is OLLAMA_LAUNCH-only.
 
     None of them speaks Codex's `--profile <alias>` TOML convention or
     Claude's `ANTHROPIC_*` env vars — each has its own native config format
     that only `ollama launch` itself knows how to write. Declaring a second
     shape for one of them would silently create a wrapper `render.py` cannot
-    actually produce correctly.
+    actually produce correctly. agy is the deliberate third exception: it
+    launches DIRECTLY on its own native backend (AGENT_NATIVE) — it is not
+    an `ollama launch` integration at all (`ollama launch --help` lists no
+    agy/antigravity).
     """
     for agent in AGENTS:
-        if agent.name in ("claude", "codex"):
+        if agent.name in ("claude", "codex", "agy"):
             continue
         assert agent.shapes == frozenset({ConfigShape.OLLAMA_LAUNCH}), agent.name
+    agy = get_agent("agy")
+    assert agy.shapes == frozenset({ConfigShape.AGENT_NATIVE})
+    assert agy.binary == "agy"
 
 
 @pytest.mark.unit
@@ -100,42 +106,102 @@ def test_registry_has_builtin_providers():
         "ollama-direct",
         "zai",
         "litellm",
-        "gemini",
         "deepseek",
         "deepseek-openai",
         "bai",
         "freellmapi",
+        "antigravity",
         "native",
     }
 
 
 @pytest.mark.unit
-def test_gemini_is_suspended_and_pairs_with_nothing():
-    """gemini is registered but deliberately unusable (issue #74): Google's
-    OpenAI-compat surface is chat-completions only — `/responses` 404s — while
-    Codex hard-rejects `wire_api="chat"`, and no Anthropic-compatible surface
-    exists at all. Empty shapes (legal ONLY under `suspended=True`) make every
-    pairing resolve to the honest "no common configuration mechanism" instead
-    of installing a wrapper that cannot work."""
-    gemini = get_provider("gemini")
-    assert gemini.shapes == frozenset()
-    assert gemini.suspended is True
-    # The endpoint/credential fields are kept exactly as the unsuspended
-    # entry will need them — unsuspending is one commit (see the registry
-    # comment): restore OPENAI_TOML, drop the flag.
-    assert gemini.base_url == (
-        "https://generativelanguage.googleapis.com/v1beta/openai/"
+def test_no_shipped_provider_is_suspended():
+    """The suspended escape hatch (issue #74) survives the removal of its one
+    carrier (gemini, issue #112) as declared data — but no shipped entry uses
+    it: every registered provider pairs with at least one agent."""
+    suspended = [p.name for p in PROVIDERS if p.suspended]
+    assert suspended == []
+    for provider in PROVIDERS:
+        assert provider.shapes, f"{provider.name} declares no shapes"
+
+
+@pytest.mark.unit
+def test_antigravity_is_a_native_oauth_provider_without_an_address():
+    """Portrait of Antigravity's native backend (issue #112): no endpoint to
+    configure and no credential to resolve — `agy` authenticates itself via
+    Google OAuth — paired only through AGENT_NATIVE. FIXED + empty base_url
+    is legal because its shapes consume no address."""
+    antigravity = get_provider("antigravity")
+    assert antigravity.shapes == frozenset({ConfigShape.AGENT_NATIVE})
+    assert antigravity.base_url == ""
+    assert antigravity.base_url_policy is BaseUrlPolicy.FIXED
+    assert antigravity.auth == "none"
+    assert antigravity.token_env_var == ""
+    assert antigravity.model_list_api is ModelListAPI.NONE
+    assert not antigravity.env_reset
+    assert not antigravity.suspended
+    # No HTTP discovery exists for the OAuth backend, so the verified
+    # `agy models` output IS the picker's only source.
+    assert "gemini-3.8-flash-medium" in antigravity.known_models
+    assert "claude-sonnet-4-6" in antigravity.known_models
+
+
+@pytest.mark.unit
+def test_agent_native_pairs_agy_with_antigravity_only():
+    """The one AGENT_NATIVE pairing — and its honesty guarantee: every other
+    provider refuses for agy with the "no common configuration mechanism"
+    error whose hint names what agy DOES work with."""
+    assert (
+        resolve_shape(get_agent("agy"), get_provider("antigravity"))
+        is ConfigShape.AGENT_NATIVE
     )
-    # The stored base_url IS the complete OpenAI root — the renderer must not
-    # append /v1/ to it (that would 404). Pinned here so a regression to a
-    # bare-root convention (which openai_base_url would rewrite to
-    # .../openai/v1/) is caught at the registry level.
-    assert gemini.base_url_is_openai_root is True
-    assert gemini.auth == "secret"
-    assert gemini.token_env_var == "GEMINI_API_KEY"
-    assert gemini.model_list_api is ModelListAPI.OPENAI_V1
-    # The value the restored profile will carry — never "chat" again.
-    assert gemini.wire_api == "responses"
+    for name in ("ollama-direct", "zai", "litellm", "deepseek", "bai"):
+        with pytest.raises(CodeHelperError, match="no common configuration"):
+            resolve_shape(get_agent("agy"), get_provider(name))
+    # The incompatibility hint points at the one real pairing.
+    try:
+        resolve_shape(get_agent("agy"), get_provider("zai"))
+    except CodeHelperError as exc:
+        assert "antigravity" in str(exc)
+
+
+@pytest.mark.unit
+def test_base_url_gate_is_keyed_on_address_consuming_shapes():
+    """The must-carry-a-base_url rule applies to every provider whose shapes
+    have a writer deriving an endpoint from the address — the env renderer,
+    the TOML renderer, the launch renderer's claude-like `--settings`
+    payload, and the switch patch (claude_settings). Only AGENT_NATIVE
+    reads no address, so an AGENT_NATIVE-only provider legitimately has
+    none. Computed from the declared set, never a name check."""
+    import codehelper.services.model as m
+
+    native_only = Provider(
+        name="native-only",
+        shapes=frozenset({ConfigShape.AGENT_NATIVE}),
+        auth="none",
+        model_list_api=ModelListAPI.NONE,
+    )
+    m._validate_provider(native_only)  # must not raise
+
+    def _address_consumer(name, shape):
+        return Provider(
+            name=name,
+            shapes=frozenset({shape}),
+            auth="secret",
+            token_env_var="CONSUMER_API_KEY",
+            model_list_api=ModelListAPI.OPENAI_V1,
+            wire_api="responses",
+        )
+
+    for shape in (
+        ConfigShape.ANTHROPIC_ENV,
+        ConfigShape.OPENAI_TOML,
+        ConfigShape.OLLAMA_LAUNCH,
+        ConfigShape.ANTHROPIC_SETTINGS,
+    ):
+        with pytest.raises(CodeHelperError, match="no registry base_url"):
+            m._validate_provider(_address_consumer(f"consumer-{shape.value}", shape))
 
 
 @pytest.mark.unit
@@ -164,12 +230,11 @@ def test_deepseek_is_anthropic_compatible_and_switchable():
 
 @pytest.mark.unit
 def test_deepseek_openai_is_openai_only_and_uses_documented_conventions():
-    """Portrait of the codex-facing provider: bare OpenAI root (NOT
-    is_openai_root — openai_base_url appends /v1/), Responses wire_api."""
+    """Portrait of the codex-facing provider: bare OpenAI root (the
+    renderer appends /v1/), Responses wire_api."""
     ds = get_provider("deepseek-openai")
     assert ds.shapes == {ConfigShape.OPENAI_TOML}
     assert ds.base_url == "https://api.deepseek.com"
-    assert ds.base_url_is_openai_root is False
     assert ds.auth == "secret"
     assert ds.token_env_var == "DEEPSEEK_API_KEY"
     assert ds.model_list_api is ModelListAPI.OPENAI_V1
@@ -180,8 +245,8 @@ def test_deepseek_openai_is_openai_only_and_uses_documented_conventions():
 def test_bai_is_a_fixed_host_serving_both_protocols():
     """Portrait of B.AI: one documented host (https://api.b.ai) serves both
     surfaces — the litellm shape set, but FIXED-addressed, so --base-url is
-    refused. Bare root (NOT is_openai_root): the renderer appends /v1/ for
-    the TOML profile and discovery normalizes to /v1/models."""
+    refused. Bare root: the renderer appends /v1/ for the TOML profile and
+    discovery normalizes to /v1/models."""
     bai = get_provider("bai")
     assert bai.shapes == {
         ConfigShape.ANTHROPIC_ENV,
@@ -190,7 +255,6 @@ def test_bai_is_a_fixed_host_serving_both_protocols():
     }
     assert bai.base_url == "https://api.b.ai"
     assert bai.base_url_policy is BaseUrlPolicy.FIXED
-    assert bai.base_url_is_openai_root is False
     assert bai.auth == "secret"
     assert bai.token_env_var == "BAI_API_KEY"
     assert bai.model_list_api is ModelListAPI.OPENAI_V1
@@ -216,7 +280,6 @@ def test_freellmapi_is_a_local_fixed_host_serving_both_protocols():
     }
     assert proxy.base_url == "http://127.0.0.1:3002"
     assert proxy.base_url_policy is BaseUrlPolicy.FIXED
-    assert proxy.base_url_is_openai_root is False
     assert proxy.auth == "secret"
     assert proxy.token_env_var == "FREELLMAPI_API_KEY"
     assert proxy.model_list_api is ModelListAPI.OPENAI_V1
@@ -240,22 +303,6 @@ def test_deepseek_pairing_matrix():
         resolve_shape(get_agent("claude"), get_provider("deepseek-openai"))
     with pytest.raises(CodeHelperError, match="no common configuration"):
         resolve_shape(get_agent("codex"), get_provider("deepseek"))
-
-
-@pytest.mark.unit
-def test_claude_gemini_has_no_common_configuration_mechanism():
-    with pytest.raises(CodeHelperError, match="no common configuration"):
-        resolve_shape(get_agent("claude"), get_provider("gemini"))
-
-
-@pytest.mark.unit
-def test_codex_gemini_is_suspended_not_silently_broken():
-    """Issue #74: codex x gemini used to install a profile carrying
-    `wire_api="chat"`, which current Codex hard-rejects at config load —
-    a wrapper that dies before any request. The pairing must now resolve to
-    the honest "no common configuration mechanism" instead."""
-    with pytest.raises(CodeHelperError, match="no common configuration"):
-        resolve_shape(get_agent("codex"), get_provider("gemini"))
 
 
 @pytest.mark.unit
@@ -432,9 +479,8 @@ def test_compatible_providers_for_claude():
 
 
 @pytest.mark.unit
-def test_compatible_providers_for_codex_excludes_zai_and_suspended():
-    """z.ai is Anthropic-only, and codex cannot speak that protocol; gemini
-    is suspended (#74) and pairs with no agent at all."""
+def test_compatible_providers_for_codex_excludes_zai():
+    """z.ai is Anthropic-only, and codex cannot speak that protocol."""
     assert {p.name for p in compatible_providers(get_agent("codex"))} == {
         "ollama-direct",
         "litellm",
@@ -694,9 +740,7 @@ def test_chat_wire_api_is_rejected_for_openai_toml_providers():
     with pytest.raises(CodeHelperError, match="openai/codex#7782"):
         m._validate_provider(bad)
 
-    # And no SHIPPED provider carries it — the registry itself is clean
-    # (gemini, the one carrier, is suspended shapeless and now declares
-    # "responses" for its eventual return).
+    # And no SHIPPED provider carries it — the registry itself is clean.
     for provider in PROVIDERS:
         if ConfigShape.OPENAI_TOML in provider.shapes:
             assert provider.wire_api == "responses", provider.name
@@ -725,10 +769,8 @@ def test_shapeless_provider_requires_the_suspended_flag():
     )
     m._validate_provider(suspended)  # must not raise
 
-    # And the registry's one suspended entry really is shapeless + flagged.
-    gemini = get_provider("gemini")
-    assert gemini.suspended is True
-    assert gemini.shapes == frozenset()
+    # And no shipped entry is suspended any more (gemini, the one carrier,
+    # was removed with issue #112) — pinned by test_no_shipped_provider_is_suspended.
 
 
 # --------------------------------------------------------------------------- #
@@ -895,8 +937,6 @@ def test_anthropic_settings_shape_on_no_agent():
         ("codex", "litellm", ConfigShape.OPENAI_TOML),
         ("codex", "bai", ConfigShape.OPENAI_TOML),
         ("codex", "freellmapi", ConfigShape.OPENAI_TOML),
-        # ("codex", "gemini", ...) removed with #74: the pairing is suspended,
-        # resolve_shape raises instead of handing back OPENAI_TOML.
     ],
 )
 def test_resolve_shape_unchanged_for_existing_pairs(
@@ -1009,7 +1049,7 @@ def test_active_providers_filters_disabled_keeps_order():
 @pytest.mark.unit
 def test_disabled_is_not_suspended():
     """The two flags are orthogonal: disabling at runtime must not touch the
-    registry entry, and gemini's static suspension is not a disable."""
+    registry entry, and a static suspension is not a disable."""
     ollama = get_provider("ollama-direct")
     assert not ollama.suspended
     assert is_provider_disabled(ollama, frozenset({"ollama-direct"}))
