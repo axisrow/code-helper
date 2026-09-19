@@ -681,15 +681,14 @@ def _add_spec_from_preset(req, paths, profile_name):
     )
 
 
-def _warn_env_cache_conflict(resolved, **axes) -> None:
-    """Print the env-vs-cache token disagreement (issue #71) to stderr.
+def _print_token_conflict(conflict: str | None) -> None:
+    """Print the shared token resolver's env-vs-cache line (issue #71) to stderr.
 
     Emitted at RESOLUTION time — before any write/dry-run branch — so a
     ``--dry-run`` shows it too (it is exactly the diagnostic a dry run
     needs), and the TUI's silent chip hot-apply, which captures stdout
     only, still surfaces it on the terminal.
     """
-    conflict = secrets.env_cache_conflict(resolved, **axes)
     if conflict:
         print(conflict, file=sys.stderr)
 
@@ -735,24 +734,20 @@ def _add_resolve_token(spec, req, paths, profile_name):
     if req.profile_token is not None:
         if not req.profile_token:
             raise CodeHelperError("no token entered — aborting")
+        # A pre-typed token is SOURCE_PROMPT by construction — never an
+        # env-beats-cache conflict — and overwriting the cache with it is
+        # the documented rotation path, so no conflict check applies.
         resolved = ResolvedToken(req.profile_token, SOURCE_PROMPT)
-    else:
-        resolved = secrets.resolve_token(
-            env_var=spec.token_env_var,
-            prompt=f"{spec.name} token ({spec.token_env_var}): ",
-            paths=paths,
-            provider_name=spec.provider.name,
-            profile_name=profile_name,
-            base_url_policy=spec.provider.base_url_policy,
-        )
-    _warn_env_cache_conflict(
-        resolved,
+        return resolved.value, resolved
+    resolved, conflict = secrets.resolve_with_conflict_check(
         env_var=spec.token_env_var,
+        prompt=f"{spec.name} token ({spec.token_env_var}): ",
         paths=paths,
         provider_name=spec.provider.name,
         profile_name=profile_name,
         base_url_policy=spec.provider.base_url_policy,
     )
+    _print_token_conflict(conflict)
     return resolved.value, resolved
 
 
@@ -1328,7 +1323,7 @@ def _warn_live_configs(paths, provider) -> None:
     instead is the hint: the motivating case (a subscription ending)
     otherwise produces auth failures with no visible cause, because the
     chipset row that showed the live backend is gone. stderr, like
-    ``_warn_env_cache_conflict``, so a TUI capture still surfaces it.
+    ``_print_token_conflict``, so a TUI capture still surfaces it.
     Read-only: both readbacks never raise.
     """
     if claude_settings.current_switch(paths) == provider.name:
@@ -1575,7 +1570,7 @@ def _switch_resolve_token(
     """
     if provider.auth != "secret":
         return provider.auth_value
-    kwargs = {}
+    getpass_fn = None
     if non_interactive:
 
         def _no_prompt(_prompt: str) -> str:
@@ -1587,24 +1582,17 @@ def _switch_resolve_token(
                 "--profile default --token-stdin"
             )
 
-        kwargs["getpass_fn"] = _no_prompt
-    resolved = secrets.resolve_token(
+        getpass_fn = _no_prompt
+    resolved, conflict = secrets.resolve_with_conflict_check(
         env_var=provider.token_env_var,
         prompt=f"{provider.name} token ({provider.token_env_var}): ",
         paths=paths,
         provider_name=provider.name,
         profile_name=req.profile,
         base_url_policy=provider.base_url_policy,
-        **kwargs,
+        getpass_fn=getpass_fn,
     )
-    _warn_env_cache_conflict(
-        resolved,
-        env_var=provider.token_env_var,
-        paths=paths,
-        provider_name=provider.name,
-        profile_name=req.profile,
-        base_url_policy=provider.base_url_policy,
-    )
+    _print_token_conflict(conflict)
     return resolved.value
 
 

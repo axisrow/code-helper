@@ -87,13 +87,18 @@ def test_switch_positional_and_flag_provider_conflict(monkeypatch):
 
 @pytest.mark.integration
 def test_switch_native_never_reads_env_or_prompts(tmp_path, monkeypatch):
-    """switch native must not call secrets.resolve_token at all — a reset
-    provider (auth='none', env_reset=True) has nothing to resolve."""
+    """switch native must not resolve a token at all — a reset provider
+    (auth='none', env_reset=True) has nothing to resolve; the shared
+    conflict-checked resolver is where that would happen (issue #109)."""
 
     def _explode(**_kwargs):
-        raise AssertionError("resolve_token must not be called for switch native")
+        raise AssertionError(
+            "resolve_with_conflict_check must not be called for switch native"
+        )
 
-    monkeypatch.setattr("codehelper.cli.parser.secrets.resolve_token", _explode)
+    monkeypatch.setattr(
+        "codehelper.cli.parser.secrets.resolve_with_conflict_check", _explode
+    )
     _write_settings(
         tmp_path,
         {
