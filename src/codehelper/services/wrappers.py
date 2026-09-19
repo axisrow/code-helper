@@ -2358,7 +2358,9 @@ def wrappers_for_provider(paths: Paths, provider: Provider) -> list[str]:
     )
 
 
-def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
+def valid_default_wrapper(
+    paths: Paths, agent_name: str, *, state: dict | None = None
+) -> str | None:
     """The saved default-wrapper alias for ``agent_name`` if it still exists.
 
     A saved alias can go stale (uninstalled/renamed), so a reader must fall
@@ -2373,10 +2375,14 @@ def valid_default_wrapper(paths: Paths, agent_name: str) -> str | None:
     never be handed a wrapper that launches a different agent. And the read
     never raises: a malformed alias (path separator, ``.``/``..``) degrades to
     ``None`` before any path arithmetic.
+
+    ``state`` is an optional preloaded :func:`state.load_state` result (issue
+    #110) — the TUI main loop loads ``state.json`` once per iteration; the
+    default ``None`` reads the file.
     """
     from codehelper.services.state import default_wrapper
 
-    alias = default_wrapper(paths, agent_name)
+    alias = default_wrapper(paths, agent_name, state=state)
     if alias is None:
         return None
     if not _is_usable_alias(alias):

@@ -299,6 +299,7 @@ class TuiSession:
         "_chip_index",
         "_chip_switch_tokens",
         "_tokens_reveal",
+        "_state_snapshot",
     )
 
     def __init__(self, args: argparse.Namespace) -> None:
@@ -337,6 +338,11 @@ class TuiSession:
         #: resets it to False on every entry, so a re-visit can never open
         #: showing full credentials with no new action by the user.
         self._tokens_reveal: bool = False
+        #: The per-iteration ``state.json`` snapshot (issue #110): loaded ONCE
+        #: by `_refresh_active_label` and fed to every reader that would
+        #: otherwise re-read the file — the profile resolvers, the disabled
+        #: gates, the proxy row, the per-agent default-wrapper lookups.
+        self._state_snapshot: dict[str, object] = {}
 
     # --- UI primitives ---------------------------------------------------
 
@@ -628,11 +634,16 @@ class TuiSession:
 
     # --- wrappers --------------------------------------------------------
 
-    def _all_wrapper_specs(self):
+    def _all_wrapper_specs(self, *, state: dict[str, object] | None = None):
         """Presets plus managed constructor wrappers, without duplicate names.
 
         Wrappers of a runtime-disabled provider are excluded (issue #89) —
         the provider vanishes from the chipset and this list together.
+
+        ``state`` is the per-iteration snapshot (issue #110) for the
+        disabled-provider filter; ``None`` falls back to the session's
+        :attr:`_state_snapshot`, so the per-iteration row builder never
+        re-reads ``state.json``.
         """
         from codehelper.services.model import is_provider_disabled
         from codehelper.services.paths import Paths
@@ -644,7 +655,7 @@ class TuiSession:
         )
 
         paths = Paths.default()
-        disabled = disabled_providers(paths)
+        disabled = disabled_providers(paths, state=state or self._state_snapshot)
         specs = []
         known = set()
         for spec in WRAPPERS:
@@ -683,7 +694,10 @@ class TuiSession:
             paths,
             specs,
             defaults={
-                agent.name: valid_default_wrapper(paths, agent.name) for agent in agents
+                agent.name: valid_default_wrapper(
+                    paths, agent.name, state=self._state_snapshot
+                )
+                for agent in agents
             },
         )
         by_name = dict(described)
@@ -1551,7 +1565,7 @@ class TuiSession:
     # --- active-label subsystem -----------------------------------------
 
     @staticmethod
-    def _secret_providers() -> list:
+    def _secret_providers(*, state: dict[str, object] | None = None) -> list:
         """Providers that can have named token profiles at all.
 
         NOT just ``p.auth == "secret"``: an OVERRIDABLE provider's registry
@@ -1559,12 +1573,15 @@ class TuiSession:
         copy, never mutates ``PROVIDERS``). Filtering on ``auth_policy``
         keeps the Profile screen and Tab's fallback scan able to find
         profiles cached under an OVERRIDABLE provider.
+
+        ``state`` is the per-iteration snapshot (issue #110); ``None`` reads
+        ``state.json`` — the event-path callers keep their fresh read.
         """
         from codehelper.services.model import AuthPolicy, active_providers
         from codehelper.services.paths import Paths
         from codehelper.services.state import disabled_providers
 
-        disabled = disabled_providers(Paths.default())
+        disabled = disabled_providers(Paths.default(), state=state)
         # A disabled provider's profiles are not offered as choices (issue
         # #89) — the tokens view hides its rows the same way.
         return [
@@ -1573,40 +1590,52 @@ class TuiSession:
             if p.auth == "secret" or p.auth_policy is AuthPolicy.OVERRIDABLE
         ]
 
-    def _resolve_tab_provider(self) -> str | None:
-        """Resolve which provider Tab/the header should act on."""
+    def _resolve_tab_provider(self, *, state: dict[str, object] | None = None) -> str | None:
+        """Resolve which provider Tab/the header should act on.
+
+        ``state`` is the per-iteration snapshot (issue #110); ``None`` reads
+        ``state.json`` — the event-path callers keep their fresh read.
+        """
         from codehelper.services.paths import Paths
         from codehelper.services.secrets import profile_names
         from codehelper.services.state import active_selection
 
         paths = Paths.default()
-        selection = active_selection(paths)
+        selection = active_selection(paths, state=state)
         if selection is not None:
             stored, _ = selection
             if profile_names(paths, stored):
                 return stored
-        for provider in self._secret_providers():
+        for provider in self._secret_providers(state=state):
             if profile_names(paths, provider.name):
                 return provider.name
         return None
 
-    def _tab_profile(self, provider: str) -> str | None:
-        """The profile Tab currently shows/would land on for ``provider``."""
+    def _tab_profile(
+        self, provider: str, *, state: dict[str, object] | None = None
+    ) -> str | None:
+        """The profile Tab currently shows/would land on for ``provider``.
+
+        ``state`` is the per-iteration snapshot (issue #110); ``None`` reads
+        ``state.json`` — the event-path callers keep their fresh read.
+        """
         from codehelper.services.paths import Paths
         from codehelper.services.secrets import profile_names, valid_active_profile
 
         paths = Paths.default()
-        stored = valid_active_profile(paths, provider)
+        stored = valid_active_profile(paths, provider, state=state)
         if stored:
             return stored
         names = profile_names(paths, provider)
         return names[0] if names else None
 
-    def _active_label(self, tab_provider: str | None) -> str:
+    def _active_label(
+        self, tab_provider: str | None, *, state: dict[str, object] | None = None
+    ) -> str:
         """``"provider/profile"``, ``"provider"``, or ``""`` for header/row."""
         if not tab_provider:
             return ""
-        profile = self._tab_profile(tab_provider)
+        profile = self._tab_profile(tab_provider, state=state)
         return f"{tab_provider}/{profile}" if profile else tab_provider
 
     def _on_tab(self) -> None:
@@ -1650,19 +1679,25 @@ class TuiSession:
 
         return Section(lambda: self._slot_label)
 
-    def _refresh_profile_label(self) -> None:
+    def _refresh_profile_label(
+        self, *, state: dict[str, object] | None = None
+    ) -> None:
         """Refresh only the profile-related caches.
 
         Split from :meth:`_refresh_active_label` because Tab and the digit
         slots change a PROFILE, not a backend — re-reading each agent's
         config file there would be work no keypress on that screen can
         invalidate.
+
+        ``state`` is the per-iteration snapshot (issue #110); ``None`` reads
+        ``state.json`` — the event-path callers (Tab, digit slots, the
+        Profile screen) keep their fresh read.
         """
         from codehelper.services.paths import Paths
         from codehelper.services.profiles import profile_slots
 
-        self._tab_provider = self._resolve_tab_provider()
-        self._tab_label = self._active_label(self._tab_provider)
+        self._tab_provider = self._resolve_tab_provider(state=state)
+        self._tab_label = self._active_label(self._tab_provider, state=state)
         self._slot_label = "  ".join(
             f"{i + 1} {provider}/{profile}"
             for i, (provider, profile) in enumerate(profile_slots(Paths.default()))
@@ -1677,11 +1712,19 @@ class TuiSession:
         redraw frame — including pure cursor movement. Reading any of it from
         those callables would turn one screen's worth of I/O into one
         keystroke's worth.
+
+        The per-file stores are also loaded ONCE here and fed to every
+        reader below as an optional preloaded kwarg (issue #110): one
+        ``load_state`` instead of one per profile resolver / disabled gate /
+        proxy row / default-wrapper lookup. The readers default to reading
+        the file themselves, so nothing off this loop changes.
         """
         from codehelper.services.paths import Paths
+        from codehelper.services.state import load_state
 
         paths = Paths.default()
-        self._refresh_profile_label()
+        self._state_snapshot = load_state(paths)
+        self._refresh_profile_label(state=self._state_snapshot)
         self._applied = {
             name: backend.read_applied(paths)
             for name, backend in _AGENT_BACKENDS.items()
@@ -1697,8 +1740,11 @@ class TuiSession:
         self._claude_active_env = active_switch_env(paths)
         # Read here, never from the proxy row's label callable: the menu
         # re-evaluates that on every redraw frame, cursor movement included.
-        self._proxy = proxy_status(paths)
-        self._chips = {name: self._chips_for(name, paths) for name in _AGENT_BACKENDS}
+        self._proxy = proxy_status(paths, state=self._state_snapshot)
+        self._chips = {
+            name: self._chips_for(name, paths, state=self._state_snapshot)
+            for name in _AGENT_BACKENDS
+        }
         # Token readback for the agents whose chip_is_applied is token-exact.
         # Same I/O class as the reads above — once per iteration, never per
         # redraw frame — and resolved through the apply-path resolvers so the
@@ -1706,7 +1752,7 @@ class TuiSession:
         self._chip_switch_tokens = {
             name: {
                 self._chip_name(chip): getattr(self, backend.chip_switch_token)(
-                    chip, paths
+                    chip, paths, state=self._state_snapshot
                 )
                 for chip in chips
             }
@@ -1722,7 +1768,13 @@ class TuiSession:
             if self._chip_index.get(name, 0) >= len(chips):
                 self._chip_index[name] = max(0, len(chips) - 1)
 
-    def _chips_for(self, agent_name: str, paths) -> list:
+    def _chips_for(
+        self,
+        agent_name: str,
+        paths,
+        *,
+        state: dict[str, object] | None = None,
+    ) -> list:
         """The chip strip for ``agent_name``: native, targets, then Add.
 
         Curated Claude presets are live backend targets in their own right;
@@ -1733,13 +1785,16 @@ class TuiSession:
         backend, never "applied", present on every row (including one with no
         wrappers yet) so that row always has a visible way to get its first
         one instead of reading as empty/broken.
+
+        ``state`` is the per-iteration snapshot (issue #110) for the
+        disabled-provider filter; ``None`` reads ``state.json``.
         """
         from codehelper.services.model import is_provider_disabled
         from codehelper.services.spec import PRESETS, spec_from_preset
         from codehelper.services.state import disabled_providers
         from codehelper.services.wrappers import discover_managed, spec_from_installed
 
-        disabled = disabled_providers(paths)
+        disabled = disabled_providers(paths, state=state)
 
         def _live(spec) -> bool:
             # A disabled provider produces NO chip at all (issue #89) — not a
@@ -1824,7 +1879,9 @@ class TuiSession:
         model = self._applied_model.get(agent_name)
         return model is None or chip.model == model
 
-    def _chip_switch_token(self, chip, paths) -> str | None:
+    def _chip_switch_token(
+        self, chip, paths, *, state: dict[str, object] | None = None
+    ) -> str | None:
         """The token Enter on ``chip`` would apply, or ``None`` when it has none.
 
         Asked through the SAME resolvers the apply path uses —
@@ -1834,6 +1891,9 @@ class TuiSession:
         resolver raising is the apply path failing cleanly (no non-interactive
         token available, unreadable wrapper), which is NOT a no-op: ``None``,
         never a guess.
+
+        ``state`` is the per-iteration snapshot (issue #110) for the
+        resolvers' disabled-provider gate; ``None`` reads ``state.json``.
         """
         from codehelper.cli.parser import (
             _switch_axes_from_preset,
@@ -1847,11 +1907,11 @@ class TuiSession:
         try:
             if chip.name in preset_names():
                 _, _, token, _, _ = _switch_axes_from_preset(
-                    self._switch_request(from_preset=chip.name), paths
+                    self._switch_request(from_preset=chip.name), paths, state=state
                 )
             else:
                 _, _, token, _, _ = _switch_axes_from_wrapper(
-                    self._switch_request(from_wrapper=chip.name), paths
+                    self._switch_request(from_wrapper=chip.name), paths, state=state
                 )
         except CodeHelperError:
             return None

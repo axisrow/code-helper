@@ -226,7 +226,12 @@ def profile_names(paths: Paths, provider_name: str) -> tuple[str, ...]:
     return tuple(sorted(names, key=lambda name: (name != DEFAULT_PROFILE, name)))
 
 
-def valid_active_profile(paths: Paths, provider_name: str) -> str | None:
+def valid_active_profile(
+    paths: Paths,
+    provider_name: str,
+    *,
+    state: dict[str, object] | None = None,
+) -> str | None:
     """The stored active profile for ``provider_name`` if it still exists.
 
     Cross-checks ``state.active_selection`` against the live
@@ -240,10 +245,14 @@ def valid_active_profile(paths: Paths, provider_name: str) -> str | None:
     provider, so a profile only "belongs" to the provider it was last
     selected for. Lives here (not in ``state.py``) because it needs
     ``profile_names``, and ``state.py`` must not depend on this module.
+
+    ``state`` is an optional preloaded :func:`state.load_state` result (issue
+    #110) — the TUI main loop loads ``state.json`` once per iteration; the
+    default ``None`` reads the file, so every other caller is unchanged.
     """
     from codehelper.services.state import active_selection
 
-    selection = active_selection(paths)
+    selection = active_selection(paths, state=state)
     if selection is None:
         return None
     active_provider_name, name = selection

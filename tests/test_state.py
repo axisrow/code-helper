@@ -518,3 +518,57 @@ def test_enable_leaves_the_active_pointer_alone(tmp_path):
     set_provider_disabled(paths, "ollama-direct", True, storage_names=ollama)
     set_provider_disabled(paths, "ollama-direct", False, storage_names=ollama)
     assert active_selection(paths) == ("zai", "axisrow")
+
+
+# --------------------------------------------------------------------------- #
+# preloaded-state kwarg (issue #110) — the TUI's one-load-per-iteration feed
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_preloaded_state_answers_every_reader_without_a_file(tmp_path, monkeypatch):
+    """Every reader honours an explicit ``state=`` snapshot: the answers match
+    a fresh read of the same file, and a ``state=`` call never touches the
+    file (a missing-file probe raises, proving no read happened)."""
+    paths = _paths(tmp_path)
+    from codehelper.services.secrets import (
+        save_credential,
+        valid_active_profile,
+    )
+    from codehelper.services.wrappers import install_wrapper, valid_default_wrapper
+
+    set_active_selection(paths, "zai", "axisrow")
+    save_credential(paths, "zai", "sk-test", "axisrow")
+    set_default_wrapper(paths, "claude", "glm")
+    # A DIFFERENT provider is disabled: disabling "zai" itself would drop the
+    # active pointer (issue #89's own rule) and un-set the fixture.
+    set_provider_disabled(
+        paths, "ollama-direct", True, storage_names=frozenset({"ollama-direct"})
+    )
+    install_wrapper(paths, "glm", token="test-token")
+    snapshot = load_state(paths)
+
+    def _forbidden(_paths):
+        raise AssertionError("state= call re-read the file")
+
+    monkeypatch.setattr("codehelper.services.state.load_state", _forbidden)
+    assert active_selection(paths, state=snapshot) == ("zai", "axisrow")
+    assert default_wrapper(paths, "claude", state=snapshot) == "glm"
+    assert disabled_providers(paths, state=snapshot) == frozenset({"ollama-direct"})
+    # Cross-module consumers honour the same snapshot — positively, not just
+    # as a None fallback.
+    assert valid_active_profile(paths, "zai", state=snapshot) == "axisrow"
+    assert valid_default_wrapper(paths, "claude", state=snapshot) == "glm"
+
+
+@pytest.mark.unit
+def test_preloaded_state_none_reads_the_file(tmp_path):
+    """``state=None`` (every CLI caller) is exactly the fresh read."""
+    paths = _paths(tmp_path)
+    set_active_selection(paths, "zai", "axisrow")
+    snapshot = load_state(paths)
+    assert active_selection(paths) == active_selection(paths, state=snapshot)
+    assert default_wrapper(paths, "claude") == default_wrapper(
+        paths, "claude", state=snapshot
+    )
+    assert disabled_providers(paths) == disabled_providers(paths, state=snapshot)

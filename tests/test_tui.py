@@ -2597,6 +2597,32 @@ def test_moving_the_chip_cursor_does_no_io(monkeypatch):
 
 
 @pytest.mark.integration
+def test_one_iteration_loads_state_json_once(monkeypatch):
+    """Issue #110: ONE ``load_state`` per main-loop iteration, not one per
+    reader. Every ``state.json`` consumer on the iteration path — the profile
+    resolvers, the per-chip disabled gates, the proxy row, the per-agent
+    default-wrapper lookups — is fed the same preloaded snapshot."""
+    import codehelper.services.state as state_service
+    from codehelper.services.wrappers import install_wrapper
+
+    install_wrapper(Paths.default(), "glm", token="test-token")
+
+    calls = {"load_state": 0}
+    real = state_service.load_state
+
+    def counting(paths):
+        calls["load_state"] += 1
+        return real(paths)
+
+    monkeypatch.setattr(state_service, "load_state", counting)
+
+    _real_menu_keys(monkeypatch, ["CANCEL"])
+    assert main(["tui"]) == 0
+
+    assert calls == {"load_state": 1}
+
+
+@pytest.mark.integration
 def test_chip_cursor_is_independent_per_agent(monkeypatch):
     """Each agent row remembers its own chip, so moving away and back does
     not reset where the user was."""

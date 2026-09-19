@@ -386,7 +386,11 @@ def _verify_proxy_patch(original: dict, patched: dict, patch: dict[str, str]) ->
         )
 
 
-def proxy_status(paths: Paths) -> ProxyStatus:
+def proxy_status(
+    paths: Paths,
+    *,
+    state: dict[str, object] | None = None,
+) -> ProxyStatus:
     """What the proxy configuration currently is. Read-only, NEVER raises.
 
     A missing, unreadable, or corrupt settings.json reads as "off, nothing
@@ -398,6 +402,10 @@ def proxy_status(paths: Paths) -> ProxyStatus:
     non-empty value, and ``url`` reports the first such key in precedence
     order — i.e. the address Claude Code would actually use, not merely the
     one most recently written.
+
+    ``state`` is an optional preloaded :func:`state.load_state` result (issue
+    #110) — the TUI main loop loads ``state.json`` once per iteration; the
+    default ``None`` reads the file.
     """
     from codehelper.services.state import saved_proxy
 
@@ -410,7 +418,7 @@ def proxy_status(paths: Paths) -> ProxyStatus:
         ),
         None,
     )
-    saved = saved_proxy(paths)
+    saved = saved_proxy(paths, state=state)
     no_proxy = next(
         (
             value
