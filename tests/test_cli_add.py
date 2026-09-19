@@ -288,6 +288,30 @@ def test_add_agy_native_installs_without_any_token_step(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_add_agy_native_never_prompts_for_a_context_window(tmp_path, monkeypatch):
+    """The AGENT_NATIVE renderer has no surface for the declaration, so the
+    interactive ask/derive machinery must never run for it — every
+    antigravity model is permanently catalog-unknown, and an ungated
+    resolver would prompt for an answer nothing would ever render. An
+    EXPLICIT --context-window bypasses the gate (the user decided; the
+    answer rides the marker even where nothing consumes it)."""
+    import codehelper.services.context_window as context_window_service
+
+    def _explode(*_a, **_kw):  # pragma: no cover - must not run
+        raise AssertionError("agent-native wrappers must not resolve a window")
+
+    monkeypatch.setattr(context_window_service, "resolve_context_window", _explode)
+
+    # No flag: the gate skips resolution entirely — install still completes.
+    assert main(["add", "agy-native"]) == 0
+    assert "ctx=" not in _body(tmp_path, "agy-native")
+
+    # Explicit flag: honored, recorded in the marker, resolver untouched.
+    assert main(["add", "agy-native", "--force", "--context-window", "none"]) == 0
+    assert "ctx=0" in _body(tmp_path, "agy-native")
+
+
+@pytest.mark.integration
 def test_add_agy_constructor_form(tmp_path):
     code = main(
         [

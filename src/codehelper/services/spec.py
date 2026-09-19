@@ -165,6 +165,33 @@ class WrapperSpec:
             models.append(self.subagent_model)
         return models
 
+    @property
+    def can_declare_context_window(self) -> bool:
+        """Whether ANY writer of this spec's shape can emit the declaration.
+
+        The ONE gate on context-window resolution: the interactive question
+        (and the state-backed re-derivation) is worth running only when the
+        rendered output has a surface to carry the answer — the env block
+        plus ``--settings`` payload (ANTHROPIC_ENV), the TOML profile's
+        ``model_context_window`` (OPENAI_TOML), or the ``--settings``
+        payload a launch wrapper forwards to a claude-like agent
+        (OLLAMA_LAUNCH, conditional on the agent declaring ANTHROPIC_ENV —
+        the same predicate the TUI edit screen's ``_launch_ctx`` row gate
+        has always applied). AGENT_NATIVE emits nothing with an address or
+        an env in it, so its question would never render: ask-only-when-
+        declarable, mirroring ``window_models`` being the single ask/derive
+        set. An EXPLICIT ``--context-window`` answer bypasses this gate —
+        the user decided, the answer rides the spec and the ``ctx=``
+        marker even where no renderer consumes it.
+        """
+        if self.shape is ConfigShape.ANTHROPIC_ENV:
+            return True
+        if self.shape is ConfigShape.OPENAI_TOML:
+            return True
+        if self.shape is ConfigShape.OLLAMA_LAUNCH:
+            return ConfigShape.ANTHROPIC_ENV in self.agent.shapes
+        return False
+
 
 def suggest_alias(model: str, agent_name: str, profile_name: str | None = None) -> str:
     """Derive a default alias, e.g. ``glm-5:cloud`` + ``codex`` -> ``glm-5-codex``.

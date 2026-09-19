@@ -168,10 +168,12 @@ def test_agent_native_pairs_agy_with_antigravity_only():
 
 @pytest.mark.unit
 def test_base_url_gate_is_keyed_on_address_consuming_shapes():
-    """The must-carry-a-base_url rule applies only to providers whose shapes
-    interpolate the address (ANTHROPIC_ENV/OPENAI_TOML); an AGENT_NATIVE-only
-    provider legitimately has none. Computed from the declared set, never a
-    name check."""
+    """The must-carry-a-base_url rule applies to every provider whose shapes
+    have a writer deriving an endpoint from the address — the env renderer,
+    the TOML renderer, the launch renderer's claude-like `--settings`
+    payload, and the switch patch (claude_settings). Only AGENT_NATIVE
+    reads no address, so an AGENT_NATIVE-only provider legitimately has
+    none. Computed from the declared set, never a name check."""
     import codehelper.services.model as m
 
     native_only = Provider(
@@ -182,16 +184,24 @@ def test_base_url_gate_is_keyed_on_address_consuming_shapes():
     )
     m._validate_provider(native_only)  # must not raise
 
-    address_consumer = Provider(
-        name="address-consumer",
-        shapes=frozenset({ConfigShape.OPENAI_TOML}),
-        auth="secret",
-        token_env_var="CONSUMER_API_KEY",
-        model_list_api=ModelListAPI.OPENAI_V1,
-        wire_api="responses",
-    )
-    with pytest.raises(CodeHelperError, match="no registry base_url"):
-        m._validate_provider(address_consumer)
+    def _address_consumer(name, shape):
+        return Provider(
+            name=name,
+            shapes=frozenset({shape}),
+            auth="secret",
+            token_env_var="CONSUMER_API_KEY",
+            model_list_api=ModelListAPI.OPENAI_V1,
+            wire_api="responses",
+        )
+
+    for shape in (
+        ConfigShape.ANTHROPIC_ENV,
+        ConfigShape.OPENAI_TOML,
+        ConfigShape.OLLAMA_LAUNCH,
+        ConfigShape.ANTHROPIC_SETTINGS,
+    ):
+        with pytest.raises(CodeHelperError, match="no registry base_url"):
+            m._validate_provider(_address_consumer(f"consumer-{shape.value}", shape))
 
 
 @pytest.mark.unit

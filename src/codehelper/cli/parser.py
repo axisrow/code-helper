@@ -500,10 +500,16 @@ def _add_resolve_context_window(spec, req, paths, explicit_window: int | None):
 
     An explicit ``--context-window`` is complete in itself: no prompt, no
     state write — scripted use already said what it means (``none`` maps to
-    0, an explicit suppression). Otherwise the service resolver decides:
+    0, an explicit suppression), and it is honored for EVERY shape (the
+    answer rides the spec and the marker even where no renderer consumes
+    it — the user decided). Otherwise the service resolver decides:
     a catalog-known model derives silently, a recorded answer is reused,
     an unknown model is asked once and remembered — unless ``--dry-run``
     is in effect, which never prompts (and therefore never records).
+    Resolution is GATED on ``spec.can_declare_context_window``: a shape
+    whose renderer has no surface for the declaration (agent-native) never
+    runs the ask/derive machinery, so its unknown-model models are never
+    prompted for an answer nothing would render.
 
     ``MenuCancelled`` (Esc at the window menu) propagates — ``main`` prints
     "cancelled" and exits; nothing is recorded, so the model is asked again
@@ -512,6 +518,8 @@ def _add_resolve_context_window(spec, req, paths, explicit_window: int | None):
     """
     if explicit_window is not None:
         return replace(spec, context_window=explicit_window)
+    if not spec.can_declare_context_window:
+        return spec
     # The model set comes from the SPEC — the same source the renderer
     # derives from — so the question covers every shape's declaration
     # (single-model shapes included; review round 3, PR #84).

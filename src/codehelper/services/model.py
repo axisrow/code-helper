@@ -731,14 +731,25 @@ PROVIDERS: tuple[Provider, ...] = (
 )
 
 
-#: The shapes whose renderers interpolate ``provider.base_url`` into what they
-#: write — the ANTHROPIC env block and the Codex TOML profile. A provider
-#: serving ONLY shapes outside this set (AGENT_NATIVE: the agent's own native
-#: backend carries the endpoint, this tool writes nothing with an address in
-#: it) legitimately carries no ``base_url`` at all, and ``_validate_provider``
-#: keys its must-carry-an-address rule on this set, never on a name.
+#: The shapes whose writers derive an endpoint from ``provider.base_url`` —
+#: the ANTHROPIC env block (``render._render_anthropic_env``), the Codex TOML
+#: profile (``render.openai_toml_body`` and ``codex_default``), the
+#: ``--settings`` payload ``render._render_ollama_launch`` forwards to
+#: claude-like agents (conditional on the agent declaring ANTHROPIC_ENV), and
+#: the ``switch`` patch (``claude_settings.resolve_switch_patch``).
+#: AGENT_NATIVE is the one shape that reads no address — the agent's own
+#: native backend carries the endpoint and this tool writes nothing with an
+#: address in it — so a provider is legitimately address-free exactly when
+#: ``env_reset`` is set or its shapes intersect none of these.
+#: ``_validate_provider`` keys its must-carry-an-address rule on this set,
+#: never on a name.
 _ADDRESS_CONSUMING_SHAPES: frozenset[ConfigShape] = frozenset(
-    {ConfigShape.ANTHROPIC_ENV, ConfigShape.OPENAI_TOML}
+    {
+        ConfigShape.ANTHROPIC_ENV,
+        ConfigShape.OPENAI_TOML,
+        ConfigShape.OLLAMA_LAUNCH,
+        ConfigShape.ANTHROPIC_SETTINGS,
+    }
 )
 
 

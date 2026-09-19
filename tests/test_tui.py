@@ -1063,7 +1063,9 @@ def test_agy_add_flow_through_a_real_pty(tmp_path):
         menu_key("\r", "Select a provider for agy")
         menu_key("\r", "known models — discovery unavailable")
         menu_key("\r", "Command name [gemini-3.8-flash-high-agy]")
-        menu_key("\r", "Context window for gemini-3.8-flash-high")
+        # NO context-window menu here: the agent-native shape has no
+        # declaration surface, so the gate skips the ask entirely (the
+        # would-be prompt for gemini-3.8-flash-high would never render).
         menu_key("\r", "Press any key to continue")
         os.write(master_fd, b" ")  # acknowledge; teardown then kills the TUI
         time.sleep(0.5)
@@ -1560,8 +1562,8 @@ def test_tui_add_agy_flow_feeds_the_known_models_and_installs(monkeypatch):
     )
 
     def _select(_items, *, prompt="", **_kwargs):
-        if str(prompt).startswith("Context window for"):
-            return "0"
+        if str(prompt).startswith("Context window for"):  # pragma: no cover
+            raise AssertionError("agent-native flow must not ask for a window")
         prompt_text = str(prompt() if callable(prompt) else prompt)
         seen_prompts.append(prompt_text)
         return next(answers)
