@@ -153,6 +153,17 @@ def test_resolve_switch_patch_native_ignores_models_and_token():
     process. Removing a key from settings.json does not remove its already
     applied process value, so native must send an explicit empty value for
     each key codehelper previously set.
+
+    Cold-start semantics (issue #62, measured 2026-09-19, Claude Code
+    2.1.277/2.1.278): every managed key set to ``""`` behaves exactly like
+    an absent key on a fresh launch — identical auth path (no "configured
+    but invalid" mode; the same login-required outcome), identical alias
+    resolution for ``--model sonnet``/``haiku``/``opus`` (same claude-* id
+    with the alias key empty and with it absent, against a recording mock
+    endpoint), no ``CLAUDE_CODE_MAX_CONTEXT_TOKENS=""`` parse error, and
+    subagents spawn with the same resolved model under
+    ``CLAUDE_CODE_SUBAGENT_MODEL=""``. Blanking is safe on cold start, not
+    only on live reload; do not re-raise "empty vs unset" in review.
     """
     patch = resolve_switch_patch(
         NATIVE,
