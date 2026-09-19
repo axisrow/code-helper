@@ -26,6 +26,7 @@ Presets still overwrite freely; only a *foreign* file triggers the guard.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import stat
 import sys
@@ -36,7 +37,13 @@ from pathlib import Path
 from typing import Final, NamedTuple
 from urllib.parse import quote, unquote
 
-from codehelper.backends._atomic import atomic_write, read_text_or_none, remove_file
+from codehelper.backends._atomic import (
+    atomic_write,
+    file_lock,
+    lock_path_for,
+    read_text_or_none,
+    remove_file,
+)
 from codehelper.errors import CodeHelperError
 from codehelper.services.agents import (
     all_agents,
@@ -1049,7 +1056,9 @@ def _install_plan(
 
     Raises:
         CodeHelperError: a foreign or secret-discard file is in the way and was
-            not confirmed (``force`` / ``confirm``).
+            not confirmed (``force`` / ``confirm``); or, on a multi-file plan,
+            a plan file changed between the decision pass and the lock (rerun
+            converges).
     """
     decisions = [(f, _decide(paths, spec, f)) for f in plan]
 
@@ -1075,26 +1084,114 @@ def _install_plan(
                 raise CodeHelperError(_REFUSAL[action].format(path=f.path))
 
     wrote = False
-    for f, action in decisions:
-        if action is _Action.SKIP:
-            continue
-        if action is _Action.OVERWRITE_FOREIGN:
-            print(f"overwriting unmanaged file {f.path}")
-        elif action is _Action.DISCARD_SECRET:
-            print(f"discarding the only copy of {f.path}'s token")
+    # A multi-file plan (OPENAI_TOML's companion + wrapper) commits as ONE
+    # pair (issue #102); a single-file plan keeps the bare loop below —
+    # atomic_write is already all-or-nothing for one file, and a lock file
+    # must not appear next to a wrapper on PATH. Two mechanisms over the
+    # same window:
+    #
+    # - Concurrency: a cross-process :func:`file_lock` on the FIRST plan
+    #   path (the companion — alias-keyed, so every add/edit/rename of the
+    #   same alias contends on one lock) spans the decision re-check and
+    #   both writes, so a concurrent invocation cannot slip a write in
+    #   between the companion write and the wrapper write.
+    # - Failure: the companion's previous bytes are captured (absence
+    #   included) before the first write, and any later-step failure — the
+    #   wrapper write, a Ctrl-C between the two — restores them (a freshly
+    #   created companion is removed), so this run never LEAVES the pair
+    #   mixed. The companion-first ordering is untouched: it is what makes
+    #   a plain retry converge, and the rollback preserves exactly the
+    #   bytes a retry expects to find instead of fighting that property.
+    #
+    # Mirroring :func:`guarded_replace`, the lock alone is not enough — a
+    # writer that decided against pre-lock state could still act on a stale
+    # SKIP — so the decisions are re-derived under the lock and ANY drift
+    # refuses (same contract: a clean error, rerun converges). Unlike
+    # :func:`guarded_replace`, the confirm/force gate has already run above;
+    # a file that grew a guard-worthy state under the lock surfaces as this
+    # refusal, not as a fresh prompt.
+    multi = len(plan) > 1
+    lock = file_lock(plan[0].path) if multi else contextlib.nullcontext()
+    with lock:
+        # Re-derive EVERY plan decision under the lock and name the FIRST
+        # drifted file in the refusal — the drift may be in any slot, and a
+        # message naming the wrong file misdirects debugging.
+        drifted = next(
+            (
+                f.path
+                for f, action in decisions
+                if _decide(paths, spec, f) is not action
+            ),
+            None,
+        )
+        if multi and drifted is not None:
+            raise CodeHelperError(
+                f"{drifted} changed while the install was being "
+                "prepared — rerun the command"
+            )
+        # Prior bytes (absence included) for EVERY entry except the LAST:
+        # the last entry is the final write, so nothing later can break it
+        # and there is nothing to restore for it. Capturing the whole prefix
+        # — not just a hypothetical head — keeps the rollback total for any
+        # future plan that grows a third file, instead of silently partial.
+        priors: list[tuple[Path, str | None]] = (
+            [(f.path, read_text_or_none(f.path)) for f, _ in decisions[:-1]]
+            if multi
+            else []
+        )
         try:
-            atomic_write(f.path, f.body, mode=f.mode)
-        except OSError as exc:
-            # A mid-sequence write failure (disk full, a read-only parent, a
-            # broken symlink) surfaces as a clean CodeHelperError instead of a
-            # raw traceback. The plan is ordered catalog → profile → wrapper so
-            # the on-PATH executable lands LAST: a failure on a sibling never
-            # leaves a broken wrapper pointing at a missing profile/catalog,
-            # only harmless orphaned siblings the next idempotent install
-            # repairs.
-            raise CodeHelperError(f"failed to write {f.path}: {exc}") from exc
-        print(f"wrote {f.path}")
-        wrote = True
+            for f, action in decisions:
+                if action is _Action.SKIP:
+                    continue
+                if action is _Action.OVERWRITE_FOREIGN:
+                    print(f"overwriting unmanaged file {f.path}")
+                elif action is _Action.DISCARD_SECRET:
+                    print(f"discarding the only copy of {f.path}'s token")
+                try:
+                    atomic_write(f.path, f.body, mode=f.mode)
+                except OSError as exc:
+                    # A mid-sequence write failure (disk full, a read-only
+                    # parent, a broken symlink) surfaces as a clean
+                    # CodeHelperError instead of a raw traceback. The plan is
+                    # ordered companion → wrapper so the on-PATH executable
+                    # lands LAST, and for a multi-file plan the rollback
+                    # below undoes the captured prefix — the pair on disk
+                    # stays old+old (a retry converges); a single-file plan
+                    # needs no undo, one atomic_write has no earlier step.
+                    raise CodeHelperError(f"failed to write {f.path}: {exc}") from exc
+                print(f"wrote {f.path}")
+                wrote = True
+        except BaseException:
+            # A Ctrl-C between the writes is the same mixed-pair hazard as
+            # an OSError — hence BaseException, the posture atomic_write
+            # itself takes. Restore only when this run actually wrote: a
+            # failure before the first write left old+old on disk already.
+            # Restored newest-first, and best-effort — one slot's failed
+            # restore never stops the others', the original error always
+            # wins.
+            if wrote:
+                for rollback_path, rollback_body in reversed(priors):
+                    try:
+                        if rollback_body is None:
+                            if rollback_path.exists():
+                                remove_file(rollback_path)
+                                print(
+                                    f"removed the freshly created {rollback_path}",
+                                    file=sys.stderr,
+                                )
+                        else:
+                            atomic_write(rollback_path, rollback_body, mode=None)
+                            print(
+                                f"restored the previous {rollback_path}",
+                                file=sys.stderr,
+                            )
+                    except OSError as restore_exc:
+                        print(
+                            f"warning: could not roll {rollback_path} back after "
+                            f"the failed install: {restore_exc}",
+                            file=sys.stderr,
+                        )
+            raise
     return wrote
 
 
@@ -1251,9 +1348,15 @@ def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) ->
     """
     config_path = paths.codex_config_for(alias)
     _warn_stale_catalog(paths, alias)
-    return _remove_owned_paths(
-        [config_path] if _ownership_marker_only(config_path) else [], dry_run=dry_run
-    )
+    # The spent install lock sweeps with the profile it was created next to —
+    # its only content is the flock, so the companion's ownership proof IS the
+    # lock's (issue #125 review): otherwise every OPENAI_TOML alias ever
+    # installed leaves a permanent file behind in ``~/.codex``.
+    lock = lock_path_for(config_path)
+    owned = [config_path] if _ownership_marker_only(config_path) else []
+    if owned and lock.exists():
+        owned.append(lock)
+    return _remove_owned_paths(owned, dry_run=dry_run)
 
 
 def install_wrapper(
@@ -1367,11 +1470,21 @@ def remove_wrapper(
             f"refusing to remove unmanaged file {wrapper} (use --force)"
         )
 
+    # The companion's spent install lock rides along: it holds nothing but
+    # the flock, so the companion's ownership proof IS the lock's (issue
+    # #125 review) — without this every OPENAI_TOML alias ever installed
+    # leaves a permanent file behind in ``~/.codex``. Unlinking a lock
+    # another process currently flocks is safe on POSIX (the holder keeps
+    # its fd; the next installer recreates and flocks the fresh file).
     siblings = [
         path
         for path, ours in (
             (
                 paths.codex_config_for(name),
+                _ownership_marker_only(paths.codex_config_for(name)),
+            ),
+            (
+                lock_path_for(paths.codex_config_for(name)),
                 _ownership_marker_only(paths.codex_config_for(name)),
             ),
             (
