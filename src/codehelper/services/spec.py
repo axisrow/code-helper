@@ -351,13 +351,6 @@ class Preset:
 
 _DEEPSEEK_MODEL = "deepseek-v4-flash:0731-cloud"
 
-# The current Gemini flash, as served by the LiteLLM proxy the
-# gemini-litellm preset is curated against (model_name in the proxy's
-# config.yaml → litellm_params.model: gemini/gemini-3.7-flash).
-_GEMINI_MODEL = "gemini-3.7-flash"
-
-_LITELLM_PROXY_URL = "https://litellm.78.47.183.125.sslip.io"
-
 
 PRESETS: tuple[Preset, ...] = (
     Preset(
@@ -389,22 +382,6 @@ PRESETS: tuple[Preset, ...] = (
         description="Claude Code → glm-5.2:cloud via `ollama launch claude`",
     ),
     Preset(
-        alias="gemini-litellm",
-        agent="claude",
-        provider="litellm",
-        shape=ConfigShape.ANTHROPIC_ENV,
-        model=_GEMINI_MODEL,
-        tier_models=TierModels.uniform(_GEMINI_MODEL),
-        # Google serves no Anthropic-compatible endpoint (#74), so Gemini
-        # reaches Claude Code only through a translating proxy — this preset
-        # is curated against the user's own LiteLLM instance, whose address
-        # rides in base_url below (--base-url points it at a different one).
-        # The proxy also carries the /v1/responses codex needs, so the codex
-        # pairing is `add --agent codex --provider litellm --base-url …`.
-        base_url=_LITELLM_PROXY_URL,
-        description=f"Claude Code → {_GEMINI_MODEL} via the LiteLLM proxy",
-    ),
-    Preset(
         alias="bai",
         agent="claude",
         provider="bai",
@@ -417,8 +394,8 @@ PRESETS: tuple[Preset, ...] = (
         # subagent_model stays None (the glm-preset convention). base_url
         # stays empty — mandatory for a FIXED-address provider (the bai
         # registry entry carries the only documented host; --base-url is
-        # refused), the mirror image of the gemini-litellm preset, which
-        # exists precisely to carry one.
+        # refused), the mirror image of a preset for a REQUIRED-policy
+        # provider, which exists precisely to carry one.
         description="Claude Code → B.AI",
     ),
 )

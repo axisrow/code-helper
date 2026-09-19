@@ -142,21 +142,6 @@ def test_incompatible_pairing_is_refused(capsys):
 
 
 @pytest.mark.integration
-def test_suspended_gemini_refused_as_unknown_axes_not_a_broken_wrapper(capsys):
-    """Issue #74: `codex × gemini` used to install a profile carrying
-    `wire_api="chat"`, which current Codex hard-rejects at config load. The
-    provider is now suspended, so the pairing must refuse through the NORMAL
-    incompatibility path — the provider is known (not "unknown provider"),
-    the mechanism is not (no common configuration)."""
-    assert (
-        main(["add", "--agent", "codex", "--provider", "gemini", "--model", "x"]) == 1
-    )
-    err = capsys.readouterr().err
-    assert "unknown provider" not in err
-    assert "no common configuration" in err
-
-
-@pytest.mark.integration
 def test_launch_only_agent_incompatible_with_zai(capsys):
     """A launch-only agent has no shape in common with a non-ollama provider,
     and the error's hint names `ollama` as what it DOES work with."""
@@ -226,40 +211,41 @@ def test_add_litellm_claude_with_base_url(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# gemini-litellm — the preset that carries its provider's REQUIRED base_url
-# (issue #86): Google serves no Anthropic-compatible endpoint, so the preset
-# ships its curated LiteLLM instance's address and --base-url retargets it.
+# presets that carry a base_url (issue #86 mechanism): a preset for a
+# REQUIRED-policy provider ships its instance's address and --base-url
+# retargets it. No shipped preset carries one since the gemini story was
+# removed (issue #112), so these run against a virtual preset registered
+# only for the test — the mechanism is generic, the coverage stays.
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.integration
-def test_add_gemini_litellm_uses_the_preset_url(tmp_path, monkeypatch):
-    monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
-    assert main(["add", "gemini-litellm", "--context-window", "none"]) == 0
-    body = _body(tmp_path, "gemini-litellm")
-    assert "export ANTHROPIC_BASE_URL='https://litellm.78.47.183.125.sslip.io'" in body
-    assert "gemini-3.7-flash" in body
+def _register_virtual_preset(monkeypatch):
+    """Register a ``relay`` preset: claude × litellm with a carried URL."""
+    import codehelper.services.spec as spec_module
+    from codehelper.services.model import ConfigShape
+    from codehelper.services.spec import Preset, TierModels
+
+    virtual = Preset(
+        alias="relay",
+        agent="claude",
+        provider="litellm",
+        shape=ConfigShape.ANTHROPIC_ENV,
+        model="relay-model",
+        tier_models=TierModels.uniform("relay-model"),
+        base_url="https://relay.example.com",
+        description="Claude Code → relay-model via the relay proxy",
+    )
+    monkeypatch.setattr(spec_module, "PRESETS", (*spec_module.PRESETS, virtual))
 
 
 @pytest.mark.integration
-def test_add_gemini_litellm_base_url_overrides_the_preset(tmp_path, monkeypatch):
+def test_add_virtual_preset_uses_the_carried_url(tmp_path, monkeypatch):
+    _register_virtual_preset(monkeypatch)
     monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
-    assert (
-        main(
-            [
-                "add",
-                "gemini-litellm",
-                "--base-url",
-                "https://mine.example.com",
-                "--context-window",
-                "none",
-            ]
-        )
-        == 0
-    )
-    assert "export ANTHROPIC_BASE_URL='https://mine.example.com'" in _body(
-        tmp_path, "gemini-litellm"
-    )
+    assert main(["add", "relay", "--context-window", "none"]) == 0
+    body = _body(tmp_path, "relay")
+    assert "export ANTHROPIC_BASE_URL='https://relay.example.com'" in body
+    assert "relay-model" in body
 
 
 @pytest.mark.integration
@@ -288,6 +274,7 @@ def test_add_preset_base_url_never_injects_the_active_profile(tmp_path, monkeypa
     from codehelper.services.state import set_active_selection
 
     monkeypatch.delenv("LITELLM_API_KEY", raising=False)
+    _register_virtual_preset(monkeypatch)
     paths = Paths.from_home(tmp_path)
     secrets.save_credential(paths, "litellm", "sk-cached-for-host-a", "work")
     set_active_selection(paths, "litellm", "work")
@@ -307,7 +294,7 @@ def test_add_preset_base_url_never_injects_the_active_profile(tmp_path, monkeypa
         main(
             [
                 "add",
-                "gemini-litellm",
+                "relay",
                 "--base-url",
                 "https://host-b.example",
                 "--context-window",
@@ -316,7 +303,7 @@ def test_add_preset_base_url_never_injects_the_active_profile(tmp_path, monkeypa
         )
         == 0
     )
-    body = _body(tmp_path, "gemini-litellm")
+    body = _body(tmp_path, "relay")
     # The freshly typed token is what got installed — never the host-A cache.
     assert "export ANTHROPIC_AUTH_TOKEN='sk-typed-fresh-for-host-b'" in body
     assert "sk-cached-for-host-a" not in body
@@ -330,14 +317,15 @@ def test_add_preset_base_url_gate_accepts_an_overridable_provider(
     spec_from_preset/with_base_url honour any provider whose address the
     caller may set (REQUIRED or OVERRIDABLE), so a hypothetical OVERRIDABLE
     preset provider must not be refused with the constructor-form message.
-    Simulated by re-registering the litellm preset's provider as OVERRIDABLE
-    — no shipped provider uses that policy today, which is why the real
-    registry is untouched."""
+    Simulated by re-registering the virtual relay preset's provider as
+    OVERRIDABLE — no shipped provider uses that policy today, which is why
+    the real registry is untouched."""
     from dataclasses import replace
 
     import codehelper.cli.parser as parser_module
     from codehelper.services.model import BaseUrlPolicy, get_provider
 
+    _register_virtual_preset(monkeypatch)
     monkeypatch.setenv("LITELLM_API_KEY", "sk-test")
     monkeypatch.setattr(
         parser_module,
@@ -350,7 +338,7 @@ def test_add_preset_base_url_gate_accepts_an_overridable_provider(
         main(
             [
                 "add",
-                "gemini-litellm",
+                "relay",
                 "--base-url",
                 "https://overridable.example.com",
                 "--context-window",
@@ -360,7 +348,7 @@ def test_add_preset_base_url_gate_accepts_an_overridable_provider(
         == 0
     )
     assert "export ANTHROPIC_BASE_URL='https://overridable.example.com'" in _body(
-        tmp_path, "gemini-litellm"
+        tmp_path, "relay"
     )
 
 
@@ -872,17 +860,6 @@ def test_list_providers(capsys):
     out = capsys.readouterr().out
     assert "ollama-direct" in out and "zai" in out and "litellm" in out
     assert "deepseek" in out and "deepseek-openai" in out
-
-
-@pytest.mark.integration
-def test_list_providers_marks_the_suspended_entry(capsys):
-    """gemini stays registered and visible (issue #74) but pairs with nothing
-    BY DECISION — without the `(suspended)` tag its all-blank matrix column
-    reads as a bug."""
-    assert main(["list", "providers"]) == 0
-    out = capsys.readouterr().out
-    gemini_line = next(line for line in out.splitlines() if line.startswith("gemini"))
-    assert "(suspended)" in gemini_line
 
 
 @pytest.mark.integration

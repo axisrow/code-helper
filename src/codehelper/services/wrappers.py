@@ -1721,7 +1721,7 @@ def edit_wrapper(
         # Distinguish a corrupt marker from a SUSPENDED provider: the marker
         # parses fine, but the recorded pairing has no shape any more, so
         # the reconstruction fails. rename's "not recognisable" wording
-        # would lie about a gemini-style wrapper (#74).
+        # would lie about a suspended-provider wrapper.
         fields = _marker_fields(paths, alias)
         suspended: Provider | None = None
         if fields.get("provider"):

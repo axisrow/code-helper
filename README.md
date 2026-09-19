@@ -115,7 +115,6 @@ token-profile association.
 | `deepseek-ollama` | Claude Code | local Ollama daemon, `deepseek-v4-flash:0731-cloud` | literal token (`ollama`) |
 | `glm` | Claude Code | Z.ai (`https://api.z.ai/api/anthropic`), `glm-5.3` | secret (`ZAI_API_KEY`) |
 | `glm-ollama` | Claude Code | `ollama launch claude --model glm-5.2:cloud` | none — `ollama launch` authenticates itself |
-| `gemini-litellm` | Claude Code | LiteLLM proxy (see [Google Gemini via LiteLLM](#google-gemini-via-litellm)), `gemini-3.7-flash` | secret (`LITELLM_API_KEY`) |
 | `bai` | Claude Code | B.AI (`https://api.b.ai`), `qwen3.8-flash` (see [B.AI](#bai)) | secret (`BAI_API_KEY`) |
 
 There is no preset for the cloud DeepSeek API (`deepseek`/`deepseek-openai`
@@ -125,64 +124,9 @@ Presets exist alongside the constructor because they pin a curated model
 choice, not just "an agent and a provider". There is no general `litellm`
 preset — a preset bundles a fixed provider address, and `litellm`'s whole
 point is that its address is yours, not this project's to bundle; use the
-constructor with `--base-url` instead (see below). `gemini-litellm` is the
-one exception: it exists precisely to bundle one concrete LiteLLM instance's
-address, and `--base-url` retargets it to yours. `bai` sits on the opposite
+constructor with `--base-url` instead (see below). `bai` sits on the opposite
 pole: its address is fixed registry data, so the preset bundles no URL and
 `--base-url` is refused.
-
-## Google Gemini via LiteLLM
-
-`gemini-litellm` gets Google's models into Claude Code and Codex — through a
-translating proxy, because **Google serves neither protocol the agents
-speak**: its OpenAI-compatible endpoint is chat-completions only (no
-`/responses`, which is all current Codex accepts), and there is no
-Anthropic-compatible endpoint at all (which is what Claude Code needs). The
-conversion is [LiteLLM](https://docs.litellm.ai/)'s job — codehelper only
-does the addressing, and never translates formats itself:
-
-```
-Claude Code ──(ANTHROPIC_BASE_URL=<litellm>, /v1/messages)──► LiteLLM ──► Google chat/completions
-Codex       ──(base_url=<litellm>/v1,       responses)  ──► LiteLLM ──► Google chat/completions
-```
-
-```bash
-# claude: the preset carries its curated LiteLLM address and model
-codehelper add gemini-litellm                # prompts for LITELLM_API_KEY
-
-# point it at a different LiteLLM instance
-codehelper add gemini-litellm --base-url https://my-proxy.example.com
-
-# codex: the constructor form over the same proxy
-codehelper add --agent codex --provider litellm \
-                --base-url https://my-proxy.example.com --model gemini-3.7-flash
-```
-
-The proxy's `config.yaml` needs one entry per model, e.g.:
-
-```yaml
-model_list:
-  - model_name: gemini-3.7-flash
-    litellm_params:
-      model: gemini/gemini-3.7-flash
-      api_key: os.environ/GEMINI_API_KEY
-```
-
-**Trust boundary, stated plainly:** the preset embeds a concrete proxy address,
-so `add gemini-litellm` resolves `LITELLM_API_KEY` and bakes it into a wrapper
-that sends every prompt to that address — press Enter on its chip and an
-already-running session is retargeted there too. If you serve several LiteLLM
-instances, note that token profiles are keyed by provider name (`litellm`),
-not by host: a profile cached for one instance will be offered for the other.
-Point the wrapper at a different instance with `--base-url`, and check `list`
-or the script itself for the `ANTHROPIC_BASE_URL` line whenever in doubt.
-
-Direct `codex × gemini` (and `claude × gemini` without a proxy) is
-impossible, not merely unbuilt: the `gemini` provider entry is **suspended**
-— `codehelper list providers` marks it, and `add` refuses the pairing with
-the normal "no common configuration mechanism" error instead of installing a
-wrapper that cannot work. If Google ever ships `/v1beta/openai/responses`,
-unsuspending is a one-line registry change.
 
 ## Parallel sessions: native `claude` + wrappers at the same time
 

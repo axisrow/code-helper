@@ -827,10 +827,10 @@ def _handle_add(args: argparse.Namespace | AddRequest) -> int:
     if not using_axes and req.base_url:
         # Checked before the preset branch so the message stays about the
         # flag, not about an unrecognised preset name. One exception
-        # (issue #86): a preset curated against a REQUIRED-provider instance
-        # (gemini-litellm) carries that instance's address as a DEFAULT —
-        # --base-url may retarget it, exactly the override the constructor
-        # form takes.
+        # (issue #86): a preset whose provider takes a runtime URL
+        # (REQUIRED/OVERRIDABLE policy) accepts a carried or defaulted
+        # address — --base-url may retarget it, exactly the override the
+        # constructor form takes.
         preset_takes_url = False
         if req.name:
             try:

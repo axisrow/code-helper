@@ -413,7 +413,7 @@ def test_edit_token_picker_hides_a_disabled_providers_wrappers(tmp_path, monkeyp
 
     paths = Paths.from_home(tmp_path)
     install_wrapper(paths, "glm", token="sk-a")
-    install_wrapper(paths, "gemini-litellm", token="sk-l")
+    install_wrapper(paths, "bai", token="sk-l")
     from codehelper.services.secrets import save_credential
 
     save_credential(paths, "zai", "sk-a")  # so disable passes the only-copy guard
@@ -431,7 +431,7 @@ def test_edit_token_picker_hides_a_disabled_providers_wrappers(tmp_path, monkeyp
     main(["disable", "zai", "--yes"])
     assert _edit_token_spec(paths, None) is None
     assert "glm" not in captured["values"]
-    assert "gemini-litellm" in captured["values"]  # untouched provider stays
+    assert "bai" in captured["values"]  # untouched provider stays
 
 
 @pytest.mark.integration

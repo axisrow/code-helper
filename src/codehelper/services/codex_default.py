@@ -175,7 +175,7 @@ def resolve_default_patch(agent: Agent, provider: Provider, model: str) -> Defau
         model=model,
         provider_table=provider.name,
         display_name=provider.description or provider.name,
-        base_url=openai_base_url(provider.base_url, provider.base_url_is_openai_root),
+        base_url=openai_base_url(provider.base_url),
         wire_api=provider.wire_api,
         context_window=uniform_context_window([model]),
         env_key=openai_env_key(provider),
