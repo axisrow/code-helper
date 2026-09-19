@@ -852,23 +852,32 @@ class TuiSession:
         Deliberately NOT ``set-default --restore``: restore rolls the file
         back to a backup snapshot, undoing unrelated hand-edits made since.
         This removes only the region this tool owns — "stop overriding",
-        not "undo my last change".
+        not "undo my last change". Routes through ``_handle_set_default``'s
+        ``native`` operation (issue #47) — the same handler path the CLI
+        ``set-default --native`` takes, never a second implementation.
         """
-        from codehelper.cli.parser import _confirm_set_default
-        from codehelper.services.codex_default import clear_default
-        from codehelper.services.paths import Paths
+        from codehelper.cli.parser import _handle_set_default
+        from codehelper.cli.requests import SetDefaultRequest
 
-        # Reuses the CLI's own confirm — same diff-first prompt, and (the part
-        # a local re-implementation would have silently dropped) the same
-        # off-a-TTY refusal, so a scripted run can never be talked into
-        # patching config.toml through the TUI.
+        # force stays False: unlike the hot-apply chips, this keep-the-prompt
+        # routing reuses the handler's confirm gate — same diff-first prompt,
+        # and (the part a local re-implementation would have silently
+        # dropped) the same off-a-TTY refusal, so a scripted run can never be
+        # talked into patching config.toml through the TUI.
         self._run(
-            lambda _req: clear_default(
-                Paths.default(),
+            _handle_set_default,
+            SetDefaultRequest(
+                agent=None,
+                provider=None,
+                model=None,
+                base_url=None,
+                restore=False,
+                slot=None,
+                native=True,
                 dry_run=getattr(self.args, "dry_run", False),
-                confirm=_confirm_set_default,
+                force=False,
+                debug=getattr(self.args, "debug", False),
             ),
-            None,
             live=True,
         )
 

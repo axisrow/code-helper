@@ -2846,6 +2846,40 @@ def test_enter_on_an_already_applied_chip_does_not_rewrite(monkeypatch):
 
 
 @pytest.mark.integration
+def test_codex_native_chip_routes_through_the_cli_handler(monkeypatch):
+    """Enter on the codex row's native chip dispatches into
+    ``_handle_set_default`` carrying ``native=True`` — the SAME handler path
+    the CLI ``set-default --native`` takes (issue #47). Pinning the routing,
+    not just the effect: a second implementation here is exactly the drift
+    the TUI-mirrors-the-CLI rule exists to prevent. The chip is only
+    reachable when an override is actually live, so the test installs a
+    managed region first (``current_default`` non-None -> native NOT
+    applied -> Enter dispatches instead of short-circuiting)."""
+    import codehelper.cli.parser as parser_module
+
+    config = Paths.default().codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        'model = "glm-5.2:cloud"\nmodel_provider = "ollama-direct"\n',
+        encoding="utf-8",
+    )
+
+    seen = []
+    monkeypatch.setattr(
+        parser_module,
+        "_handle_set_default",
+        lambda req: seen.append(req) or 0,
+    )
+    _real_menu_keys(monkeypatch, ["DOWN", "ENTER", "CANCEL"])
+    assert main(["tui"]) == 0
+
+    assert len(seen) == 1
+    assert seen[0].native is True
+    # force stays False: the chip keeps the diff-first confirm gate.
+    assert seen[0].force is False
+
+
+@pytest.mark.integration
 def test_enter_on_the_selected_deepseek_ollama_chip_is_a_silent_noop(monkeypatch):
     from codehelper.services.claude_settings import apply_switch
     from codehelper.services.wrappers import get_spec

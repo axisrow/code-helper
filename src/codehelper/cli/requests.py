@@ -397,7 +397,9 @@ class ProxyRequest:
 class SetDefaultRequest:
     """Inputs to ``_handle_set_default`` (the ``set-default`` subcommand and TUI).
 
-    ``restore`` with an optional ``slot`` reads a backup back; otherwise
+    Three mutually exclusive operations, validated in the handler: ``restore``
+    with an optional ``slot`` reads a backup back; ``native`` removes this
+    tool's managed region (codex's "native" — issue #47); otherwise
     ``agent``/``provider``/``model`` (and ``base_url`` for a runtime-address
     provider) define the patch to apply.
     """
@@ -411,6 +413,10 @@ class SetDefaultRequest:
     dry_run: bool
     force: bool
     debug: bool
+    #: "clear my override, back to Codex stock" — the ``set-default --native``
+    #: operation, NOT a backend axis. Defaulted so every existing keyword
+    #: construction (the TUI's two apply paths) stays valid untouched.
+    native: bool = False
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> SetDefaultRequest:
@@ -424,6 +430,7 @@ class SetDefaultRequest:
             dry_run=bool(_g(args, "dry_run", False)),
             force=bool(_g(args, "force", False)),
             debug=bool(_g(args, "debug", False)),
+            native=bool(_g(args, "native", False)),
         )
 
 

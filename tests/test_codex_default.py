@@ -1156,3 +1156,126 @@ def test_set_default_writes_env_key_for_secret_provider(tmp_path):
 
     text = config.read_text(encoding="utf-8")
     assert 'env_key = "FREELLMAPI_API_KEY"' in text
+
+
+# ---------------------------------------------------------------------------
+# CLI: `set-default --native` — the explicit "clear my override" entry (#47)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_native_flag_removes_the_managed_region_but_keeps_hand_edits(tmp_path, capsys):
+    """The #47 CLI entry end to end: ``set-default`` patches config.toml, the
+    user hand-adds a line, ``set-default --native`` drops ONLY the managed
+    region — the hand edit survives. ``--restore`` would have rolled BOTH
+    back to the pre-patch snapshot."""
+    from codehelper.__main__ import main
+
+    assert (
+        main(
+            [
+                "set-default",
+                "--agent",
+                "codex",
+                "--provider",
+                "ollama-direct",
+                "--model",
+                "glm-5.2:cloud",
+                "--force",
+            ]
+        )
+        == 0
+    )
+    config = Paths.from_home(tmp_path).codex_main_config()
+    # The hand edit goes to the TOP-LEVEL region, ahead of the managed keys.
+    # Appending after the [model_providers.X] table would make it part of
+    # that table's body (which extends to EOF) — TOML-wise it would BE table
+    # content, so a clear taking the table along is correct, not lossy.
+    config.write_text(
+        'approval_policy = "on-request"\n' + config.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    assert main(["set-default", "--native", "--force"]) == 0
+
+    result = config.read_text(encoding="utf-8")
+    assert "model_provider =" not in result
+    assert "[model_providers.ollama-direct]" not in result
+    assert 'approval_policy = "on-request"' in result
+    assert current_default(Paths.from_home(tmp_path)) is None
+
+
+@pytest.mark.integration
+def test_native_flag_needs_no_backup_ring(tmp_path, capsys):
+    """--native is "stock regardless of ring state": with NO backup slot in
+    existence --restore refuses ("no backup found") while --native still
+    clears the managed region. The behavioral pin on the #47 requirement that
+    the reset must NOT fall back to ``--restore --slot N`` semantics — that
+    would undo the last patch, not reach stock, and would dead-end a user
+    whose ring has rotated past the pre-override state."""
+    from codehelper.__main__ import main
+
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(_FOREIGN_CONFIG, encoding="utf-8")
+    assert not paths.codex_main_config_backup(1).exists()
+
+    assert main(["set-default", "--restore", "--force"]) == 1
+    assert "no backup found" in capsys.readouterr().err
+
+    assert main(["set-default", "--native", "--force"]) == 0
+
+    result = config.read_text(encoding="utf-8")
+    assert "model_provider =" not in result
+    assert "[model_providers.ollama]" not in result
+    assert "[projects.'/home/user/work']" in result
+
+
+@pytest.mark.integration
+def test_native_flag_refuses_the_axis_flags(tmp_path, capsys):
+    """--native names NO backend: carrying any of the patch axes is a
+    contradiction, refused the same way --restore's are."""
+    from codehelper.__main__ import main
+
+    assert main(["set-default", "--native", "--agent", "codex", "--force"]) == 1
+    assert "--native cannot be combined with" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_native_flag_and_restore_are_mutually_exclusive(tmp_path, capsys):
+    """Two different operations on the same file — one invocation, one of
+    them, ever."""
+    from codehelper.__main__ import main
+
+    assert main(["set-default", "--native", "--restore", "--force"]) == 1
+    assert "two different operations" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_native_flag_dry_run_previews_and_never_writes(tmp_path, capsys):
+    """Same ``--dry-run`` contract as the patch operation: previews the
+    managed-region removal, writes nothing, creates no backup, and never
+    prompts (no --force needed)."""
+    from codehelper.__main__ import main
+
+    paths = Paths.from_home(tmp_path)
+    config = paths.codex_main_config()
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(_FOREIGN_CONFIG, encoding="utf-8")
+
+    assert main(["set-default", "--native", "--dry-run"]) == 0
+
+    assert "would write" in capsys.readouterr().out
+    assert config.read_text(encoding="utf-8") == _FOREIGN_CONFIG
+    assert not paths.codex_main_config_backup(1).exists()
+
+
+@pytest.mark.integration
+def test_native_flag_is_a_noop_when_already_native(tmp_path, capsys):
+    """Nothing of ours applied -> exit 0 and "no changes", not an error:
+    already-native IS the requested state."""
+    from codehelper.__main__ import main
+
+    assert main(["set-default", "--native", "--force"]) == 0
+    assert "no changes to config.toml" in capsys.readouterr().out

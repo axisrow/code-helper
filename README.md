@@ -77,6 +77,7 @@ codehelper                               # arrow-key menu over all of the above
 # change what a bare `codex` (no wrapper) runs by default
 codehelper set-default --agent codex --provider ollama-direct --model glm-5.2:cloud
 codehelper set-default --restore         # undo the last set-default
+codehelper set-default --native          # stop overriding — back to Codex stock
 
 # retire a provider for a while (subscription ended, daemon uninstalled):
 # delete its wrappers and hide it everywhere — list/add/switch/TUI chips/tokens
@@ -346,7 +347,15 @@ codehelper set-default --agent codex --provider ollama-direct --model glm-5.2:cl
 codehelper set-default --agent codex --provider ollama-direct --model glm-5.2:cloud --dry-run
 codehelper set-default --restore                # undo, from the newest backup
 codehelper set-default --restore --slot 2        # or an older one
+codehelper set-default --native                 # stop overriding — back to Codex stock
 ```
+
+`--native` is codex's counterpart of `switch native`: it removes only the keys
+and the `[model_providers.X]` table this tool wrote, so a bare `codex` falls
+back to its own default backend. It is deliberately not `--restore`: restore
+rolls the whole file back to a backup snapshot (and needs one to exist),
+while `--native` works regardless of the backup ring and leaves every other
+edit you made since byte-for-byte alone.
 
 This is the **one** command that touches `~/.codex/config.toml`. It never uses
 a round-trip TOML parser (this project ships no such dependency) — it patches
