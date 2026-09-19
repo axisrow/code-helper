@@ -2677,6 +2677,74 @@ def test_one_iteration_reads_settings_env_once(monkeypatch):
 
 
 @pytest.mark.integration
+def test_one_iteration_scans_the_bin_dir_once(monkeypatch):
+    """Issue #110 step 4: ONE ``discover_managed`` per main-loop iteration.
+    The chip strips used to rescan ``~/.local/bin`` once per agent row and
+    the wrapper list scanned it again; all of them now share the session's
+    per-iteration ``_managed`` scan and ``_spec_memo``."""
+    import codehelper.services.wrappers as wrappers_module
+    from codehelper.services.wrappers import install_wrapper
+
+    install_wrapper(Paths.default(), "glm", token="test-token")
+
+    calls = {"discover_managed": 0}
+    real = wrappers_module.discover_managed
+
+    def counting(paths):
+        calls["discover_managed"] += 1
+        return real(paths)
+
+    monkeypatch.setattr(wrappers_module, "discover_managed", counting)
+
+    _real_menu_keys(monkeypatch, ["CANCEL"])
+    assert main(["tui"]) == 0
+
+    assert calls == {"discover_managed": 1}
+
+
+@pytest.mark.integration
+def test_spec_memo_consumers_match_a_fresh_read_including_agy(monkeypatch):
+    """The memo-backed chip strip and wrapper list answer exactly as a
+    read-through call — for a chipset agent (claude) AND for the launch-only
+    agy, whose wrappers reach the memo's consumers without any
+    `_AGENT_BACKENDS` row (issue #112's honest degradation, #110's memo)."""
+    from types import SimpleNamespace as NS
+
+    from codehelper.cli.tui import TuiSession
+    from codehelper.services.wrappers import install_wrapper
+
+    install_wrapper(Paths.default(), "glm", token="test-token")
+    install_wrapper(Paths.default(), "agy-native")
+
+    session = TuiSession(cast(argparse.Namespace, NS(debug=False, dry_run=False)))
+    session._refresh_active_label()
+    paths = Paths.default()
+
+    # Chip strips for a chipset agent and for a launch-only one, fed from
+    # the memo, must equal the same strips re-read from disk.
+    for agent_name in ("claude", "agy"):
+        memoized = session._chips_for(
+            agent_name, paths, managed=session._managed, specs=session._spec_memo
+        )
+        fresh = session._chips_for(agent_name, paths)
+        assert [session._chip_name(chip) for chip in memoized] == [
+            session._chip_name(chip) for chip in fresh
+        ]
+    assert "agy-native" in [
+        session._chip_name(chip) for chip in session._chips_for("agy", paths)
+    ]
+
+    memoized_specs = session._all_wrapper_specs(
+        managed=session._managed, specs=session._spec_memo
+    )
+    fresh_specs = session._all_wrapper_specs()
+    assert sorted(spec.name for spec in memoized_specs) == sorted(
+        spec.name for spec in fresh_specs
+    )
+    assert "agy-native" in [spec.name for spec in memoized_specs]
+
+
+@pytest.mark.integration
 def test_chip_cursor_is_independent_per_agent(monkeypatch):
     """Each agent row remembers its own chip, so moving away and back does
     not reset where the user was."""
@@ -3863,3 +3931,140 @@ def test_chips_of_a_disabled_provider_vanish_from_the_chipset():
         getattr(chip, "name", None) == "deepseek-ollama"
         for chip in session._chips_for("claude", Paths.default())
     )
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.name != "posix", reason="PTY tests require POSIX")
+def test_main_screen_redraws_and_exits_cleanly_with_the_preloads(tmp_path):
+    """Manual PTY verification for the #110 per-iteration snapshots: with all
+    four preloads live (state.json, credentials.json, settings.json env, one
+    bin scan + spec memo) the real terminal driver still renders every chip
+    row in place, the exact chip readback reports the applied wrapper, the
+    settings/profile screens round-trip, and Esc exits 0. The
+    injected-``read_key`` suite cannot see the raw-mode/ANSI interplay this
+    exercises — same convention as the agy PTY run."""
+    import errno
+    import fcntl
+    import pty
+    import select
+    import struct
+    import subprocess
+    import sys
+    import termios
+    import time
+
+    from codehelper.services.claude_settings import apply_switch
+    from codehelper.services.model import get_provider
+    from codehelper.services.paths import Paths as P
+    from codehelper.services.secrets import save_credential
+    from codehelper.services.spec import TierModels
+    from codehelper.services.wrappers import install_wrapper
+
+    environment = os.environ.copy()
+    environment["HOME"] = str(tmp_path)
+    environment["ZAI_API_KEY"] = "sk-pty-preload-token"
+    source_dir = str(Path(__file__).resolve().parents[1] / "src")
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part for part in (source_dir, environment.get("PYTHONPATH")) if part
+    )
+
+    # Real data behind every snapshot: a cached profile, an installed claude
+    # wrapper made genuinely live (switch), and an agy launch-only wrapper —
+    # so state.json, credentials.json, settings.json and the bin scan all
+    # carry content on the iteration path.
+    paths = P.from_home(tmp_path)
+    save_credential(paths, "zai", "sk-pty-preload-token")
+    install_wrapper(paths, "glm", token="sk-pty-preload-token")
+    install_wrapper(paths, "agy-native")
+    apply_switch(
+        paths,
+        provider=get_provider("zai"),
+        tier_models=TierModels.uniform("glm-5.3"),
+        token="sk-pty-preload-token",
+        force=True,
+    )
+
+    master_fd, slave_fd = pty.openpty()
+    fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+    child = subprocess.Popen(
+        [sys.executable, "-m", "codehelper", "tui"],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        env=environment,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+    output = bytearray()
+    search_from = 0
+
+    def read_until(marker: str) -> None:
+        nonlocal search_from
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            found = output.find(marker.encode(), search_from)
+            if found >= 0:
+                search_from = found + len(marker)
+                return
+            ready, _, _ = select.select([master_fd], [], [], 0.1)
+            if ready:
+                try:
+                    output.extend(os.read(master_fd, 4096))
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
+        raise AssertionError(output.decode(errors="replace")[-3000:])
+
+    def menu_key(value: str, marker: str) -> None:
+        deadline = time.monotonic() + 5
+        while True:
+            ready, _, _ = select.select([master_fd], [], [], 0.05)
+            if ready:
+                try:
+                    output.extend(os.read(master_fd, 4096))
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
+            elif not (termios.tcgetattr(master_fd)[3] & termios.ICANON):
+                break
+            elif time.monotonic() >= deadline:
+                raise AssertionError("TUI did not return to its raw read")
+        os.write(master_fd, value.encode())
+        read_until(marker)
+
+    try:
+        read_until("Esc quit")
+        menu_key("\x1b[D", "glm")  # chip cursor: pure in-memory, in-place
+        menu_key("\x1b[C", "glm")
+        menu_key("\x1b[B", "proxy")  # DOWN onto the proxy chipset row
+        menu_key("s", "Settings:")  # proxy readback screen
+        menu_key("\x1b", "Esc quit")
+        menu_key("p", "Active profile")  # profile resolvers screen
+        menu_key("\t", "Active profile")  # Tab cycles within it
+        menu_key("\x1b", "Esc quit")
+        menu_key("\x1b", "")  # quit
+    finally:
+        deadline = time.monotonic() + 5
+        while child.poll() is None and time.monotonic() < deadline:
+            ready, _, _ = select.select([master_fd], [], [], 0.1)
+            if ready:
+                try:
+                    output.extend(os.read(master_fd, 4096))
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
+        if child.poll() is None:
+            child.kill()
+
+    code = child.wait()
+    text = output.decode(errors="replace")
+    assert code == 0, f"exit code {code}\n{text[-3000:]}"
+    assert "Traceback" not in text, text[-3000:]
+    assert "error:" not in text, text[-3000:]
+    # The chipset rendered from the memoized snapshot: an agy wrapper row
+    # (launch-only agent, memo consumer) and the exact applied readback on
+    # the live glm chip — the env snapshot fed current_switch's answer.
+    assert "agy" in text
+    assert "✓ glm" in text
+    # In-place redraws across the whole session, not a single frame.
+    assert text.count("Esc quit") >= 5

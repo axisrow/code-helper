@@ -311,6 +311,8 @@ class TuiSession:
         "_tokens_reveal",
         "_state_snapshot",
         "_creds_snapshot",
+        "_managed",
+        "_spec_memo",
     )
 
     def __init__(self, args: argparse.Namespace) -> None:
@@ -357,6 +359,15 @@ class TuiSession:
         #: The per-iteration ``credentials.json`` snapshot (issue #110), fed
         #: to the profile resolvers and the chip-token cache leg the same way.
         self._creds_snapshot: dict[str, dict[str, str]] = {}
+        #: The per-iteration ``~/.local/bin`` scan (issue #110): run ONCE and
+        #: shared by every agent row's chip strip instead of once per row.
+        self._managed: list[str] = []
+        #: name -> ``spec_from_installed`` result (or None: a registry preset
+        #: name that is not installed), built ONCE per iteration over the
+        #: discovered ad-hoc wrappers plus the registry wrapper names — the
+        #: chip strips, the wrapper list and the chip-token readback all
+        #: consume this memo instead of re-reading the same wrapper bodies.
+        self._spec_memo: dict[str, WrapperSpec | None] = {}
 
     # --- UI primitives ---------------------------------------------------
 
@@ -648,16 +659,24 @@ class TuiSession:
 
     # --- wrappers --------------------------------------------------------
 
-    def _all_wrapper_specs(self, *, state: dict[str, object] | None = None):
+    def _all_wrapper_specs(
+        self,
+        *,
+        state: dict[str, object] | None = None,
+        managed: list[str] | None = None,
+        specs: dict[str, WrapperSpec | None] | None = None,
+    ):
         """Presets plus managed constructor wrappers, without duplicate names.
 
         Wrappers of a runtime-disabled provider are excluded (issue #89) —
         the provider vanishes from the chipset and this list together.
 
         ``state`` is the per-iteration snapshot (issue #110) for the
-        disabled-provider filter; ``None`` falls back to the session's
-        :attr:`_state_snapshot`, so the per-iteration row builder never
-        re-reads ``state.json``.
+        disabled-provider filter (default: the session's
+        :attr:`_state_snapshot`); ``managed``/``specs`` are the per-iteration
+        bin scan and spec memo, so the per-iteration row builder re-reads
+        neither ``state.json`` nor the wrapper bodies. ``None`` values read
+        from disk, so a direct call behaves exactly as before.
         """
         from codehelper.services.model import is_provider_disabled
         from codehelper.services.paths import Paths
@@ -670,22 +689,30 @@ class TuiSession:
 
         paths = Paths.default()
         disabled = disabled_providers(paths, state=state or self._state_snapshot)
-        specs = []
-        known = set()
-        for spec in WRAPPERS:
-            resolved = spec_from_installed(paths, spec.name) or spec
+
+        def _installed_spec(name: str):
+            return (
+                specs.get(name)
+                if specs is not None
+                else spec_from_installed(paths, name)
+            )
+
+        resolved_specs: list = []
+        known: set[str] = set()
+        for template in WRAPPERS:
+            resolved = _installed_spec(template.name) or template
             if is_provider_disabled(resolved.provider, disabled):
                 continue
-            specs.append(resolved)
+            resolved_specs.append(resolved)
             known.add(resolved.name)
-        for name in discover_managed(paths):
+        for name in managed if managed is not None else discover_managed(paths):
             if name in known:
                 continue
-            spec = spec_from_installed(paths, name)
+            spec = _installed_spec(name)
             if spec and not is_provider_disabled(spec.provider, disabled):
-                specs.append(spec)
+                resolved_specs.append(spec)
                 known.add(name)
-        return specs
+        return resolved_specs
 
     def _wrapper_rows(self, paths) -> list:
         """Menu items for the main screen's wrapper list, grouped by agent."""
@@ -698,7 +725,7 @@ class TuiSession:
         )
 
         agents = all_agents(paths)
-        specs = self._all_wrapper_specs()
+        specs = self._all_wrapper_specs(managed=self._managed, specs=self._spec_memo)
         # Columns are aligned across ALL agents in one describe_all_columns
         # call, not one call per agent — a per-agent call would compute its
         # own name/provider widths from only that agent's wrappers, and the
@@ -1762,6 +1789,11 @@ class TuiSession:
         from codehelper.services.proxy import proxy_status
         from codehelper.services.secrets import load_credentials
         from codehelper.services.state import load_state
+        from codehelper.services.wrappers import (
+            WRAPPERS,
+            discover_managed,
+            spec_from_installed,
+        )
 
         paths = Paths.default()
         self._state_snapshot = load_state(paths)
@@ -1771,6 +1803,18 @@ class TuiSession:
         # exactly as it answers None — so preload the empty dict rather than
         # let the None re-trigger a file read.
         env = read_env(paths) or {}
+        # ONE bin scan + ONE reconstruction per candidate wrapper per
+        # iteration (issue #110): the chip strips used to rescan the bin dir
+        # once per agent row and re-read every ad-hoc wrapper body, the
+        # wrapper list re-read them again, and the chip-token readback a
+        # third time. Registry wrapper names are memoized too so
+        # `_all_wrapper_specs`' installed-preset recovery rides the same
+        # single pass.
+        self._managed = discover_managed(paths)
+        self._spec_memo = {
+            name: spec_from_installed(paths, name)
+            for name in [*self._managed, *(wrapper.name for wrapper in WRAPPERS)]
+        }
         self._refresh_profile_label(
             state=self._state_snapshot, creds=self._creds_snapshot
         )
@@ -1793,11 +1837,15 @@ class TuiSession:
         self._claude_active_env = active_switch_env(paths, env=env)
         # Read here, never from the proxy row's label callable: the menu
         # re-evaluates that on every redraw frame, cursor movement included.
-        self._proxy = proxy_status(
-            paths, env=env, state=self._state_snapshot
-        )
+        self._proxy = proxy_status(paths, env=env, state=self._state_snapshot)
         self._chips = {
-            name: self._chips_for(name, paths, state=self._state_snapshot)
+            name: self._chips_for(
+                name,
+                paths,
+                state=self._state_snapshot,
+                managed=self._managed,
+                specs=self._spec_memo,
+            )
             for name in _AGENT_BACKENDS
         }
         # Token readback for the agents whose chip_is_applied is token-exact.
@@ -1807,7 +1855,11 @@ class TuiSession:
         self._chip_switch_tokens = {
             name: {
                 self._chip_name(chip): getattr(self, backend.chip_switch_token)(
-                    chip, paths, state=self._state_snapshot, creds=self._creds_snapshot
+                    chip,
+                    paths,
+                    state=self._state_snapshot,
+                    creds=self._creds_snapshot,
+                    spec=self._spec_memo.get(self._chip_name(chip)),
                 )
                 for chip in chips
             }
@@ -1829,6 +1881,8 @@ class TuiSession:
         paths,
         *,
         state: dict[str, object] | None = None,
+        managed: list[str] | None = None,
+        specs: dict[str, WrapperSpec | None] | None = None,
     ) -> list:
         """The chip strip for ``agent_name``: native, targets, then Add.
 
@@ -1842,7 +1896,10 @@ class TuiSession:
         one instead of reading as empty/broken.
 
         ``state`` is the per-iteration snapshot (issue #110) for the
-        disabled-provider filter; ``None`` reads ``state.json``.
+        disabled-provider filter; ``managed``/``specs`` are the per-iteration
+        bin scan and spec memo — one scan and one read per wrapper body per
+        iteration instead of one per agent row. ``None`` reads from disk, so
+        a direct call behaves exactly as before.
         """
         from codehelper.services.model import is_provider_disabled
         from codehelper.services.spec import PRESETS, spec_from_preset
@@ -1869,13 +1926,15 @@ class TuiSession:
         # from disk: its chip means the canonical preset, never whatever file
         # happens to have claimed the same alias.  ``discover_managed`` already
         # excludes preset names, so every name here is an ad-hoc wrapper.
-        ad_hoc = [
-            spec
-            for name in discover_managed(paths)
-            if (spec := spec_from_installed(paths, name)) is not None
-            and spec.agent.name == agent_name
-            and _live(spec)
-        ]
+        ad_hoc: list = []
+        for name in managed if managed is not None else discover_managed(paths):
+            spec = (
+                specs.get(name)
+                if specs is not None
+                else spec_from_installed(paths, name)
+            )
+            if spec is not None and spec.agent.name == agent_name and _live(spec):
+                ad_hoc.append(spec)
         return [_NATIVE_CHIP, *presets, *ad_hoc, _ADD_CHIP]
 
     @staticmethod
@@ -1941,6 +2000,7 @@ class TuiSession:
         *,
         state: dict[str, object] | None = None,
         creds: dict[str, dict[str, str]] | None = None,
+        spec: WrapperSpec | None = None,
     ) -> str | None:
         """The token Enter on ``chip`` would apply, or ``None`` when it has none.
 
@@ -1952,9 +2012,9 @@ class TuiSession:
         token available, unreadable wrapper), which is NOT a no-op: ``None``,
         never a guess.
 
-        ``state`` / ``creds`` are the per-iteration snapshots (issue #110)
-        for the resolvers' disabled gate and cache leg; ``None`` reads the
-        files.
+        ``state`` / ``creds`` / ``spec`` are the per-iteration snapshots
+        (issue #110) for the resolvers' disabled gate, cache leg and wrapper
+        reconstruction; ``None`` reads the files.
         """
         from codehelper.cli.parser import (
             _switch_axes_from_preset,
@@ -1978,6 +2038,7 @@ class TuiSession:
                     self._switch_request(from_wrapper=chip.name),
                     paths,
                     state=state,
+                    spec=spec,
                 )
         except CodeHelperError:
             return None

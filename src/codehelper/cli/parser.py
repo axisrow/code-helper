@@ -1614,7 +1614,7 @@ def _switch_resolve_token(
     return resolved.value
 
 
-def _switch_axes_from_wrapper(req: SwitchRequest, paths, *, state=None):
+def _switch_axes_from_wrapper(req: SwitchRequest, paths, *, state=None, spec=None):
     """Resolve ``(provider, tier_models, token, subagent_model, context_window)``
     from an already-installed wrapper — the ``--from-wrapper`` fast path.
 
@@ -1632,9 +1632,11 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths, *, state=None):
     other agent (codex shares Ollama) fails closed rather than retargeting
     claude to a foreign selection.
 
-    ``state`` is an optional preloaded :func:`state.load_state` result
-    (issue #110) for the disabled-provider gate — the TUI chip readback
-    passes its per-iteration snapshot; ``None`` reads the file.
+    ``state`` / ``spec`` are optional preloaded :func:`state.load_state` /
+    :func:`wrappers.spec_from_installed` results (issue #110) — the TUI chip
+    readback passes its per-iteration snapshot and the memoized spec so the
+    wrapper file is not reconstructed (and re-read) a second time here and a
+    third time inside ``token_from_installed``; ``None`` reads from disk.
     """
     if not req.from_wrapper:
         raise CodeHelperError(
@@ -1642,7 +1644,8 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths, *, state=None):
             "--from-wrapper name"
         )  # pragma: no cover — _handle_switch only calls this when truthy
     name: str = req.from_wrapper
-    spec = spec_from_installed(paths, name)
+    if spec is None:
+        spec = spec_from_installed(paths, name)
     if spec is None:
         raise CodeHelperError(
             f"no installed wrapper named {name!r} — see `codehelper list`"
@@ -1660,7 +1663,7 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths, *, state=None):
     provider, tier_models, subagent_model = claude_settings.live_axes_for_spec(spec)
     token = ""
     if spec.auth == "secret":
-        token = token_from_installed(paths, name, spec.provider.name) or ""
+        token = token_from_installed(paths, name, spec.provider.name, spec=spec) or ""
         if not token:
             raise CodeHelperError(
                 f"could not recover a token from wrapper {name!r} "
@@ -1701,9 +1704,7 @@ def _switch_axes_from_preset(req: SwitchRequest, paths, *, state=None, creds=Non
     return (
         provider,
         tier_models,
-        _switch_resolve_token(
-            provider, req, paths, non_interactive=True, creds=creds
-        ),
+        _switch_resolve_token(provider, req, paths, non_interactive=True, creds=creds),
         subagent_model,
         spec.context_window,  # None for every preset — catalog-derived
     )

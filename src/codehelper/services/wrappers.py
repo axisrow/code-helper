@@ -481,7 +481,9 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
         return None
 
 
-def token_from_installed(paths: Paths, name: str, provider_name: str) -> str | None:
+def token_from_installed(
+    paths: Paths, name: str, provider_name: str, *, spec: WrapperSpec | None = None
+) -> str | None:
     """Recover a secret token from an installed wrapper we can fully trust.
 
     The wrapper is the durable source of truth when the profile cache is
@@ -493,8 +495,14 @@ def token_from_installed(paths: Paths, name: str, provider_name: str) -> str | N
     Returns ``None`` for a missing, foreign, malformed, non-secret, or
     provider-mismatched wrapper. The token value is intentionally kept inside
     this service and is never logged.
+
+    ``spec`` is an optional preloaded :func:`spec_from_installed` result
+    (issue #110) — the chip readback already reconstructed the same spec and
+    would otherwise pay a second full re-read of the wrapper file here.
+    ``None`` reconstructs from disk, exactly as before.
     """
-    spec = spec_from_installed(paths, name)
+    if spec is None:
+        spec = spec_from_installed(paths, name)
     if spec is None or spec.auth != "secret" or spec.provider.name != provider_name:
         return None
 

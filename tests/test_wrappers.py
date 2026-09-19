@@ -4292,3 +4292,26 @@ def test_wrapper_adds_no_proxy_name_to_a_proxy_free_environment(tmp_path):
             f"the wrapper injected {name} into the agent's environment — "
             "wrappers are env-transparent (issue #76, C2)"
         )
+
+
+# --------------------------------------------------------------------------- #
+# token_from_installed's preloaded-spec kwarg (issue #110)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.unit
+def test_token_from_installed_honours_a_preloaded_spec(tmp_path, monkeypatch):
+    """``spec=`` answers exactly as a fresh reconstruction and skips the
+    re-read: the TUI chip readback passes the memoized spec so the wrapper
+    body is not reconstructed twice per token lookup."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, "glm", token="sk-wrapped")
+    spec = spec_from_installed(paths, "glm")
+
+    def _forbidden(_paths, _name):
+        raise AssertionError("spec= call reconstructed the spec again")
+
+    monkeypatch.setattr("codehelper.services.wrappers.spec_from_installed", _forbidden)
+    assert token_from_installed(paths, "glm", "zai", spec=spec) == "sk-wrapped"
+    # A preloaded spec does not bypass the trust checks: wrong provider → None.
+    assert token_from_installed(paths, "glm", "litellm", spec=spec) is None

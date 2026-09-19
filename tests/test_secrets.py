@@ -966,7 +966,5 @@ def test_preloaded_creds_none_reads_the_file(tmp_path):
     paths = _paths(tmp_path)
     save_credential(paths, "zai", "sk-default")
     snapshot = load_credentials(paths)
-    assert credential_for(paths, "zai") == credential_for(
-        paths, "zai", creds=snapshot
-    )
+    assert credential_for(paths, "zai") == credential_for(paths, "zai", creds=snapshot)
     assert profile_names(paths, "zai") == profile_names(paths, "zai", creds=snapshot)
