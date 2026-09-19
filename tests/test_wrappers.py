@@ -4329,6 +4329,71 @@ def test_openai_toml_install_refuses_drift_under_the_lock(tmp_path, monkeypatch)
     assert wrapper.read_text(encoding="utf-8") == old_wrapper
 
 
+@pytest.mark.integration
+def test_openai_toml_drift_message_names_the_wrapper_slot(tmp_path, monkeypatch):
+    """The drift refusal names the file that ACTUALLY drifted, not always the
+    companion (issue #125 review): a foreign file appearing in the WRAPPER
+    slot between the decision pass and the lock reports that wrapper path."""
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+    companion = paths.codex_config_for("glm-codex")
+    wrapper = paths.script_for("glm-codex")
+    old_companion = companion.read_text(encoding="utf-8")
+
+    from codehelper.backends import _atomic
+    from codehelper.services import wrappers as wrappers_module
+
+    real_lock = wrappers_module.file_lock
+
+    def racing_lock(path):
+        # The concurrent writer replaces the WRAPPER in the decide→lock gap;
+        # the companion decision is untouched by it. The lock itself stays
+        # on the companion, exactly as in production.
+        _atomic.atomic_write(wrapper, "#!/bin/bash\nexit 0\n", mode=0o755)
+        return real_lock(path)
+
+    monkeypatch.setattr(wrappers_module, "file_lock", racing_lock)
+
+    with pytest.raises(CodeHelperError, match="/bin/glm-codex changed"):
+        install_wrapper(
+            paths,
+            _toml_spec(model="other-m", alias="glm-codex"),
+            token=_LITERAL_TOKEN,
+        )
+
+    # The racing file survived and the companion was never written.
+    assert wrapper.read_text(encoding="utf-8") == "#!/bin/bash\nexit 0\n"
+    assert companion.read_text(encoding="utf-8") == old_companion
+
+
+@pytest.mark.integration
+def test_remove_wrapper_sweeps_the_spent_companion_lock(tmp_path):
+    """The install's ``file_lock`` leaves ``<alias>.config.toml.lock`` next
+    to the companion (issue #125 review): ``remove_wrapper`` sweeps it with
+    the companion it belongs to — no permanent file per alias ever
+    installed. rename inherits the sweep (it removes the old alias through
+    ``remove_wrapper``)."""
+    from codehelper.backends._atomic import lock_path_for
+    from codehelper.services.wrappers import remove_wrapper
+
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+    lock = lock_path_for(paths.codex_config_for("glm-codex"))
+    assert lock.exists()
+
+    assert remove_wrapper(paths, "glm-codex")
+
+    assert not lock.exists()
+
+    # rename sweeps the OLD alias's lock the same way; the new alias's lock
+    # stays, it belongs to the live wrapper.
+    install_wrapper(paths, _toml_spec(alias="glm-codex"), token=_LITERAL_TOKEN)
+    assert rename_wrapper(paths, "glm-codex", "glm-renamed")
+
+    assert not lock.exists()
+    assert lock_path_for(paths.codex_config_for("glm-renamed")).exists()
+
+
 @pytest.mark.unit
 def test_edit_refuses_missing_and_unmanaged_targets(tmp_path):
     paths = Paths.from_home(tmp_path)

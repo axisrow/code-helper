@@ -40,6 +40,7 @@ from urllib.parse import quote, unquote
 from codehelper.backends._atomic import (
     atomic_write,
     file_lock,
+    lock_path_for,
     read_text_or_none,
     remove_file,
 )
@@ -1104,19 +1105,31 @@ def _install_plan(
     multi = len(plan) > 1
     lock = file_lock(plan[0].path) if multi else contextlib.nullcontext()
     with lock:
-        if multi and any(
-            _decide(paths, spec, f) is not action for f, action in decisions
-        ):
+        # Re-derive EVERY plan decision under the lock and name the FIRST
+        # drifted file in the refusal — the drift may be in any slot, and a
+        # message naming the wrong file misdirects debugging.
+        drifted = next(
+            (
+                f.path
+                for f, action in decisions
+                if _decide(paths, spec, f) is not action
+            ),
+            None,
+        )
+        if multi and drifted is not None:
             raise CodeHelperError(
-                f"{plan[0].path} changed while the install was being "
+                f"{drifted} changed while the install was being "
                 "prepared — rerun the command"
             )
-        # (path, prior bytes); prior ``None`` = the companion did not exist
-        # before this install — the rollback removes it rather than
-        # rewriting. Only the plan head (the companion) is captured: the
-        # wrapper slot is the LAST write, so nothing later can break it.
-        prior: tuple[Path, str | None] | None = (
-            (plan[0].path, read_text_or_none(plan[0].path)) if multi else None
+        # Prior bytes (absence included) for EVERY entry except the LAST:
+        # the last entry is the final write, so nothing later can break it
+        # and there is nothing to restore for it. Capturing the whole prefix
+        # — not just a hypothetical head — keeps the rollback total for any
+        # future plan that grows a third file, instead of silently partial.
+        priors: list[tuple[Path, str | None]] = (
+            [(f.path, read_text_or_none(f.path)) for f, _ in decisions[:-1]]
+            if multi
+            else []
         )
         try:
             for f, action in decisions:
@@ -1134,40 +1147,42 @@ def _install_plan(
                     # CodeHelperError instead of a raw traceback. The plan is
                     # ordered companion → wrapper so the on-PATH executable
                     # lands LAST, and for a multi-file plan the rollback
-                    # above undoes the companion — the pair on disk stays
-                    # old+old (a retry converges); a single-file plan needs
-                    # no undo, one atomic_write has no earlier step to undo.
+                    # below undoes the captured prefix — the pair on disk
+                    # stays old+old (a retry converges); a single-file plan
+                    # needs no undo, one atomic_write has no earlier step.
                     raise CodeHelperError(f"failed to write {f.path}: {exc}") from exc
                 print(f"wrote {f.path}")
                 wrote = True
         except BaseException:
-            # A Ctrl-C between the two writes is the same mixed-pair hazard
-            # as an OSError — hence BaseException, the posture atomic_write
+            # A Ctrl-C between the writes is the same mixed-pair hazard as
+            # an OSError — hence BaseException, the posture atomic_write
             # itself takes. Restore only when this run actually wrote: a
             # failure before the first write left old+old on disk already.
-            # (``prior`` is non-None exactly when the plan is multi-file.)
-            if wrote and prior is not None:
-                rollback_path, rollback_body = prior
-                try:
-                    if rollback_body is None:
-                        if rollback_path.exists():
-                            remove_file(rollback_path)
+            # Restored newest-first, and best-effort — one slot's failed
+            # restore never stops the others', the original error always
+            # wins.
+            if wrote:
+                for rollback_path, rollback_body in reversed(priors):
+                    try:
+                        if rollback_body is None:
+                            if rollback_path.exists():
+                                remove_file(rollback_path)
+                                print(
+                                    f"removed the freshly created {rollback_path}",
+                                    file=sys.stderr,
+                                )
+                        else:
+                            atomic_write(rollback_path, rollback_body, mode=None)
                             print(
-                                f"removed the freshly created {rollback_path}",
+                                f"restored the previous {rollback_path}",
                                 file=sys.stderr,
                             )
-                    else:
-                        atomic_write(rollback_path, rollback_body, mode=None)
+                    except OSError as restore_exc:
                         print(
-                            f"restored the previous {rollback_path}",
+                            f"warning: could not roll {rollback_path} back after "
+                            f"the failed install: {restore_exc}",
                             file=sys.stderr,
                         )
-                except OSError as restore_exc:
-                    print(
-                        f"warning: could not roll {rollback_path} back after "
-                        f"the failed install: {restore_exc}",
-                        file=sys.stderr,
-                    )
             raise
     return wrote
 
@@ -1325,9 +1340,15 @@ def _cleanup_openai_toml_siblings(paths: Paths, alias: str, *, dry_run: bool) ->
     """
     config_path = paths.codex_config_for(alias)
     _warn_stale_catalog(paths, alias)
-    return _remove_owned_paths(
-        [config_path] if _ownership_marker_only(config_path) else [], dry_run=dry_run
-    )
+    # The spent install lock sweeps with the profile it was created next to —
+    # its only content is the flock, so the companion's ownership proof IS the
+    # lock's (issue #125 review): otherwise every OPENAI_TOML alias ever
+    # installed leaves a permanent file behind in ``~/.codex``.
+    lock = lock_path_for(config_path)
+    owned = [config_path] if _ownership_marker_only(config_path) else []
+    if owned and lock.exists():
+        owned.append(lock)
+    return _remove_owned_paths(owned, dry_run=dry_run)
 
 
 def install_wrapper(
@@ -1441,11 +1462,21 @@ def remove_wrapper(
             f"refusing to remove unmanaged file {wrapper} (use --force)"
         )
 
+    # The companion's spent install lock rides along: it holds nothing but
+    # the flock, so the companion's ownership proof IS the lock's (issue
+    # #125 review) — without this every OPENAI_TOML alias ever installed
+    # leaves a permanent file behind in ``~/.codex``. Unlinking a lock
+    # another process currently flocks is safe on POSIX (the holder keeps
+    # its fd; the next installer recreates and flocks the fresh file).
     siblings = [
         path
         for path, ours in (
             (
                 paths.codex_config_for(name),
+                _ownership_marker_only(paths.codex_config_for(name)),
+            ),
+            (
+                lock_path_for(paths.codex_config_for(name)),
                 _ownership_marker_only(paths.codex_config_for(name)),
             ),
             (

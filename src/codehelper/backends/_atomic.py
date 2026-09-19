@@ -40,6 +40,7 @@ __all__ = [
     "best_effort_lock",
     "file_lock",
     "guarded_replace",
+    "lock_path_for",
     "read_json_object",
     "read_text_or_none",
     "remove_file",
@@ -47,10 +48,20 @@ __all__ = [
 ]
 
 
+def lock_path_for(path: str | Path) -> Path:
+    """The stable sibling :func:`file_lock` flocks for *path*.
+
+    One owner of the lock-name formula so a sweeper that unlinks a spent
+    lock cannot drift from the name the locker actually created.
+    """
+    p = Path(path)
+    return p.with_suffix(p.suffix + ".lock")
+
+
 @contextlib.contextmanager
 def file_lock(path: str | Path):
     """Hold an advisory exclusive lock on the stable sibling *path*."""
-    lock_path = Path(path).with_suffix(Path(path).suffix + ".lock")
+    lock_path = lock_path_for(path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a") as handle:
         os.chmod(lock_path, 0o600)
