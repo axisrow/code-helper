@@ -2016,6 +2016,41 @@ def edit_wrapper(
     )
 
 
+def _rollback_markers(
+    committed: list[tuple[Path, str]], original: BaseException
+) -> CodeHelperError:
+    """Restore committed old bodies in reverse; never mask ``original``.
+
+    A restoration write that itself fails is recorded per path, not raised —
+    the second failure must never displace the first (issue #121). The
+    returned error carries the original cause plus the explicit per-path
+    unrecovered list, and states that re-running the verb is safe: that
+    convergence (window W1/W5) is why retry, not a journal, is the recovery
+    mechanism. The single owner of the rollback wording, so the ``OSError``
+    and ``CodeHelperError`` exits of :func:`rename_provider_profile` cannot
+    drift apart; the caller chains ``original`` as ``__cause__`` on the raise.
+    """
+    unrecovered: list[str] = []
+    for path, old_body in reversed(committed):
+        try:
+            atomic_write(path, old_body)
+        except OSError as restore_exc:
+            unrecovered.append(f"{path}: still carries the new marker ({restore_exc})")
+    restored = len(committed) - len(unrecovered)
+    if not unrecovered:
+        return CodeHelperError(
+            f"profile rename failed midway — rolled back {restored} "
+            f"marker write(s): {original}"
+        )
+    listing = "\n".join(f"  - {item}" for item in unrecovered)
+    return CodeHelperError(
+        f"profile rename failed ({original}); restored {restored} of "
+        f"{len(committed)} marker write(s) — these paths remain UNRECOVERED:\n"
+        f"{listing}\n"
+        f"re-running the same rename is safe: it converges from this state"
+    )
+
+
 def rename_provider_profile(
     paths: Paths,
     provider_name: str,
@@ -2101,20 +2136,11 @@ def rename_provider_profile(
             # rename_profile downgrades a credential-write OSError to a warning;
             # a key that never moved must fail the verb, not fake success.
             raise CodeHelperError(f"the credential key did not move to {new_name!r}")
-    except OSError as exc:
-        for path, old_body in reversed(committed):
-            atomic_write(path, old_body)
-        raise CodeHelperError(
-            f"profile rename failed midway — rolled back {len(committed)} "
-            f"marker write(s): {exc}"
-        ) from exc
-    except CodeHelperError as exc:
-        for path, old_body in reversed(committed):
-            atomic_write(path, old_body)
-        raise CodeHelperError(
-            f"profile rename failed — rolled back {len(committed)} "
-            f"marker write(s): {exc}"
-        ) from exc
+    except (OSError, CodeHelperError) as exc:
+        # The rollback itself can fail (issue #121): _rollback_markers turns a
+        # second failure into data in the message instead of letting it mask
+        # the original error with a raw traceback.
+        raise _rollback_markers(committed, exc) from exc
 
     from codehelper.services.state import active_selection, set_active_selection
 

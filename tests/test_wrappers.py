@@ -3440,6 +3440,158 @@ def test_rename_provider_profile_rolls_back_when_the_credential_rename_refuses(
 
 
 @pytest.mark.integration
+def test_rename_provider_profile_rollback_failure_reports_both_errors(
+    tmp_path, monkeypatch
+):
+    """A restoration write failing mid-rollback must not mask the original
+    error (issue #121): ONE error carries both causes plus the per-path list
+    of markers left unrecovered — never the false "rolled back" claim, never
+    a raw OSError traceback over a CodeHelperError session."""
+    import codehelper.services.secrets as secrets
+    import codehelper.services.wrappers as wrappers_mod
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "bai", _SECRET_TOKEN, "work")
+    for alias in ("glm-work", "glm-work-codex"):
+        install_wrapper(
+            paths,
+            build_spec(
+                agent="claude" if alias == "glm-work" else "codex",
+                provider="bai",
+                model="claude-sonnet-4-6" if alias == "glm-work" else "gpt-5.5",
+                alias=alias,
+                profile_name="work",
+            ),
+            token=_SECRET_TOKEN,
+        )
+
+    original = CodeHelperError("credential race lost")
+
+    def losing_rename(_paths, _provider, _old, _new):
+        raise original
+
+    monkeypatch.setattr(secrets, "rename_profile", losing_rename)
+
+    real_atomic_write = wrappers_mod.atomic_write
+    restores = {"n": 0}
+
+    def failing_restore(path, body, mode=None):
+        if "profile=work" in body:  # a restoration write (old body)
+            restores["n"] += 1
+            if restores["n"] == 2:  # the second restoration write blows up
+                raise OSError("permission denied")
+        return real_atomic_write(path, body, mode=mode)
+
+    monkeypatch.setattr(wrappers_mod, "atomic_write", failing_restore)
+
+    with pytest.raises(CodeHelperError) as caught:
+        rename_provider_profile(paths, "bai", "work", "personal")
+
+    message = str(caught.value)
+    assert "credential race lost" in message  # the original cause survives
+    assert "permission denied" in message  # the rollback failure is reported
+    assert "UNRECOVERED" in message
+    assert "still carries the new marker" in message
+    assert str(paths.script_for("glm-work-codex")) in message
+    assert "restored 2 of 3" in message
+    assert "re-running the same rename is safe" in message
+    assert caught.value.__cause__ is original  # nothing masks the first error
+
+    # Exactly ONE marker is stranded, on the NEW name; the rest recovered.
+    assert profile_from_installed(paths, "glm-work") == "work"
+    assert profile_from_installed(paths, "glm-work-codex") == "personal"
+    assert secrets.credential_for(paths, "bai", "work") == _SECRET_TOKEN
+    assert secrets.credential_for(paths, "bai", "personal") == ""
+
+
+@pytest.mark.integration
+def test_rename_provider_profile_marker_failure_at_first_position(
+    tmp_path, monkeypatch
+):
+    """First-position injection: the committed list is still empty, so the
+    rollback is a no-op and the message says 0 writes were rolled back."""
+    import codehelper.services.secrets as secrets
+    import codehelper.services.wrappers as wrappers_mod
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "bai", _SECRET_TOKEN, "work")
+    for alias in ("glm-work", "glm-work-codex"):
+        install_wrapper(
+            paths,
+            build_spec(
+                agent="claude" if alias == "glm-work" else "codex",
+                provider="bai",
+                model="claude-sonnet-4-6" if alias == "glm-work" else "gpt-5.5",
+                alias=alias,
+                profile_name="work",
+            ),
+            token=_SECRET_TOKEN,
+        )
+
+    real_atomic_write = wrappers_mod.atomic_write
+    writes = {"n": 0}
+
+    def first_write_fails(path, body, mode=None):
+        writes["n"] += 1
+        if writes["n"] == 1:
+            raise OSError("disk full")
+        return real_atomic_write(path, body, mode=mode)
+
+    monkeypatch.setattr(wrappers_mod, "atomic_write", first_write_fails)
+
+    with pytest.raises(CodeHelperError) as caught:
+        rename_provider_profile(paths, "bai", "work", "personal")
+
+    assert "rolled back 0 marker write(s)" in str(caught.value)
+    for alias in ("glm-work", "glm-work-codex"):
+        assert profile_from_installed(paths, alias) == "work"
+    assert secrets.credential_for(paths, "bai", "work") == _SECRET_TOKEN
+
+
+@pytest.mark.integration
+def test_rename_provider_profile_marker_failure_at_last_position(tmp_path, monkeypatch):
+    """Last-position injection: every earlier write is committed, the rollback
+    restores them all, and the message reports the full count."""
+    import codehelper.services.secrets as secrets
+    import codehelper.services.wrappers as wrappers_mod
+
+    paths = Paths.from_home(tmp_path)
+    secrets.save_credential(paths, "bai", _SECRET_TOKEN, "work")
+    for alias in ("glm-work", "glm-work-codex"):
+        install_wrapper(
+            paths,
+            build_spec(
+                agent="claude" if alias == "glm-work" else "codex",
+                provider="bai",
+                model="claude-sonnet-4-6" if alias == "glm-work" else "gpt-5.5",
+                alias=alias,
+                profile_name="work",
+            ),
+            token=_SECRET_TOKEN,
+        )
+
+    real_atomic_write = wrappers_mod.atomic_write
+    writes = {"n": 0}
+
+    def last_write_fails(path, body, mode=None):
+        writes["n"] += 1
+        if writes["n"] == 3:  # marker writes: claude script, codex script, companion
+            raise OSError("disk full")
+        return real_atomic_write(path, body, mode=mode)
+
+    monkeypatch.setattr(wrappers_mod, "atomic_write", last_write_fails)
+
+    with pytest.raises(CodeHelperError) as caught:
+        rename_provider_profile(paths, "bai", "work", "personal")
+
+    assert "rolled back 2 marker write(s)" in str(caught.value)
+    for alias in ("glm-work", "glm-work-codex"):
+        assert profile_from_installed(paths, alias) == "work"
+        assert _SECRET_TOKEN in script_text(paths, alias)
+    assert secrets.credential_for(paths, "bai", "work") == _SECRET_TOKEN
+
+
+@pytest.mark.integration
 def test_rename_provider_profile_pointer_failure_raises_with_context(
     tmp_path, monkeypatch
 ):
