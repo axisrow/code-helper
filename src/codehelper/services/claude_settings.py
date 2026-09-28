@@ -100,6 +100,9 @@ MANAGED_ENV_KEYS: tuple[str, ...] = (
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+    # effort=max's only accepted carrier (the effortLevel settings key
+    # rejects "max") — a max wrapper exports it, so native must blank it.
+    "CLAUDE_CODE_EFFORT_LEVEL",
 )
 
 

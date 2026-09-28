@@ -256,6 +256,7 @@ def test_managed_keys_match_renderer():
         model="glm-5.2",
         tier_models=TierModels.uniform("glm-5.2"),
         subagent_model="glm-5.2",  # force every optional line to render
+        effort="max",  # ...including effort=max's env-carried line
     )
     rendered = _render_anthropic_env(spec, "sk-x")
     exported = set(re.findall(r"^export ([A-Z_]+)=", rendered, re.MULTILINE))
@@ -706,9 +707,14 @@ def test_apply_switch_native_explicitly_blanks_managed_keys(tmp_path):
 
     assert changed is True
     result = _read(paths)
-    assert {key: result["env"].get(key) for key in MANAGED_ENV_KEYS} == {
-        key: "" for key in MANAGED_ENV_KEYS
+    # CLAUDE_CODE_EFFORT_LEVEL is the one managed key NO switch ever writes
+    # (it is effort=max's wrapper-side env carrier, never a settings entry),
+    # so native cannot blank it here — it must simply be absent/empty.
+    others = [key for key in MANAGED_ENV_KEYS if key != "CLAUDE_CODE_EFFORT_LEVEL"]
+    assert {key: result["env"].get(key) for key in others} == {
+        key: "" for key in others
     }
+    assert not result["env"].get("CLAUDE_CODE_EFFORT_LEVEL")
 
 
 @pytest.mark.unit

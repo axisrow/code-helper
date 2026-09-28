@@ -135,9 +135,18 @@ def _settings_flag(env: dict[str, str], effort: str | None = None) -> str:
     in-session command in charge. Key added LAST and only when effort is
     set, so an effort-less payload is byte-identical to the pre-effort
     output (the ``_ownership_full_match`` byte-compare invariant).
+
+    THE EXCEPTION is ``max`` (docs: "max isn't accepted as a level in either
+    key" — effortLevel/modelSettings): it cannot ride the payload key at
+    all, so it is carried by the caller as ``CLAUDE_CODE_EFFORT_LEVEL`` in
+    the env dict instead, accepting that variant's documented cost — the env
+    spelling outranks a mid-session ``/effort``. A value the settings key
+    rejects is never written into it: unaccepted settings values have no
+    documented error or fallback.
     """
     payload: dict[str, object] = {"env": env}
-    if effort:
+    # ponytail: max is env-carried (see docstring); revisit if the key ever accepts it
+    if effort and effort != "max":
         payload["effortLevel"] = effort
     return (
         f"--settings {_shell_single_quote(json.dumps(payload, separators=(',', ':')))}"
@@ -269,6 +278,12 @@ def _render_anthropic_env(spec: WrapperSpec, token: str) -> str:
     }
     if spec.subagent_model is not None:
         env["CLAUDE_CODE_SUBAGENT_MODEL"] = spec.subagent_model
+    if spec.effort == "max":
+        # The one effort level the effortLevel settings key rejects (docs) —
+        # carried as env instead, which rides BOTH the exports and the
+        # --settings env block. Costs the documented trade: env outranks a
+        # mid-session /effort, so a max wrapper pins harder than the others.
+        env["CLAUDE_CODE_EFFORT_LEVEL"] = "max"
     if (window := _declared_window(spec)) is not None:
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
     lines = ["#!/bin/bash", _marker(spec), "("]

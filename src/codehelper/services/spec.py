@@ -55,15 +55,17 @@ REASONING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
 #: Reasoning-effort levels per shape (issue #100, extended to the claude
 #: ``--settings`` surface). The per-shape SETS are the extension point: each
 #: backend hard-rejects unknown values (Codex at config deserialization; the
-#: Claude Code ``effortLevel`` settings key accepts only low|medium|high|xhigh —
-#: the env spelling has ``max``/``auto``, deliberately unused here because the
-#: wrapper must not pin what a mid-session ``/effort`` may override), so an
-#: unlisted value must be refused before anything renders. A new value lands
-#: in the shape's tuple; a new shape with an effort surface joins by adding a
-#: mapping entry — the marker regex (``[^,()\s]+``) needs no edits.
+#: Claude Code ``effortLevel`` settings key accepts low|medium|high|xhigh), so
+#: an unlisted value must be refused before anything renders. A new value
+#: lands in the shape's tuple; a new shape with an effort surface joins by
+#: adding a mapping entry — the marker regex (``[^,()\s]+``) needs no edits.
+#: ``max`` is the claude set's documented exception: the settings key rejects
+#: it, so the RENDERER carries it as ``CLAUDE_CODE_EFFORT_LEVEL`` env instead
+#: (which outranks a mid-session ``/effort`` — accepted deliberately for this
+#: one value); ``auto`` stays out (it means "reset", meaningless in a wrapper).
 EFFORT_LEVELS_BY_SHAPE: dict[ConfigShape, tuple[str, ...]] = {
     ConfigShape.OPENAI_TOML: REASONING_EFFORTS,
-    ConfigShape.ANTHROPIC_ENV: ("low", "medium", "high", "xhigh"),
+    ConfigShape.ANTHROPIC_ENV: ("low", "medium", "high", "xhigh", "max"),
 }
 
 

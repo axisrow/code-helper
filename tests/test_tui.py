@@ -2170,7 +2170,7 @@ def test_edit_effort_pick_offers_the_shape_own_levels(monkeypatch):
 
     env = _effort_menu("glm-cl")
     assert "__clear__" in env
-    for level in ("low", "medium", "high", "xhigh"):
+    for level in ("low", "medium", "high", "xhigh", "max"):
         assert level in env, f"claude effort menu missing {level!r}"
     assert "minimal" not in env
 
@@ -2981,9 +2981,13 @@ def test_deepseek_ollama_chip_can_switch_back_to_native(monkeypatch):
     import json
 
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    assert {key: settings["env"].get(key) for key in MANAGED_ENV_KEYS} == {
-        key: "" for key in MANAGED_ENV_KEYS
+    # CLAUDE_CODE_EFFORT_LEVEL (effort=max's wrapper-side env carrier) is the
+    # one managed key no switch writes into the file — absent/empty, not "".
+    others = [key for key in MANAGED_ENV_KEYS if key != "CLAUDE_CODE_EFFORT_LEVEL"]
+    assert {key: settings["env"].get(key) for key in others} == {
+        key: "" for key in others
     }
+    assert not settings["env"].get("CLAUDE_CODE_EFFORT_LEVEL")
 
 
 @pytest.mark.integration

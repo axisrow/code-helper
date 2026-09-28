@@ -419,6 +419,11 @@ def test_settings_payload_overrides_what_switch_native_leaves_behind():
     for key in MANAGED_ENV_KEYS:
         if key == "CLAUDE_CODE_SUBAGENT_MODEL":
             continue  # deepseek-ollama sets it; glm deliberately does not
+        if key == "CLAUDE_CODE_EFFORT_LEVEL":
+            # only effort=max wrappers set it (env-carried), and for THOSE the
+            # payload env block re-asserts it over a native blank — pinned in
+            # test_env_shape_settings_payload_carries_effortlevel_when_set
+            continue
         assert key in body
 
 
@@ -2996,12 +3001,17 @@ def test_build_spec_effort_levels_are_per_shape():
 
     assert bs("claude", "high").effort == "high"
     assert bs("claude", "xhigh").effort == "xhigh"
+    # max is claude's documented exception — env-carried (see render), never
+    # the effortLevel settings key
+    assert bs("claude", "max").effort == "max"
     with pytest.raises(CodeHelperError, match="unusable reasoning effort .*minimal"):
         bs("claude", "minimal")
 
     assert bs("codex", "minimal").effort == "minimal"
     with pytest.raises(CodeHelperError, match="unusable reasoning effort .*xhigh"):
         bs("codex", "xhigh")
+    with pytest.raises(CodeHelperError, match="unusable reasoning effort .*max"):
+        bs("codex", "max")
 
 
 @pytest.mark.unit
@@ -3056,6 +3066,20 @@ def test_env_shape_settings_payload_carries_effortlevel_when_set():
     # and it is NOT smuggled into the env block / exports
     assert "export CLAUDE_CODE_EFFORT_LEVEL" not in body
 
+    maxed = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="glm-5.3",
+        alias="glm-claude",
+        effort="max",
+    )
+    rendered_max = render_script(maxed, _LITERAL_TOKEN)
+    # max is the effortLevel key's documented reject — env-carried instead,
+    # riding BOTH the exports and the --settings env block
+    assert '"effortLevel":"max"' not in rendered_max
+    assert "export CLAUDE_CODE_EFFORT_LEVEL='max'" in rendered_max
+    assert '"CLAUDE_CODE_EFFORT_LEVEL":"max"' in rendered_max
+
     plain = build_spec(
         agent="claude",
         provider="ollama-direct",
@@ -3069,6 +3093,7 @@ def test_env_shape_settings_payload_carries_effortlevel_when_set():
     # asserted above; the pairing of the two is what pins the append-only
     # payload contract.
     assert "effortLevel" not in rendered
+    assert "CLAUDE_CODE_EFFORT_LEVEL" not in rendered
 
 
 @pytest.mark.integration
