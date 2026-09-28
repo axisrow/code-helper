@@ -48,6 +48,19 @@ def _real_menu_keys(monkeypatch, keys):
     monkeypatch.setattr(menu, "select_from_menu", _select)
 
 
+def _stub_discovery_off(monkeypatch):
+    """Silence model discovery for add-flow tests: zai now has a live listing
+    endpoint (OPENAI_V1), and a test must never touch the network. The stubbed
+    result FAILS, which is also exactly the state the known_models fallback
+    responds to — so the fallback-path test keeps its pin through this stub."""
+    import codehelper.services.models_api as api
+
+    def _dead(provider, *, token=""):
+        return api.ModelListResult((), "stubbed", "discovery unavailable in tests")
+
+    monkeypatch.setattr(api, "list_models", _dead)
+
+
 def _tab_on_profile_screen(monkeypatch, presses=1):
     """Enter the Profile screen and press Tab there, then quit.
 
@@ -304,9 +317,9 @@ def test_ctrl_c_from_tui_propagates_as_hard_cancel(monkeypatch):
 def test_model_step_falls_back_to_known_models_when_discovery_is_unavailable(
     monkeypatch, recording_select
 ):
-    """zai has no discovery endpoint at all — the model menu must still offer
-    the registry's `known_models` instead of forcing manual entry, and the
-    prompt must say the list is known-not-discovered (Stage 3)."""
+    """zai's discovery endpoint is stubbed to fail — the model menu must still
+    offer the registry's `known_models` instead of forcing manual entry, and
+    the prompt must say the list is known-not-discovered (Stage 3)."""
 
     def _decide(text: str) -> str | None:
         if text.startswith("Context window for"):
@@ -317,6 +330,7 @@ def test_model_step_falls_back_to_known_models_when_discovery_is_unavailable(
 
     select = recording_select("add", "wrapper", "claude", "zai", "quit", decide=_decide)
 
+    _stub_discovery_off(monkeypatch)
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-first")
     monkeypatch.setattr("builtins.input", lambda _prompt: "known-wrapper")
 
@@ -334,6 +348,7 @@ def test_first_secret_token_creates_default_before_model(monkeypatch):
     _menu_sequence(
         monkeypatch, ["add", "wrapper", "claude", "zai", "__custom__", "quit"]
     )
+    _stub_discovery_off(monkeypatch)
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-first")
     typed = iter(["glm-5", "glm-work"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(typed))
@@ -366,6 +381,7 @@ def test_second_profile_names_both_keys_and_preserves_them(monkeypatch):
             "quit",
         ],
     )
+    _stub_discovery_off(monkeypatch)
     tokens = iter(["sk-work", "sk-personal"])
     monkeypatch.setattr("getpass.getpass", lambda _prompt: next(tokens))
     typed = iter(
@@ -403,6 +419,7 @@ def test_replacing_selected_profile_changes_only_that_profile(monkeypatch):
             "quit",
         ],
     )
+    _stub_discovery_off(monkeypatch)
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-work-new")
     typed = iter(["glm-5", "work-wrapper"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(typed))

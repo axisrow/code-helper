@@ -505,13 +505,26 @@ PROVIDERS: tuple[Provider, ...] = (
         base_url="https://api.z.ai/api/anthropic",
         auth="secret",
         token_env_var="ZAI_API_KEY",
-        # The Anthropic-compatible path exposes no OpenAI-style model list.
-        model_list_api=ModelListAPI.NONE,
-        # Discovery is structurally unavailable (model_list_api is NONE
-        # above), so these are the ONLY models the model step can ever offer
-        # besides manual entry. glm-5.3 is the current flagship; the older
-        # glm-5-turbo / glm-5.1 remain listed as known-good fallbacks.
-        known_models=("glm-5.3", "glm-5-turbo", "glm-5.1"),
+        # The Anthropic path also serves Anthropic's own GET /v1/models
+        # (Bearer-authorized, `{"data": [{"id": ...}]}`), which list_models
+        # reaches by openai_base_url-normalizing THIS base_url — no
+        # model_list_url override needed (verified live: 11 GLM models).
+        model_list_api=ModelListAPI.OPENAI_V1,
+        # Fallback for when the listing call fails (same role as deepseek's
+        # above), not the only source: flagship first, oldest last.
+        known_models=(
+            "glm-5.3",
+            "glm-5.3-flash",
+            "glm-5.3-flashx",
+            "glm-5.2",
+            "glm-5.1",
+            "glm-5-turbo",
+            "glm-5",
+            "glm-4.7",
+            "glm-4.6",
+            "glm-4.5",
+            "glm-4.5-air",
+        ),
         description="Z.ai (Anthropic-compatible)",
     ),
     Provider(
