@@ -2214,6 +2214,32 @@ def test_claude_chip_stays_applied_after_an_effort_only_edit():
 
 
 @pytest.mark.integration
+def test_max_wrapper_chip_stays_applied():
+    """max is the ONE effort level the chip compare DOES see (env-carried) —
+    and it still reads ✓: neither side of the comparison ever holds the key,
+    because a wrapper carries it in process env/--settings only and no
+    switch ever writes it into settings.json (the /code-review#130 check:
+    the renderer's env dict is NOT what the chip compares against)."""
+    from codehelper.services.spec import build_spec
+    from codehelper.services.wrappers import install_wrapper
+
+    applied = build_spec(
+        agent="claude",
+        provider="zai",
+        model="mystery-3b",
+        alias="claude-max",
+        effort="max",
+    )
+    install_wrapper(Paths.default(), applied, token="sk-mystery")
+    _apply_live(applied, "sk-mystery")
+
+    session = _claude_session()
+    assert (
+        session._chip_is_applied("claude", _chip_named(session, "claude-max")) is True
+    )
+
+
+@pytest.mark.integration
 def test_edit_screen_reads_the_spec_once(tmp_path, monkeypatch):
     """The label rule: labels re-evaluate every redraw frame, so the screen
     reads the file ONCE at entry and everything else comes from the draft."""

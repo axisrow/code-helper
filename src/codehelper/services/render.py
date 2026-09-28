@@ -146,7 +146,16 @@ def _settings_flag(env: dict[str, str], effort: str | None = None) -> str:
     """
     payload: dict[str, object] = {"env": env}
     # ponytail: max is env-carried (see docstring); revisit if the key ever accepts it
-    if effort and effort != "max":
+    if effort == "max":
+        # Fail closed: a max with no env carrier would be SILENTLY lost —
+        # the only writer of that carrier is _render_anthropic_env, so its
+        # absence here means a caller skipped the env line.
+        if "CLAUDE_CODE_EFFORT_LEVEL" not in env:
+            raise CodeHelperError(
+                "effort=max requires CLAUDE_CODE_EFFORT_LEVEL in env — "
+                "render the env block through _render_anthropic_env"
+            )
+    elif effort:
         payload["effortLevel"] = effort
     return (
         f"--settings {_shell_single_quote(json.dumps(payload, separators=(',', ':')))}"
