@@ -33,8 +33,10 @@ _OPENAI = Provider(
     model_list_api=ModelListAPI.OPENAI_V1,
 )
 
+# Synthetic NONE provider — the real zai now discovers via OPENAI_V1; this
+# entry exists only to pin the NONE short-circuit below.
 _NO_LIST = Provider(
-    name="zai",
+    name="none-api",
     shapes=frozenset(),
     base_url="https://api.z.ai/api/anthropic",
     model_list_api=ModelListAPI.NONE,
@@ -195,6 +197,35 @@ def test_json_but_not_an_object_reports_error():
 
 
 @pytest.mark.unit
+def test_200_auth_envelope_without_data_is_an_error_not_ok_empty():
+    """Z.ai's Anthropic path answers an unauthenticated listing with HTTP 200
+    and an error envelope that carries no `data` key. That must read as a
+    failure — the caller falls back to known_models — not as a legitimate
+    empty picker."""
+    fetch = _fetch_returning(
+        {
+            "code": 1001,
+            "msg": "Authentication parameter not received in Header, "
+            "unable to authenticate",
+            "success": False,
+        }
+    )
+    result = list_models(_OPENAI, fetch=fetch)
+    assert not result.ok
+    assert "unexpected response" in result.error
+    assert result.models == ()
+
+
+@pytest.mark.unit
+def test_openai_empty_data_list_is_still_a_legitimate_success():
+    """`{"data": []}` — the key present and a list — stays the documented
+    ok-empty answer ("up, no models"); only a MISSING key is the envelope."""
+    result = list_models(_OPENAI, fetch=_fetch_returning({"data": []}))
+    assert result.ok
+    assert result.models == ()
+
+
+@pytest.mark.unit
 def test_api_none_short_circuits_without_fetching():
     def _explode(_url, _timeout, _token):  # pragma: no cover - must not run
         raise AssertionError("fetch must not be called when there is no list API")
@@ -304,6 +335,20 @@ def test_deepseek_openai_bare_root_is_v1_normalized():
         fetch=_fetch_returning({"data": []}, record=calls),
     )
     assert calls[0][0] == "https://api.deepseek.com/v1/models"
+
+
+@pytest.mark.unit
+def test_zai_anthropic_base_url_discovers_on_its_own_v1_models():
+    """zai needs no model_list_url override: the Anthropic path itself serves
+    the Anthropic-standard GET /v1/models (verified live: Bearer-authorized,
+    `{"data": [{"id": ...}]}`), which openai_base_url reaches by appending
+    /v1 to base_url."""
+    calls = []
+    list_models(
+        get_provider("zai"),
+        fetch=_fetch_returning({"data": [{"id": "glm-5.3"}]}, record=calls),
+    )
+    assert calls[0][0] == "https://api.z.ai/api/anthropic/v1/models"
 
 
 @pytest.mark.unit

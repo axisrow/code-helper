@@ -131,10 +131,17 @@ def _parse_ollama_tags(payload: dict) -> tuple[str, ...]:
     )
 
 
-def _parse_openai_v1(payload: dict) -> tuple[str, ...]:
+def _parse_openai_v1(payload: dict) -> tuple[str, ...] | None:
+    # A body with no `data` list at all is not an empty answer but an error
+    # envelope — Z.ai's Anthropic path serves HTTP 200 +
+    # `{"code": ..., "msg": ..., "success": false}` to an unauthenticated
+    # listing. None flags that so list_models reports a failure and callers
+    # fall back to known_models; `{"data": []}` (key present, a list) stays a
+    # legitimate ok-empty answer ("up, no models"). The ollama parser keeps a
+    # foreign schema reading as ok-empty — local daemon, pinned otherwise.
     entries = payload.get("data")
     if not isinstance(entries, list):
-        return ()
+        return None
     return tuple(
         e["id"]
         for e in entries
@@ -142,7 +149,7 @@ def _parse_openai_v1(payload: dict) -> tuple[str, ...]:
     )
 
 
-_PARSERS: dict[ModelListAPI, Callable[[dict], tuple[str, ...]]] = {
+_PARSERS: dict[ModelListAPI, Callable[[dict], tuple[str, ...] | None]] = {
     ModelListAPI.OLLAMA_TAGS: _parse_ollama_tags,
     ModelListAPI.OPENAI_V1: _parse_openai_v1,
 }
@@ -252,6 +259,9 @@ def list_models(
 
     # Malformed individual entries are skipped rather than fatal: a provider
     # adding a field or emitting one odd record should not cost the user the
-    # whole picker.
+    # whole picker. None from a parser means the body was not a model list at
+    # all (an error envelope — see _parse_openai_v1).
     models = _PARSERS[api](payload)
+    if models is None:
+        return ModelListResult((), url, f"{url} returned an unexpected response")
     return ModelListResult(tuple(sorted(set(models))), url)

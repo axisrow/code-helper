@@ -229,6 +229,38 @@ def test_deepseek_is_anthropic_compatible_and_switchable():
 
 
 @pytest.mark.unit
+def test_zai_is_anthropic_compatible_and_discovers_on_its_own_surface():
+    """Portrait of the Z.ai provider: Anthropic surface for claude, discovery
+    served by the SAME base_url — the path also carries the Anthropic-standard
+    GET /v1/models (verified live), so no model_list_url override is needed."""
+    zai = get_provider("zai")
+    assert zai.shapes == {
+        ConfigShape.ANTHROPIC_ENV,
+        ConfigShape.ANTHROPIC_SETTINGS,
+    }
+    assert zai.base_url == "https://api.z.ai/api/anthropic"
+    assert zai.auth == "secret"
+    assert zai.token_env_var == "ZAI_API_KEY"
+    assert zai.model_list_api is ModelListAPI.OPENAI_V1
+    assert zai.model_list_url == ""  # default — base_url itself is the listing root
+    # Fallback for a failed listing call (same role as deepseek's above),
+    # flagship first, oldest last.
+    assert zai.known_models == (
+        "glm-5.3",
+        "glm-5.3-flash",
+        "glm-5.3-flashx",
+        "glm-5.2",
+        "glm-5.1",
+        "glm-5-turbo",
+        "glm-5",
+        "glm-4.7",
+        "glm-4.6",
+        "glm-4.5",
+        "glm-4.5-air",
+    )
+
+
+@pytest.mark.unit
 def test_deepseek_openai_is_openai_only_and_uses_documented_conventions():
     """Portrait of the codex-facing provider: bare OpenAI root (the
     renderer appends /v1/), Responses wire_api."""
