@@ -2971,16 +2971,51 @@ def test_build_spec_refuses_an_unknown_effort():
 
 
 @pytest.mark.unit
-def test_build_spec_refuses_effort_outside_the_toml_shape():
-    """effort is an OPENAI_TOML-only axis: no other shape has a surface to
-    declare it on. A shape check — claude × ollama-direct resolves to the
-    env shape and must refuse."""
-    with pytest.raises(CodeHelperError, match="openai-toml"):
+def test_build_spec_effort_levels_are_per_shape():
+    """effort is a per-shape axis (claude surface since): each backend
+    hard-rejects the OTHER shape's values — ``xhigh`` is a Claude Code
+    ``effortLevel`` level Codex rejects, ``minimal`` is a codex value the
+    settings key does not accept. The env shape takes both its own set."""
+
+    def bs(agent, effort):
+        if agent == "claude":
+            return build_spec(
+                agent="claude",
+                provider="ollama-direct",
+                model="glm-5.3",
+                alias="glm-claude",
+                effort=effort,
+            )
+        return build_spec(
+            agent="codex",
+            provider="ollama-direct",
+            model="glm-5.2:cloud",
+            alias="glm-codex",
+            effort=effort,
+        )
+
+    assert bs("claude", "high").effort == "high"
+    assert bs("claude", "xhigh").effort == "xhigh"
+    with pytest.raises(CodeHelperError, match="unusable reasoning effort .*minimal"):
+        bs("claude", "minimal")
+
+    assert bs("codex", "minimal").effort == "minimal"
+    with pytest.raises(CodeHelperError, match="unusable reasoning effort .*xhigh"):
+        bs("codex", "xhigh")
+
+
+@pytest.mark.unit
+def test_build_spec_refuses_effort_on_a_shape_without_a_surface():
+    """A shape missing from EFFORT_LEVELS_BY_SHAPE has nowhere to declare
+    effort — claude × ollama-direct forced onto the launcher shape must
+    refuse, naming the shapes that DO carry the axis."""
+    with pytest.raises(CodeHelperError, match="openai-toml/anthropic-env"):
         build_spec(
             agent="claude",
             provider="ollama-direct",
-            model="glm-5.3",
+            model="glm-5.2:cloud",
             alias="glm-claude",
+            shape=ConfigShape.OLLAMA_LAUNCH,
             effort="high",
         )
 
@@ -3002,6 +3037,57 @@ def test_spec_from_installed_honors_a_recorded_effort(tmp_path):
     recovered = spec_from_installed(paths, "glm-codex")
     assert recovered is not None
     assert recovered.effort == "high"
+
+
+@pytest.mark.unit
+def test_env_shape_settings_payload_carries_effortlevel_when_set():
+    """The claude surface: effort rides the ``--settings`` payload as the
+    TOP-LEVEL ``effortLevel`` key — deliberately not an env entry (the env
+    spelling outranks a mid-session /effort, the settings key does not)."""
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="glm-5.3",
+        alias="glm-claude",
+        effort="xhigh",
+    )
+    body = render_script(spec, _LITERAL_TOKEN)
+    assert '"effortLevel":"xhigh"' in body
+    # and it is NOT smuggled into the env block / exports
+    assert "export CLAUDE_CODE_EFFORT_LEVEL" not in body
+
+    plain = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="glm-5.3",
+        alias="glm-claude",
+    )
+    rendered = render_script(plain, _LITERAL_TOKEN)
+    # No effort kwarg (None is the dataclass default) IS the effort-less
+    # body: the payload gains no effortLevel key — byte-identical to the
+    # pre-effort output (the #82 golden rule, claude side). The set case is
+    # asserted above; the pairing of the two is what pins the append-only
+    # payload contract.
+    assert "effortLevel" not in rendered
+
+
+@pytest.mark.integration
+def test_spec_from_installed_honors_a_recorded_effort_on_claude(tmp_path):
+    """Same reconstruction as the codex marker, claude surface: the generic
+    ``effort=`` field survives an env-shaped install."""
+    paths = Paths.from_home(tmp_path)
+    spec = build_spec(
+        agent="claude",
+        provider="ollama-direct",
+        model="glm-5.3",
+        alias="glm-claude",
+        effort="xhigh",
+    )
+    install_wrapper(paths, spec, token=_LITERAL_TOKEN)
+
+    recovered = spec_from_installed(paths, "glm-claude")
+    assert recovered is not None
+    assert recovered.effort == "xhigh"
 
 
 @pytest.mark.integration

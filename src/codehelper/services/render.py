@@ -102,8 +102,8 @@ def _marker(spec: WrapperSpec) -> str:
     # every already-installed known-model wrapper's marker (the #82 rule).
     ctx = f", ctx={spec.context_window}" if spec.context_window is not None else ""
     # effort continues the same append-only rule (issue #100): conditional,
-    # after ctx, so a pre-#100 marker's bytes never move. Only ever set for
-    # the OPENAI_TOML shape — build_spec refuses it everywhere else.
+    # after ctx, so a pre-#100 marker's bytes never move. Only ever set for a
+    # shape in spec.EFFORT_LEVELS_BY_SHAPE — build_spec refuses it elsewhere.
     effort = f", effort={spec.effort}" if spec.effort else ""
     return (
         f"{MARKER_PREFIX} (agent={spec.agent.name}, "
@@ -111,8 +111,8 @@ def _marker(spec: WrapperSpec) -> str:
     )
 
 
-def _settings_flag(env: dict[str, str]) -> str:
-    """``--settings '<json>'`` carrying ``env`` at the command-line level.
+def _settings_flag(env: dict[str, str], effort: str | None = None) -> str:
+    """``--settings '<json>'`` carrying ``env`` (and optional ``effortLevel``).
 
     Why the exports alone are not enough: since Claude Code 2.0.1 every
     ``env`` entry in ``settings.json`` is written into the process
@@ -126,9 +126,22 @@ def _settings_flag(env: dict[str, str]) -> str:
     exports stay in the script for subprocesses and for
     ``wrappers.spec_from_installed`` recovery; ``--settings`` is what
     guarantees they win.
+
+    ``effortLevel`` rides the SAME payload as a TOP-LEVEL key (issue #100,
+    claude surface), deliberately not as an env entry: the
+    ``CLAUDE_CODE_EFFORT_LEVEL`` env spelling outranks even a mid-session
+    ``/effort``, while the settings key is only the session's starting
+    default — the wrapper picks the level for new sessions and leaves the
+    in-session command in charge. Key added LAST and only when effort is
+    set, so an effort-less payload is byte-identical to the pre-effort
+    output (the ``_ownership_full_match`` byte-compare invariant).
     """
-    payload = json.dumps({"env": env}, separators=(",", ":"))
-    return f"--settings {_shell_single_quote(payload)}"
+    payload: dict[str, object] = {"env": env}
+    if effort:
+        payload["effortLevel"] = effort
+    return (
+        f"--settings {_shell_single_quote(json.dumps(payload, separators=(',', ':')))}"
+    )
 
 
 #: Real context windows of third-party models this tool knows, in tokens.
@@ -260,7 +273,7 @@ def _render_anthropic_env(spec: WrapperSpec, token: str) -> str:
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
     lines = ["#!/bin/bash", _marker(spec), "("]
     lines += [f"export {key}={q(value)}" for key, value in env.items()]
-    lines.append(f'{spec.agent.binary} {_settings_flag(env)} "$@"')
+    lines.append(f'{spec.agent.binary} {_settings_flag(env, spec.effort)} "$@"')
     lines.append(")")
     return "\n".join(lines) + "\n"
 
@@ -308,7 +321,7 @@ def _render_ollama_launch(spec: WrapperSpec, token: str) -> str:
         }
         if (window := _declared_window(spec)) is not None:
             env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
-        launch += f" {_settings_flag(env)}"
+        launch += f" {_settings_flag(env, spec.effort)}"
     launch += ' "$@"'
     return f"#!/bin/bash\n{_marker(spec)}\n{launch}\n"
 

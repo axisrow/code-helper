@@ -2044,9 +2044,9 @@ def test_profile_screen_e_renames(tmp_path, monkeypatch):
 @pytest.mark.integration
 def test_edit_screen_rows_follow_the_shape(tmp_path, monkeypatch):
     """Which rows exist is _EDIT_AXES data keyed by shape: an env wrapper
-    gets the three tier slots + subagent + uniform; a codex wrapper gets
-    effort; a launch wrapper gets the minimum. No name branches anywhere —
-    the shape decides."""
+    gets the three tier slots + subagent + uniform + effort; a codex wrapper
+    gets effort; a launch wrapper gets the minimum. No name branches
+    anywhere — the shape decides."""
     from codehelper.cli.tui import _BACK, TuiSession
     from codehelper.services.model import ConfigShape
     from codehelper.services.spec import build_spec as _bs
@@ -2106,6 +2106,7 @@ def test_edit_screen_rows_follow_the_shape(tmp_path, monkeypatch):
         "opus",
         "uniform",
         "subagent",
+        "effort",
         "ctx",
         "rename",
     ):
@@ -2120,6 +2121,96 @@ def test_edit_screen_rows_follow_the_shape(tmp_path, monkeypatch):
     assert "subagent" not in launch
     # claude HAS an env-capable surface, so the launch wrapper still offers ctx
     assert "ctx" in launch
+
+
+@pytest.mark.integration
+def test_edit_effort_pick_offers_the_shape_own_levels(monkeypatch):
+    """The effort menu serves both shapes off ONE table: claude offers
+    low..xhigh (the --settings effortLevel set, no codex-only minimal),
+    codex offers minimal..high (no xhigh — Codex would reject the profile)."""
+    from codehelper.cli.tui import _BACK, TuiSession
+    from codehelper.services.paths import Paths
+    from codehelper.services.spec import build_spec as _bs
+    from codehelper.services.wrappers import install_wrapper, spec_from_installed
+
+    paths = Paths.default()
+    install_wrapper(
+        paths,
+        _bs(agent="claude", provider="zai", model="glm-5.3", alias="glm-cl"),
+        token="sk-x",
+    )
+    install_wrapper(
+        paths,
+        _bs(
+            agent="codex",
+            provider="ollama-direct",
+            model="glm-5.2:cloud",
+            alias="codex-m",
+        ),
+        token="",
+    )
+
+    def _effort_menu(alias):
+        session = TuiSession(_tui_args())
+        seen: list[str] = []
+
+        def _fake_pick(_self, items, prompt, **kwargs):
+            seen.extend(
+                entry[0]
+                for entry in items
+                if isinstance(entry, tuple) and entry[0] != _BACK
+            )
+            return _BACK
+
+        monkeypatch.setattr(TuiSession, "_pick", _fake_pick)
+        spec = spec_from_installed(paths, alias)
+        assert spec is not None
+        session._pick_edit_effort(spec, {})
+        return seen
+
+    env = _effort_menu("glm-cl")
+    assert "__clear__" in env
+    for level in ("low", "medium", "high", "xhigh"):
+        assert level in env, f"claude effort menu missing {level!r}"
+    assert "minimal" not in env
+
+    toml = _effort_menu("codex-m")
+    for level in ("minimal", "low", "medium", "high"):
+        assert level in toml, f"codex effort menu missing {level!r}"
+    assert "xhigh" not in toml
+
+
+@pytest.mark.integration
+def test_claude_chip_stays_applied_after_an_effort_only_edit():
+    """The claude twin of the codex #83 pin: the chip compares the LIVE ENV
+    dict, and effortLevel is a top-level --settings key, not env — so an
+    effort-only edit leaves the env untouched and the ✓ must stay. Two
+    same-axes wrappers differing ONLY in effort are indistinguishable as
+    chips BY DESIGN (the applied-hint stays silent)."""
+    from codehelper.services.spec import build_spec
+    from codehelper.services.wrappers import edit_wrapper, install_wrapper
+
+    applied = build_spec(
+        agent="claude",
+        provider="zai",
+        model="mystery-3b",
+        alias="claude-eff",
+        effort="xhigh",
+    )
+    install_wrapper(Paths.default(), applied, token="sk-mystery")
+    _apply_live(applied, "sk-mystery")
+
+    session = _claude_session()
+    assert (
+        session._chip_is_applied("claude", _chip_named(session, "claude-eff")) is True
+    )
+
+    edit_wrapper(Paths.default(), "claude-eff", effort="high")
+
+    session = _claude_session()
+    assert (
+        session._chip_is_applied("claude", _chip_named(session, "claude-eff")) is True
+    )
 
 
 @pytest.mark.integration

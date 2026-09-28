@@ -91,6 +91,9 @@ class AddRequest:
     # Explicit context window (issue #83): an int, or 0 for "no declaration".
     # None asks (interactively) or derives — the resolver decides.
     context_window: int | None = None
+    # Reasoning effort (issue #100): set only on the explicit-axes form, like
+    # context_window; validated against the shape's set by build_spec.
+    effort: str | None = None
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> AddRequest:
@@ -119,6 +122,7 @@ class AddRequest:
             force=bool(_g(args, "force", False)),
             debug=bool(_g(args, "debug", False)),
             context_window=_g(args, "context_window"),
+            effort=_g(args, "effort"),
         )
 
 

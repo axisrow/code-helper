@@ -75,6 +75,7 @@ from codehelper.services.spec import (
     TierModels,
     WrapperSpec,
     build_spec,
+    effort_levels_for,
     get_preset,
     preset_names,
     spec_from_preset,
@@ -1997,7 +1998,11 @@ def edit_wrapper(
                     "--subagent-model applies to anthropic-env wrappers"
                 )
             subagent = None
-    if effort_value is not None and target_shape is not ConfigShape.OPENAI_TOML:
+    # A shape with no effort surface cannot carry the recorded answer — same
+    # auto-drop rule as tiers/subagent above, but keyed off the per-shape
+    # level table (both OPENAI_TOML and ANTHROPIC_ENV carry effort; the gate
+    # is the EMPTY set, never a shape name).
+    if effort_value is not None and not effort_levels_for(target_shape):
         if effort_edited:
             pass  # build_spec's shape gate raises with its own message
         else:

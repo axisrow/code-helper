@@ -377,3 +377,32 @@ def test_edit_agy_native_model_change_never_prompts_for_a_context_window(
         Paths.from_home(tmp_path).script_for("agy-native").read_text(encoding="utf-8")
     )
     assert "ctx=0)" in body
+
+
+@pytest.mark.integration
+def test_edit_effort_round_trip_on_a_claude_wrapper(tmp_path, monkeypatch, capsys):
+    """The claude surface end-to-end: xhigh lands as the payload's TOP-LEVEL
+    ``effortLevel`` key (plus the marker), 'none' strips both again."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
+    assert main(["add", "glm"]) == 0
+
+    assert main(["edit", "glm", "--effort", "xhigh"]) == 0
+    body = Paths.from_home(tmp_path).script_for("glm").read_text(encoding="utf-8")
+    assert '"effortLevel":"xhigh"' in body
+    assert "effort=xhigh" in body
+
+    assert main(["edit", "glm", "--effort", "none"]) == 0
+    body = Paths.from_home(tmp_path).script_for("glm").read_text(encoding="utf-8")
+    assert "effortLevel" not in body
+    assert "effort=" not in body
+
+
+@pytest.mark.integration
+def test_edit_effort_value_from_the_other_shape_refuses(tmp_path, monkeypatch, capsys):
+    """``minimal`` belongs to codex's TOML set, not the claude settings key —
+    the shape's own level table refuses it at edit time too."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
+    assert main(["add", "glm"]) == 0
+
+    assert main(["edit", "glm", "--effort", "minimal"]) == 1
+    assert "unusable reasoning effort" in capsys.readouterr().err

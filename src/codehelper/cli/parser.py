@@ -109,8 +109,8 @@ from codehelper.services.secrets import (
     valid_active_profile,
 )
 from codehelper.services.spec import (
+    EFFORT_LEVELS_BY_SHAPE,
     PRESETS,
-    REASONING_EFFORTS,
     build_spec,
     get_preset,
     spec_from_preset,
@@ -134,6 +134,15 @@ from codehelper.services.wrappers import (
     spec_from_installed,
     token_from_installed,
     wrappers_for_provider,
+)
+
+#: Every effort value any shape accepts — argparse-level choices for the
+#: add/edit flags, which cannot know the wrapper's shape yet. The SHAPE's own
+#: set (``spec.effort_levels_for``) is the real gate: build_spec refuses a
+#: value that belongs to the other shape (``xhigh`` on codex, ``minimal`` on
+#: claude) with a message listing that shape's levels.
+ALL_EFFORT_CHOICES = tuple(
+    dict.fromkeys(v for levels in EFFORT_LEVELS_BY_SHAPE.values() for v in levels)
 )
 
 
@@ -616,6 +625,7 @@ def _add_resolve_spec(req, _paths, agent, provider, profile_name):
         alias=req.alias or suggest_alias(req.model, agent.name, profile_name),
         shape=shape,
         profile_name=profile_name,
+        effort=req.effort,
     )
 
 
@@ -890,6 +900,11 @@ def _handle_add(args: argparse.Namespace | AddRequest) -> int:
         raise CodeHelperError(
             "--auth applies to the constructor form only "
             "(--agent/--provider) — a preset carries its own provider"
+        )
+    if not using_axes and req.effort:
+        raise CodeHelperError(
+            "--effort applies to the constructor form only "
+            "(--agent/--provider) — a preset carries no effort answer"
         )
 
     # Parsed up front with the other flag validations: a garbage value must
@@ -2070,6 +2085,13 @@ def build_parser() -> argparse.ArgumentParser:
         "catalog, or to be asked once for an unknown model",
     )
     p_add.add_argument(
+        "--effort",
+        default=None,
+        choices=ALL_EFFORT_CHOICES,
+        help="reasoning effort for codex (TOML profile) and claude "
+        "(--settings effortLevel) wrappers; validated per shape",
+    )
+    p_add.add_argument(
         "--force",
         action="store_true",
         default=False,
@@ -2220,9 +2242,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_edit.add_argument(
         "--effort",
-        choices=[*REASONING_EFFORTS, "none"],
+        choices=[*ALL_EFFORT_CHOICES, "none"],
         default=UNSET,
-        help="reasoning effort for codex wrappers ('none' stops managing it)",
+        help="reasoning effort for codex (TOML profile) and claude "
+        "(--settings effortLevel) wrappers ('none' stops managing it); "
+        "validated per shape",
     )
     p_edit.add_argument(
         "--context-window",
