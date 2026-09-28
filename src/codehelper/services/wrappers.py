@@ -1998,11 +1998,14 @@ def edit_wrapper(
                     "--subagent-model applies to anthropic-env wrappers"
                 )
             subagent = None
-    # A shape with no effort surface cannot carry the recorded answer — same
-    # auto-drop rule as tiers/subagent above, but keyed off the per-shape
-    # level table (both OPENAI_TOML and ANTHROPIC_ENV carry effort; the gate
-    # is the EMPTY set, never a shape name).
-    if effort_value is not None and not effort_levels_for(target_shape):
+    # A recorded effort the TARGET shape cannot carry is auto-dropped — the
+    # same auto-drop rule as tiers/subagent above, keyed off the per-shape
+    # level table. BOTH uncarryability cases drop: a shape with no surface
+    # (empty set) and a shape whose set excludes the recorded value
+    # (codex-recorded `minimal` surviving a switch to claude would fail
+    # build_spec on an axis the user never asked about). An EXPLICIT
+    # --effort still refuses via build_spec's own gate.
+    if effort_value is not None and effort_value not in effort_levels_for(target_shape):
         if effort_edited:
             pass  # build_spec's shape gate raises with its own message
         else:
