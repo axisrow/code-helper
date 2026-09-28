@@ -2627,14 +2627,18 @@ class TuiSession:
             draft["subagent"] = choice
 
     def _pick_edit_effort(self, spec, draft) -> None:
-        from codehelper.services.spec import REASONING_EFFORTS
+        from codehelper.services.spec import effort_levels_for
 
+        # Per-shape set (issue #100, claude surface since): codex takes
+        # minimal..high in its TOML profile, claude takes low..xhigh in the
+        # --settings payload — the same menu serves both off the one table.
+        levels = effort_levels_for(spec.shape)
         items: list[tuple[str, str]] = [
             ("__clear__", "( clear — stop managing effort )")
         ]
-        items.extend((e, e) for e in REASONING_EFFORTS)
+        items.extend((e, e) for e in levels)
         items.append((_BACK, "Back"))
-        choice = self._pick(items, "Reasoning effort (codex wrappers):")
+        choice = self._pick(items, "Reasoning effort:")
         if choice == "__clear__":
             draft["effort"] = None
         elif choice not in (_BACK, None):
@@ -2999,6 +3003,7 @@ def _register_edit_axes() -> None:
                     "uniform", "tiers", _has_recorded_tiers, "_pick_edit_uniform"
                 ),
                 _EditAxis("subagent", "subagent", _always, "_pick_edit_subagent"),
+                _EditAxis("effort", "effort", _always, "_pick_edit_effort"),
                 _EditAxis("ctx", "ctx", _always, "_pick_edit_ctx"),
                 _EditAxis("rename", "rename", _always, "_pick_edit_rename"),
             ),

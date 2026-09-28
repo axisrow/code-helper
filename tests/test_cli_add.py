@@ -2253,3 +2253,96 @@ def test_window_prompt_comes_after_spec_validation(capsys):
             == 1
         )
     assert "alias" in capsys.readouterr().err.lower()
+
+
+# --------------------------------------------------------------------------- #
+# --effort on add (issue #100, claude surface since)                         #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_add_effort_flag_installs_on_both_shapes(tmp_path, monkeypatch):
+    """The mirrored gap: codex had effort only via edit; add takes the flag
+    on BOTH shapes now — claude into the --settings payload, codex into the
+    TOML profile, each per its shape's value set."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
+    assert (
+        main(
+            [
+                "add",
+                "--agent",
+                "claude",
+                "--provider",
+                "zai",
+                "--model",
+                "glm-5.3",
+                "--alias",
+                "glm-eff",
+                "--effort",
+                "xhigh",
+            ]
+        )
+        == 0
+    )
+    body = paths_body(tmp_path, "glm-eff")
+    assert '"effortLevel":"xhigh"' in body
+    assert "effort=xhigh" in body  # the marker round-trips it
+
+    assert (
+        main(
+            [
+                "add",
+                "--agent",
+                "codex",
+                "--provider",
+                "ollama-direct",
+                "--model",
+                "glm-5.2:cloud",
+                "--alias",
+                "codex-eff",
+                "--effort",
+                "minimal",
+            ]
+        )
+        == 0
+    )
+    companion = (
+        Paths.from_home(tmp_path)
+        .codex_config_for("codex-eff")
+        .read_text(encoding="utf-8")
+    )
+    assert 'model_reasoning_effort = "minimal"' in companion
+
+
+@pytest.mark.integration
+def test_add_effort_on_the_preset_form_refuses(capsys):
+    """A preset carries no effort answer — same refusal family as --base-url
+    and --auth, before anything interactive."""
+    assert main(["add", "glm", "--effort", "high"]) == 1
+    assert "constructor form only" in capsys.readouterr().err
+
+
+@pytest.mark.integration
+def test_add_effort_wrong_for_the_shape_refuses(tmp_path, capsys):
+    """argparse choices are the union; the SHAPE's set is the gate. xhigh on
+    codex (and minimal on claude) is a clean exit-1, not a rendered wrapper."""
+    assert (
+        main(
+            [
+                "add",
+                "--agent",
+                "codex",
+                "--provider",
+                "ollama-direct",
+                "--model",
+                "glm-5.2:cloud",
+                "--alias",
+                "codex-xh",
+                "--effort",
+                "xhigh",
+            ]
+        )
+        == 1
+    )
+    assert "unusable reasoning effort" in capsys.readouterr().err
+    assert not Paths.from_home(tmp_path).script_for("codex-xh").exists()

@@ -43,12 +43,35 @@ from codehelper.services.model import (
 from codehelper.services.naming import validate_alias
 
 #: Reasoning-effort values current Codex accepts in ``model_reasoning_effort``
-#: (issue #100). The ONLY extension point: a new value lands here, and the
-#: marker regex (``[^,()\s]+``) plus the TOML renderer need no edits. Codex
-#: hard-rejects unknown values at config deserialization (the ``wire_api``
-#: precedent, openai/codex#7782), so an unlisted value must be refused here —
-#: never rendered into a profile Codex would then refuse to load.
+#: (issue #100) — the OPENAI_TOML entry of :data:`EFFORT_LEVELS_BY_SHAPE`,
+#: which is THE extension point since the claude surface joined: a new value
+#: lands in its shape's tuple, and the marker regex (``[^,()\s]+``) plus the
+#: renderers need no edits. Codex hard-rejects unknown values at config
+#: deserialization (the ``wire_api`` precedent, openai/codex#7782), so an
+#: unlisted value must be refused in :func:`build_spec` — never rendered
+#: into a profile Codex would then refuse to load.
 REASONING_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
+
+#: Reasoning-effort levels per shape (issue #100, extended to the claude
+#: ``--settings`` surface). The per-shape SETS are the extension point: each
+#: backend hard-rejects unknown values (Codex at config deserialization; the
+#: Claude Code ``effortLevel`` settings key accepts only low|medium|high|xhigh —
+#: the env spelling has ``max``/``auto``, deliberately unused here because the
+#: wrapper must not pin what a mid-session ``/effort`` may override), so an
+#: unlisted value must be refused before anything renders. A new value lands
+#: in the shape's tuple; a new shape with an effort surface joins by adding a
+#: mapping entry — the marker regex (``[^,()\s]+``) needs no edits.
+EFFORT_LEVELS_BY_SHAPE: dict[ConfigShape, tuple[str, ...]] = {
+    ConfigShape.OPENAI_TOML: REASONING_EFFORTS,
+    ConfigShape.ANTHROPIC_ENV: ("low", "medium", "high", "xhigh"),
+}
+
+
+def effort_levels_for(shape: ConfigShape) -> tuple[str, ...]:
+    """The effort values :func:`build_spec` accepts for ``shape`` (empty when
+    the shape has no effort surface — the gate, as data)."""
+    return EFFORT_LEVELS_BY_SHAPE.get(shape, ())
+
 
 __all__ = [
     "WrapperSpec",
@@ -56,6 +79,8 @@ __all__ = [
     "Preset",
     "PRESETS",
     "REASONING_EFFORTS",
+    "EFFORT_LEVELS_BY_SHAPE",
+    "effort_levels_for",
     "build_spec",
     "spec_from_preset",
     "get_preset",
@@ -107,13 +132,16 @@ class WrapperSpec:
     #: Like ``profile_name`` it is recorded data, not a derivation: it rides
     #: the wrapper marker (``ctx=``) so reconstruction never re-derives it.
     context_window: int | None = None
-    #: Reasoning effort for the OPENAI_TOML shape (issue #100): rendered as
-    #: ``model_reasoning_effort`` in the companion TOML profile and recorded
-    #: in the marker (``effort=``, after ``ctx=``) like every other explicit
-    #: answer. ``None`` means "not managed" — the renderer emits no key and
-    #: Codex keeps its own default (the ``ctx=`` sentinel convention). Only
-    #: ever non-None for an OPENAI_TOML spec: :func:`build_spec` refuses it
-    #: for every other shape.
+    #: Reasoning effort (issue #100; claude shape since the effort-axis
+    #: follow-up): rendered per shape — ``model_reasoning_effort`` in the
+    #: companion TOML profile (OPENAI_TOML) or the ``effortLevel`` key of the
+    #: ``--settings`` payload (ANTHROPIC_ENV, launch-scoped: a mid-session
+    #: ``/effort`` still wins) — and recorded in the marker (``effort=``,
+    #: after ``ctx=``) like every other explicit answer. ``None`` means "not
+    #: managed" — the renderer emits nothing and the agent keeps its own
+    #: default (the ``ctx=`` sentinel convention). Only ever non-None for a
+    #: shape in ``EFFORT_LEVELS_BY_SHAPE``: :func:`build_spec` refuses it
+    #: everywhere else, and validates the value against that shape's set.
     effort: str | None = None
 
     @property
@@ -283,26 +311,28 @@ def build_spec(
             f"declaration) or a token count in 1..{MAX_CONTEXT_WINDOW:_}"
         )
 
-    # An unknown effort value refuses here, beside the window check (issue
-    # #100): Codex hard-rejects unknown ``model_reasoning_effort`` values at
-    # config deserialization (the ``wire_api`` precedent), so an unlisted
-    # value must fail before anything is rendered — which is also what makes
-    # a garbage ``effort=`` marker value fail spec_from_installed closed to
-    # None, the same answer as any other unrecognised marker value.
-    if effort is not None and effort not in REASONING_EFFORTS:
-        raise CodeHelperError(
-            f"unusable reasoning effort {effort!r}: expected one of "
-            f"{', '.join(REASONING_EFFORTS)}"
-        )
-
     chosen = resolve_shape(agent_obj, provider_obj, preferred=shape)
 
-    # effort is an OPENAI_TOML-only axis (issue #100): it lives in the
-    # companion TOML profile, and no other shape has a surface to declare it
-    # on. A shape check, never a provider/agent-name check — a future shape
-    # with a reasoning-effort surface joins by changing this one condition.
-    if effort is not None and chosen is not ConfigShape.OPENAI_TOML:
-        raise CodeHelperError("effort applies only to openai-toml wrappers (codex)")
+    # An unknown or shape-foreign effort value refuses here, beside the window
+    # check (issue #100; per-shape since the claude surface): each backend
+    # hard-rejects an unlisted value (Codex at config deserialization — the
+    # ``wire_api`` precedent; the Claude Code ``effortLevel`` key likewise),
+    # and only shapes in ``EFFORT_LEVELS_BY_SHAPE`` have a surface to declare
+    # it on at all. Both checks hang off the one per-shape set, so a garbage
+    # ``effort=`` marker value still fails spec_from_installed closed to
+    # None, the same answer as any other unrecognised marker value.
+    levels = effort_levels_for(chosen)
+    if effort is not None:
+        if not levels:
+            raise CodeHelperError(
+                f"effort applies only to "
+                f"{'/'.join(s.value for s in EFFORT_LEVELS_BY_SHAPE)} wrappers"
+            )
+        if effort not in levels:
+            raise CodeHelperError(
+                f"unusable reasoning effort {effort!r} for a {chosen.value} "
+                f"wrapper: expected one of {', '.join(levels)}"
+            )
 
     # There used to be a refusal here: OPENAI_TOML + auth == "secret" was
     # rejected outright, because the wrapper was a one-line
