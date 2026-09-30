@@ -15,6 +15,12 @@ routes that session to the chosen model.
 ## Install
 
 ```bash
+pip install codehelper
+```
+
+For development (editable install + dev tools):
+
+```bash
 pip install -e ".[dev]"
 ```
 
