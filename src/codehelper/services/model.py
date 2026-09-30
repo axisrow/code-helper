@@ -766,6 +766,24 @@ _ADDRESS_CONSUMING_SHAPES: frozenset[ConfigShape] = frozenset(
 )
 
 
+#: Provider IDs Codex CLI itself treats as built-in and refuses to see
+#: overridden in ``[model_providers.<id>]`` — NOT this project's own
+#: reservation (contrast :data:`codehelper.services.naming.RESERVED_ALIASES`,
+#: which reserves *wrapper* names in this tool's own ``~/.local/bin``
+#: namespace). This list is Codex's, sourced from its own error message
+#: ("model_providers contains reserved built-in provider IDs"); kept in sync
+#: by hand since Codex does not expose it as a queryable API. Confirmed
+#: reserved as of Codex CLI v0.150.1: "openai", "ollama" — the latter is why
+#: this project's own ``ollama`` provider was renamed to ``ollama-direct``.
+#:
+#: Lives HERE (not in ``codex_default``, which re-exports it) because TWO
+#: writers produce a ``[model_providers.<name>]`` table: ``set-default``'s
+#: patch and ``render.openai_toml_body`` behind every ``add`` — an
+#: import-time registry check in ``_validate_provider`` is the only place
+#: that covers both (``codex_default`` alone guarded only its own path).
+CODEX_RESERVED_PROVIDER_IDS = frozenset({"openai", "ollama"})
+
+
 def _validate_provider(provider: Provider) -> None:
     """Fail on a malformed :class:`Provider` entry.
 
@@ -807,6 +825,24 @@ def _validate_provider(provider: Provider) -> None:
             f"provider {provider.name!r} declares openai-toml but has "
             f"invalid wire_api {provider.wire_api!r} (must be 'responses' — "
             f"Codex removed 'chat', see openai/codex#7782)"
+        )
+    # Same "a wrapper that dies before any request is an import-time error"
+    # class as the wire_api check above: Codex hard-rejects a
+    # [model_providers.<id>] table naming its own built-in provider IDs at
+    # config load — a registry entry with such a name would install a profile
+    # no Codex version will load. codex_default's resolve_default_patch
+    # mirrors this for set-default; THIS gate covers `add`'s writer
+    # (render.openai_toml_body) too, so the reserved list cannot sneak back
+    # into the registry through the other path (issue #74 class).
+    if (
+        ConfigShape.OPENAI_TOML in provider.shapes
+        and provider.name in CODEX_RESERVED_PROVIDER_IDS
+    ):
+        raise CodeHelperError(
+            f"provider {provider.name!r} is reserved by Codex CLI itself as a "
+            f"built-in provider ID and cannot be declared openai-toml — a "
+            f"[model_providers.{provider.name}] profile is rejected by Codex "
+            f"at config load; rename the provider entry"
         )
     # `export {token_env_var}=...` interpolates this name unquoted, left of
     # `=`, in the OPENAI_TOML wrapper for a secret provider — see

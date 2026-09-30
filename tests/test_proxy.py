@@ -16,10 +16,11 @@ toggle that reports off while traffic still goes through the proxy.
 
 from __future__ import annotations
 
-import json
 import stat
 
 import pytest
+from conftest import read_settings as _read
+from conftest import write_settings
 
 from codehelper.errors import CodeHelperError
 from codehelper.services.claude_settings import MANAGED_ENV_KEYS, apply_switch
@@ -53,15 +54,6 @@ _FOREIGN_TOP_LEVEL = {
     "model": "opusplan",
     "autoMode": {"soft_deny": []},
 }
-
-
-def _write(paths: Paths, data: dict) -> None:
-    paths.claude_settings().parent.mkdir(parents=True, exist_ok=True)
-    paths.claude_settings().write_text(json.dumps(data, indent=2), encoding="utf-8")
-
-
-def _read(paths: Paths) -> dict:
-    return json.loads(paths.claude_settings().read_text(encoding="utf-8"))
 
 
 def _enabled_settings() -> dict:
@@ -207,7 +199,7 @@ def test_a_foreign_credential_is_redacted_in_the_preview(tmp_path, capsys):
     """A unified diff carries CONTEXT lines, so owning only the proxy keys
     does not stop this command printing the OTHER owner's token."""
     paths = Paths.from_home(tmp_path)
-    _write(paths, _enabled_settings())
+    write_settings(paths, _enabled_settings())
 
     apply_proxy(paths, url="", dry_run=True)
 
@@ -219,7 +211,7 @@ def test_proxy_toggle_leaves_the_anthropic_keys_alone(tmp_path):
     """THE boundary test from this side: turning the proxy off must not
     disturb the backend ``switch`` selected."""
     paths = Paths.from_home(tmp_path)
-    _write(paths, _enabled_settings())
+    write_settings(paths, _enabled_settings())
 
     apply_proxy(paths, url="", force=True)
 
@@ -235,7 +227,7 @@ def test_switch_native_does_not_disable_the_proxy(tmp_path):
     NOT in ``MANAGED_ENV_KEYS`` — ``switch native`` blanks everything it
     owns, and owning the proxy would mean wiping it on every backend change."""
     paths = Paths.from_home(tmp_path)
-    _write(paths, _enabled_settings())
+    write_settings(paths, _enabled_settings())
 
     apply_switch(paths, provider=get_provider("native"), force=True)
 
@@ -248,7 +240,7 @@ def test_switch_native_does_not_disable_the_proxy(tmp_path):
 @pytest.mark.unit
 def test_toggling_preserves_no_proxy_and_every_top_level_key(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, _enabled_settings())
+    write_settings(paths, _enabled_settings())
 
     apply_proxy(paths, url="", force=True)
     apply_proxy(paths, url=_URL, force=True)
@@ -270,7 +262,7 @@ def test_off_blanks_values_rather_than_removing_keys(tmp_path):
     """Removing a key does not unset an already-applied value in a running
     Claude Code process; an empty string does."""
     paths = Paths.from_home(tmp_path)
-    _write(paths, _enabled_settings())
+    write_settings(paths, _enabled_settings())
 
     apply_proxy(paths, url="", force=True)
 
@@ -284,7 +276,7 @@ def test_status_reports_the_key_claude_code_would_actually_use(tmp_path):
     """Lowercase wins the precedence chain, so status must report it — not
     whichever spelling happens to be written last."""
     paths = Paths.from_home(tmp_path)
-    _write(
+    write_settings(
         paths,
         {"env": {"https_proxy": "http://lower:1", "HTTPS_PROXY": "http://upper:2"}},
     )
@@ -306,7 +298,7 @@ def test_status_never_raises_on_a_corrupt_file(tmp_path):
 @pytest.mark.unit
 def test_status_falls_back_to_the_saved_address_when_off(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": {"HTTPS_PROXY": "", "HTTP_PROXY": ""}})
+    write_settings(paths, {"env": {"HTTPS_PROXY": "", "HTTP_PROXY": ""}})
     set_saved_proxy(paths, _URL)
 
     status = proxy_status(paths)
@@ -322,7 +314,7 @@ def test_a_refused_write_does_not_bank_the_address(tmp_path):
     from codehelper.services.proxy import set_proxy_state
 
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": {"IS_DEMO": "1"}})
+    write_settings(paths, {"env": {"IS_DEMO": "1"}})
 
     with pytest.raises(CodeHelperError):
         set_proxy_state(paths, url=_URL, confirm=_confirm_no)
@@ -338,7 +330,7 @@ def test_a_concurrent_change_does_not_bank_a_stale_address(tmp_path):
     from codehelper.services.proxy import set_proxy_state
 
     paths = Paths.from_home(tmp_path)
-    _write(
+    write_settings(
         paths,
         {"env": {"HTTPS_PROXY": "http://old:8118", "HTTP_PROXY": "http://old:8118"}},
     )
@@ -347,7 +339,7 @@ def test_a_concurrent_change_does_not_bank_a_stale_address(tmp_path):
     # `confirm` is called inside exactly that window, so switching the file
     # here reproduces a concurrent writer landing mid-operation.
     def _confirm_then_meddle(_path, _preview):
-        _write(
+        write_settings(
             paths,
             {
                 "env": {
@@ -399,7 +391,7 @@ def test_turning_off_a_file_with_no_proxy_keys_is_a_no_op(tmp_path):
     """Blanking keys nobody ever set adds entries and burns a backup slot for
     nothing — the same reasoning as `switch native`'s current_env handling."""
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": {"IS_DEMO": "1"}})
+    write_settings(paths, {"env": {"IS_DEMO": "1"}})
 
     assert apply_proxy(paths, url="", force=True) is False
 
@@ -415,7 +407,7 @@ def test_off_refuses_when_the_address_cannot_be_banked(tmp_path):
     from codehelper.services.proxy import set_proxy_state
 
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": {"HTTPS_PROXY": _URL, "HTTP_PROXY": _URL}})
+    write_settings(paths, {"env": {"HTTPS_PROXY": _URL, "HTTP_PROXY": _URL}})
     # Make lock acquisition fail while the state write itself would work.
     lock_path = paths.state_file().with_suffix(paths.state_file().suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -437,7 +429,7 @@ def test_on_still_works_when_the_bank_is_unavailable(tmp_path):
     from codehelper.services.proxy import set_proxy_state
 
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": {"IS_DEMO": "1"}})
+    write_settings(paths, {"env": {"IS_DEMO": "1"}})
     lock_path = paths.state_file().with_suffix(paths.state_file().suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.mkdir(exist_ok=True)
@@ -458,7 +450,7 @@ def test_saved_proxy_round_trips_through_state(tmp_path):
 @pytest.mark.unit
 def test_repeated_off_is_a_no_op_and_consumes_no_backup_slot(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, _enabled_settings())
+    write_settings(paths, _enabled_settings())
 
     assert apply_proxy(paths, url="", force=True) is True
     first_backup = paths.claude_settings_backup(1).read_text(encoding="utf-8")
@@ -470,7 +462,7 @@ def test_repeated_off_is_a_no_op_and_consumes_no_backup_slot(tmp_path):
 @pytest.mark.unit
 def test_dry_run_writes_nothing(tmp_path, capsys):
     paths = Paths.from_home(tmp_path)
-    _write(paths, _enabled_settings())
+    write_settings(paths, _enabled_settings())
     before = paths.claude_settings().read_text(encoding="utf-8")
 
     assert apply_proxy(paths, url="", dry_run=True) is True
@@ -482,7 +474,7 @@ def test_dry_run_writes_nothing(tmp_path, capsys):
 @pytest.mark.unit
 def test_a_refused_confirmation_writes_nothing(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, _enabled_settings())
+    write_settings(paths, _enabled_settings())
     before = paths.claude_settings().read_text(encoding="utf-8")
 
     with pytest.raises(CodeHelperError, match="refusing without confirmation"):
@@ -494,7 +486,7 @@ def test_a_refused_confirmation_writes_nothing(tmp_path):
 @pytest.mark.unit
 def test_an_invalid_url_is_rejected_before_the_file_is_touched(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, _enabled_settings())
+    write_settings(paths, _enabled_settings())
     before = paths.claude_settings().read_text(encoding="utf-8")
 
     with pytest.raises(CodeHelperError):
@@ -518,7 +510,7 @@ def test_a_corrupt_settings_file_is_refused_not_replaced(tmp_path):
 def test_the_written_file_is_0600(tmp_path):
     """A proxy URL may embed basic-auth credentials."""
     paths = Paths.from_home(tmp_path)
-    _write(paths, _enabled_settings())
+    write_settings(paths, _enabled_settings())
 
     apply_proxy(paths, url="", force=True)
 
@@ -529,10 +521,10 @@ def test_the_written_file_is_0600(tmp_path):
 @pytest.mark.unit
 def test_a_concurrent_change_is_refused_rather_than_clobbered(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, _enabled_settings())
+    write_settings(paths, _enabled_settings())
 
     def _confirm_then_meddle(_path, _preview):
-        _write(paths, {"env": {"HTTPS_PROXY": "http://someone-else:9"}})
+        write_settings(paths, {"env": {"HTTPS_PROXY": "http://someone-else:9"}})
         return True
 
     with pytest.raises(CodeHelperError, match="changed since it was read"):
@@ -559,7 +551,7 @@ def test_redact_leaves_a_credential_free_url_alone():
 @pytest.mark.unit
 def test_a_password_never_reaches_the_preview(tmp_path, capsys):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": {"HTTPS_PROXY": "http://bob:hunter2@proxy:8118"}})
+    write_settings(paths, {"env": {"HTTPS_PROXY": "http://bob:hunter2@proxy:8118"}})
 
     apply_proxy(paths, url="", dry_run=True)
 
@@ -579,7 +571,7 @@ def test_proxy_status_honours_preloaded_env_and_state(tmp_path, monkeypatch):
     from codehelper.services.state import load_state
 
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": {"https_proxy": _URL, "NO_PROXY": "localhost,.corp"}})
+    write_settings(paths, {"env": {"https_proxy": _URL, "NO_PROXY": "localhost,.corp"}})
     set_saved_proxy(paths, _URL)
     env = read_env(paths)
     state = load_state(paths)

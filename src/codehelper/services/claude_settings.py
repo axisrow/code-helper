@@ -58,7 +58,11 @@ from codehelper.backends._atomic import (
 from codehelper.errors import CodeHelperError
 from codehelper.services.model import ConfigShape, Provider
 from codehelper.services.paths import Paths
-from codehelper.services.render import anthropic_base_url, uniform_context_window
+from codehelper.services.render import (
+    anthropic_base_url,
+    anthropic_env,
+    uniform_context_window,
+)
 from codehelper.services.spec import TierModels
 
 __all__ = [
@@ -199,18 +203,6 @@ def resolve_switch_patch(
     if tier_models is None:
         raise CodeHelperError(f"a model is required for claude + {provider.name}")
 
-    env: dict[str, str] = {
-        "ANTHROPIC_BASE_URL": anthropic_base_url(provider.base_url),
-        "ANTHROPIC_AUTH_TOKEN": token,
-        # Always emptied — same rationale as render._render_anthropic_env: an
-        # inherited real Anthropic key would otherwise outrank the token.
-        "ANTHROPIC_API_KEY": "",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": tier_models.haiku,
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": tier_models.sonnet,
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": tier_models.opus,
-    }
-    if subagent_model is not None:
-        env["CLAUDE_CODE_SUBAGENT_MODEL"] = subagent_model
     # Same derivation the wrapper renderer uses — a switch and a wrapper for
     # the same model must agree on whether the window is declared at all.
     # An explicit recorded answer wins (issue #83); without one the catalog
@@ -223,8 +215,15 @@ def resolve_switch_patch(
         window = context_window or None  # 0 = explicit no-declaration
     else:
         window = uniform_context_window(models)
-    if window is not None:
-        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
+    env = anthropic_env(
+        base_url=provider.base_url,
+        token=token,
+        haiku=tier_models.haiku,
+        sonnet=tier_models.sonnet,
+        opus=tier_models.opus,
+        subagent=subagent_model,
+        window=window,
+    )
     return SettingsPatch(provider_name=provider.name, env=env)
 
 
@@ -762,14 +761,17 @@ def restore_settings(
     # unparseable (it is NOT validated — a corrupt live file is
     # read_settings/apply_switch's problem, restore's job is only to not
     # WRITE a corrupt one), so its parse is still guarded.
-    preview = diff_preview(current, backup_body, label="settings.json")
     try:
-        secrets = credential_values(json.loads(current) if current else {})
+        current_parsed = json.loads(current) if current else {}
     except json.JSONDecodeError:
-        secrets = set()  # unparseable current text can't be key-scanned
-    secrets |= credential_values(backup_parsed)
-    for value in secrets:
-        preview = preview.replace(value, redact_credential(value))
+        current_parsed = {}  # unparseable current text can't be key-scanned
+    preview = _redacted_preview(
+        current,
+        backup_body,
+        "",
+        original_parsed=current_parsed,
+        patched_parsed=backup_parsed,
+    )
 
     if dry_run:
         print(preview or "(no textual change)")

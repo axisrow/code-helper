@@ -19,6 +19,7 @@ mirroring how :func:`codehelper.services.secrets.resolve_token` injects
 
 from __future__ import annotations
 
+import functools
 import getpass
 import inspect
 import os
@@ -650,6 +651,7 @@ def _viewport(state: _MenuState) -> tuple[int, list]:
     return first, visible
 
 
+@functools.cache
 def _wants_row_state(label: Callable[..., str]) -> bool:
     """Whether ``label`` declares the ``selected``/``ansi`` keyword params.
 
@@ -657,6 +659,12 @@ def _wants_row_state(label: Callable[..., str]) -> bool:
     on mismatch — a ``TypeError`` raised from INSIDE a nullary label's own
     body (a real bug) would otherwise be swallowed and silently retried as
     ``label()``, masking the bug instead of surfacing it.
+
+    Cached: the verdict for a given label never changes, but the menu
+    re-evaluates every visible row's label on EVERY redraw frame (cursor
+    movement included) — rebuilding an ``inspect.signature`` per row per
+    frame is pure waste on the TUI's hottest path. The label population is
+    the screens' finite row set, so the cache cannot grow unboundedly.
     """
     params = inspect.signature(label).parameters
     return "selected" in params and "ansi" in params

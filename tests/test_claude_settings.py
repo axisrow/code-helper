@@ -17,6 +17,11 @@ import stat
 
 import pytest
 
+# The conftest seeding/read-back helpers; read back under `_read` because the
+# SERVICE read_settings (raw, parsed) is the subject under test in this file.
+from conftest import read_settings as _read
+from conftest import write_settings
+
 from codehelper.errors import CodeHelperError
 from codehelper.services.claude_settings import (
     MANAGED_ENV_KEYS,
@@ -66,15 +71,6 @@ _FOREIGN_TOP_LEVEL = {
     "alwaysThinkingEnabled": True,
     "autoMode": {"soft_deny": []},
 }
-
-
-def _write(paths: Paths, data: dict) -> None:
-    paths.claude_settings().parent.mkdir(parents=True, exist_ok=True)
-    paths.claude_settings().write_text(json.dumps(data, indent=2), encoding="utf-8")
-
-
-def _read(paths: Paths) -> dict:
-    return json.loads(paths.claude_settings().read_text(encoding="utf-8"))
 
 
 def _confirm_no(_path, _preview):
@@ -413,7 +409,7 @@ def test_apply_switch_preserves_foreign_env_keys(tmp_path):
     """THE most important test in this file: HTTPS_PROXY/NO_PROXY etc. must
     survive a real switch, or this feature breaks the user's network."""
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV)})
 
     apply_switch(
         paths,
@@ -431,7 +427,7 @@ def test_apply_switch_preserves_foreign_env_keys(tmp_path):
 @pytest.mark.unit
 def test_apply_switch_preserves_top_level_keys(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": {}, **_FOREIGN_TOP_LEVEL})
+    write_settings(paths, {"env": {}, **_FOREIGN_TOP_LEVEL})
 
     apply_switch(
         paths,
@@ -512,7 +508,7 @@ def test_apply_switch_unreadable_file_refused_not_treated_as_missing(tmp_path):
 @pytest.mark.unit
 def test_apply_switch_dry_run_writes_nothing(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV)})
     before = paths.claude_settings().read_bytes()
 
     called = []
@@ -534,7 +530,7 @@ def test_apply_switch_dry_run_writes_nothing(tmp_path):
 @pytest.mark.unit
 def test_apply_switch_dry_run_redacts_the_token(tmp_path, capsys):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": {}})
+    write_settings(paths, {"env": {}})
 
     apply_switch(
         paths,
@@ -562,7 +558,7 @@ def test_apply_switch_dry_run_redacts_the_previous_token_too(tmp_path, capsys):
         tier_models=TierModels.uniform("glm-5.2"),
         token="sk-OLD-litellm-secret",
     )
-    _write(paths, {"env": dict(old_patch.env)})
+    write_settings(paths, {"env": dict(old_patch.env)})
 
     apply_switch(
         paths,
@@ -580,7 +576,7 @@ def test_apply_switch_dry_run_redacts_the_previous_token_too(tmp_path, capsys):
 @pytest.mark.unit
 def test_apply_switch_confirm_refused_leaves_file_untouched(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV)})
     before = paths.claude_settings().read_bytes()
 
     with pytest.raises(CodeHelperError, match="refusing without confirmation"):
@@ -599,7 +595,7 @@ def test_apply_switch_confirm_refused_leaves_file_untouched(tmp_path):
 @pytest.mark.unit
 def test_apply_switch_force_skips_confirm(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": {}})
+    write_settings(paths, {"env": {}})
 
     changed = apply_switch(
         paths,
@@ -621,12 +617,12 @@ def test_apply_switch_refuses_when_file_changed_since_it_was_read(tmp_path):
     # the read and BEFORE the write, so it doubles here as a way to simulate
     # a concurrent editor winning the race.
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV)})
 
     def _concurrent_editor(_path, _preview):
         # Someone else (a second `switch`, or the user by hand) changes the
         # file after apply_switch already read it but before it writes.
-        _write(paths, {"env": {**_FOREIGN_ENV, "IS_DEMO": "0"}})
+        write_settings(paths, {"env": {**_FOREIGN_ENV, "IS_DEMO": "0"}})
         return True
 
     with pytest.raises(CodeHelperError, match="changed since it was read"):
@@ -646,7 +642,7 @@ def test_apply_switch_refuses_when_file_changed_since_it_was_read(tmp_path):
 @pytest.mark.unit
 def test_apply_switch_is_idempotent_and_consumes_no_backup_slot(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV)})
 
     apply_switch(
         paths,
@@ -676,7 +672,7 @@ def test_apply_switch_is_idempotent_and_consumes_no_backup_slot(tmp_path):
 @pytest.mark.unit
 def test_apply_switch_file_mode_is_0600(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": {}})
+    write_settings(paths, {"env": {}})
 
     apply_switch(
         paths,
@@ -726,7 +722,7 @@ def test_apply_switch_native_on_a_pristine_file_is_a_no_op(tmp_path):
     override".
     """
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV)})
 
     changed = apply_switch(paths, provider=NATIVE, force=True)
 
@@ -781,7 +777,7 @@ def test_apply_switch_backup_ring_rotates(tmp_path):
 @pytest.mark.unit
 def test_apply_switch_incompatible_provider_leaves_file_untouched(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV)})
     before = paths.claude_settings().read_bytes()
     bad = Provider(
         name="wrapper-only",
@@ -833,7 +829,7 @@ def test_current_switch_roundtrips_after_a_switch_and_a_reset(tmp_path):
 @pytest.mark.unit
 def test_current_switch_none_for_a_hand_configured_endpoint(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(
+    write_settings(
         paths,
         {"env": {"ANTHROPIC_BASE_URL": "https://not-a-registered-provider.example"}},
     )
@@ -903,7 +899,7 @@ def test_restore_settings_no_backup_raises(tmp_path):
 @pytest.mark.unit
 def test_restore_settings_round_trips_including_foreign_keys(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV), **_FOREIGN_TOP_LEVEL})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV), **_FOREIGN_TOP_LEVEL})
     before = _read(paths)
 
     apply_switch(
@@ -924,7 +920,7 @@ def test_restore_settings_round_trips_including_foreign_keys(tmp_path):
 @pytest.mark.unit
 def test_restore_settings_dry_run_writes_nothing(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV)})
     apply_switch(
         paths,
         provider=ZAI,
@@ -942,7 +938,7 @@ def test_restore_settings_dry_run_writes_nothing(tmp_path):
 @pytest.mark.unit
 def test_restore_settings_confirm_refused_leaves_file_untouched(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV)})
     apply_switch(
         paths,
         provider=ZAI,
@@ -965,7 +961,7 @@ def test_restore_settings_dry_run_redacts_credentials(tmp_path, capsys):
     # the BACKUP ANTHROPIC_AUTH_TOKEN verbatim into --dry-run / confirm
     # output.
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV)})
     apply_switch(
         paths,
         provider=ZAI,
@@ -995,7 +991,7 @@ def test_restore_settings_refuses_when_file_changed_since_it_was_read(tmp_path):
     # or hand-edit landing during the confirm prompt was silently clobbered,
     # the same race apply_switch already guards against.
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV)})
     apply_switch(
         paths,
         provider=ZAI,
@@ -1005,7 +1001,7 @@ def test_restore_settings_refuses_when_file_changed_since_it_was_read(tmp_path):
     )
 
     def _concurrent_editor(_path, _preview):
-        _write(paths, {"env": {**_FOREIGN_ENV, "IS_DEMO": "0"}})
+        write_settings(paths, {"env": {**_FOREIGN_ENV, "IS_DEMO": "0"}})
         return True
 
     with pytest.raises(CodeHelperError, match="changed since it was read"):
@@ -1021,7 +1017,7 @@ def test_restore_settings_refuses_a_malformed_backup(tmp_path):
     # straight into settings.json, leaving Claude Code unable to load its
     # config. Mirror read_settings's own JSON-object validation here.
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV)})
     paths.claude_settings_backup(1).write_text("{not json", encoding="utf-8")
 
     with pytest.raises(CodeHelperError, match="not valid JSON"):
@@ -1033,7 +1029,7 @@ def test_restore_settings_refuses_a_malformed_backup(tmp_path):
 @pytest.mark.unit
 def test_restore_settings_missing_slot_raises(tmp_path):
     paths = Paths.from_home(tmp_path)
-    _write(paths, {"env": dict(_FOREIGN_ENV)})
+    write_settings(paths, {"env": dict(_FOREIGN_ENV)})
     apply_switch(
         paths,
         provider=ZAI,

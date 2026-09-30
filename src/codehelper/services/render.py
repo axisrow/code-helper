@@ -54,6 +54,7 @@ __all__ = [
     "MARKER_PREFIX",
     "MODEL_CONTEXT_WINDOWS",
     "uniform_context_window",
+    "anthropic_env",
 ]
 
 #: Second line of every generated script. Presence of this prefix is how
@@ -61,6 +62,58 @@ __all__ = [
 #: see ``wrappers.py``. Kept as a comment so it rides along if the script is
 #: copied, and so it costs no runtime behaviour.
 MARKER_PREFIX = "# codehelper: managed wrapper"
+
+
+def anthropic_env(
+    *,
+    base_url: str,
+    token: str,
+    haiku: str,
+    sonnet: str,
+    opus: str,
+    subagent: str | None = None,
+    window: int | None = None,
+    effort_env: str | None = None,
+) -> dict[str, str]:
+    """The ``ANTHROPIC_*`` env dict — ONE builder for every writer of the block.
+
+    Three sites hand-wrote the same key set (the ANTHROPIC_ENV wrapper
+    renderer, the claude-like branch of the ``ollama launch`` renderer, and
+    ``claude_settings.resolve_switch_patch``'s live patch); a key added to one
+    and missed by the others was the #80/#81 drift class, undetected by the
+    renderer-only lockstep test. Now a new key is added HERE or nowhere. The
+    writers' real differences are parameters, not divergent dicts:
+
+    - the launch renderer puts its ONE model in every tier slot and the
+      subagent slot; the wrapper/switch callers pass real tiers and the
+      recorded subagent (or none);
+    - ``effort=max`` is the one level the effortLevel settings key rejects, so
+      it rides env — the wrapper renderer passes ``effort_env="max"``, the
+      launch/switch paths leave it ``None``;
+    - ``window`` is derived by each caller per its own rule (the wrapper's
+      :func:`_declared_window` vs switch's explicit-or-catalog) — this
+      builder only formats it.
+
+    Key order is the exports' byte-identity contract (#82): base URL, token,
+    emptied API key, three tiers, subagent, effort, window.
+    """
+    env = {
+        "ANTHROPIC_BASE_URL": anthropic_base_url(base_url),
+        "ANTHROPIC_AUTH_TOKEN": token,
+        # Always emptied — an inherited real Anthropic key would otherwise
+        # outrank the token.
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": haiku,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": sonnet,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": opus,
+    }
+    if subagent is not None:
+        env["CLAUDE_CODE_SUBAGENT_MODEL"] = subagent
+    if effort_env is not None:
+        env["CLAUDE_CODE_EFFORT_LEVEL"] = effort_env
+    if window is not None:
+        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
+    return env
 
 
 def _shell_single_quote(value: str) -> str:
@@ -73,6 +126,19 @@ def _shell_single_quote(value: str) -> str:
     reopens: ``'`` → ``'"'"'``.
     """
     return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def shell_unquote(quoted: str) -> str:
+    """The exact inverse of :func:`_shell_single_quote`'s escaping.
+
+    Reading a value BACK from a generated script is unquoting, not shell
+    parsing — the renderer single-quoted every value, so recovery is one
+    reverse substitution (``'"'"'`` → ``'``). The ONE unquote, next to the
+    ONE quote, so a change to the quoter cannot strand a reader: every
+    consumer of installed-wrapper recovery (``wrappers._env_value``,
+    ``_model_from_body``) goes through here.
+    """
+    return quoted.replace("'\"'\"'", "'")
 
 
 def _marker(spec: WrapperSpec) -> str:
@@ -277,24 +343,20 @@ def _render_anthropic_env(spec: WrapperSpec, token: str) -> str:
             "shape always carries them; build_spec should have materialized "
             "uniform tiers"
         )
-    env = {
-        "ANTHROPIC_BASE_URL": anthropic_base_url(spec.provider.base_url),
-        "ANTHROPIC_AUTH_TOKEN": token,
-        "ANTHROPIC_API_KEY": "",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": tiers.haiku,
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": tiers.sonnet,
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": tiers.opus,
-    }
-    if spec.subagent_model is not None:
-        env["CLAUDE_CODE_SUBAGENT_MODEL"] = spec.subagent_model
-    if spec.effort == "max":
+    env = anthropic_env(
+        base_url=spec.provider.base_url,
+        token=token,
+        haiku=tiers.haiku,
+        sonnet=tiers.sonnet,
+        opus=tiers.opus,
+        subagent=spec.subagent_model,
+        window=_declared_window(spec),
         # The one effort level the effortLevel settings key rejects (docs) —
         # carried as env instead, which rides BOTH the exports and the
         # --settings env block. Costs the documented trade: env outranks a
         # mid-session /effort, so a max wrapper pins harder than the others.
-        env["CLAUDE_CODE_EFFORT_LEVEL"] = "max"
-    if (window := _declared_window(spec)) is not None:
-        env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
+        effort_env="max" if spec.effort == "max" else None,
+    )
     lines = ["#!/bin/bash", _marker(spec), "("]
     lines += [f"export {key}={q(value)}" for key, value in env.items()]
     lines.append(f'{spec.agent.binary} {_settings_flag(env, spec.effort)} "$@"')
@@ -334,17 +396,15 @@ def _render_ollama_launch(spec: WrapperSpec, token: str) -> str:
     # forwarded to the agent, never parsed by `ollama launch` itself.
     launch += " --"
     if ConfigShape.ANTHROPIC_ENV in spec.agent.shapes:
-        env = {
-            "ANTHROPIC_BASE_URL": anthropic_base_url(spec.provider.base_url),
-            "ANTHROPIC_AUTH_TOKEN": token or spec.provider.auth_value,
-            "ANTHROPIC_API_KEY": "",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": spec.model,
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": spec.model,
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": spec.model,
-            "CLAUDE_CODE_SUBAGENT_MODEL": spec.model,
-        }
-        if (window := _declared_window(spec)) is not None:
-            env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
+        env = anthropic_env(
+            base_url=spec.provider.base_url,
+            token=token or spec.provider.auth_value,
+            haiku=spec.model,
+            sonnet=spec.model,
+            opus=spec.model,
+            subagent=spec.model,
+            window=_declared_window(spec),
+        )
         launch += f" {_settings_flag(env, spec.effort)}"
     launch += ' "$@"'
     return f"#!/bin/bash\n{_marker(spec)}\n{launch}\n"

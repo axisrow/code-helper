@@ -73,7 +73,12 @@ from __future__ import annotations
 import contextlib
 import json
 
-from codehelper.backends._atomic import atomic_write, file_lock, read_json_object
+from codehelper.backends._atomic import (
+    atomic_write,
+    best_effort_lock,
+    file_lock,
+    read_json_object,
+)
 from codehelper.errors import CodeHelperError
 from codehelper.services.limits import MAX_CONTEXT_WINDOW, context_window_usable
 from codehelper.services.paths import Paths
@@ -151,6 +156,12 @@ def _locked_update(paths: Paths, *, required: bool = False):
     Raises:
         CodeHelperError: ``required=True`` and the lock could not be taken.
     """
+    if not required:
+        # Same degrade-to-unlocked shape best_effort_lock already owns.
+        with best_effort_lock(paths.state_file()):
+            yield
+        return
+
     # Acquire OUTSIDE the yield. Wrapping the yield in `try/except OSError`
     # would also swallow an OSError raised by the CALLER's body and then
     # yield a second time — a "generator didn't stop after throw()" crash,
@@ -159,15 +170,12 @@ def _locked_update(paths: Paths, *, required: bool = False):
         lock = file_lock(paths.state_file())
         lock.__enter__()
     except OSError as exc:
-        if required:
-            raise CodeHelperError(
-                f"{paths.state_file()} could not be locked ({exc}) — refusing "
-                f"to write the saved proxy address unserialized, because a "
-                f"concurrent write would silently discard it and this is the "
-                f"only copy; fix the permissions on that directory and retry"
-            ) from exc
-        yield
-        return
+        raise CodeHelperError(
+            f"{paths.state_file()} could not be locked ({exc}) — refusing "
+            f"to write the saved proxy address unserialized, because a "
+            f"concurrent write would silently discard it and this is the "
+            f"only copy; fix the permissions on that directory and retry"
+        ) from exc
 
     try:
         yield
@@ -346,7 +354,9 @@ def set_default_wrapper(paths: Paths, agent_name: str, alias: str) -> None:
         _write_state(paths, state)
 
 
-def context_window(paths: Paths, model: str) -> int | None:
+def context_window(
+    paths: Paths, model: str, *, state: dict[str, object] | None = None
+) -> int | None:
     """The recorded context-window answer for ``model``, or ``None``.
 
     ``0`` is a REAL answer ("no declaration" — issue #83), never normalized
@@ -358,8 +368,13 @@ def context_window(paths: Paths, model: str) -> int | None:
     ride an explicit answer straight into a wrapper marker or the live
     settings (review round 2, PR #84) — the marker path range-checks via
     ``build_spec``, but switch never builds one.
+
+    ``state`` is an optional preloaded :func:`load_state` result (issue #110)
+    — ``resolve_context_window`` asks this per tier model; the default
+    ``None`` reads the file.
     """
-    state = load_state(paths)
+    if state is None:
+        state = load_state(paths)
     windows = state.get("context_windows")
     if not isinstance(windows, dict):
         return None
@@ -384,8 +399,6 @@ def set_context_window(paths: Paths, model: str, value: int) -> None:
             the reader accepts, so a record written here can always be read
             back.
     """
-    from codehelper.errors import CodeHelperError
-
     if not context_window_usable(value):
         raise CodeHelperError(
             f"unusable context window {value}: expected 0 (no declaration) "

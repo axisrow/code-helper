@@ -630,20 +630,30 @@ class TuiSession:
         from codehelper.services.paths import Paths
         from codehelper.services.secrets import (
             DEFAULT_PROFILE,
+            load_credentials,
             profile_names,
             valid_active_profile,
         )
+        from codehelper.services.state import load_state
 
+        paths = Paths.default()
         while True:
             self._recover_default(provider_name)
-            names = list(profile_names(Paths.default(), provider_name))
+            # Snapshots AFTER _recover_default (it may seed the cache): ONE
+            # creds read + ONE state read feed the whole pass, instead of the
+            # 3-4 reads the three lookups used to stack on every Back/Esc.
+            creds = load_credentials(paths)
+            state = load_state(paths)
+            names = list(profile_names(paths, provider_name, creds=creds))
             if not names:
                 created = self._new_profile(names, provider_name)
                 return None if created == _BACK else created
 
             # The stored active profile is the pre-selection: put it FIRST
             # with a marker so the cursor (index 0) lands on it.
-            active = valid_active_profile(Paths.default(), provider_name)
+            active = valid_active_profile(
+                paths, provider_name, state=state, creds=creds
+            )
             items: list[tuple[str, str]] = []
             for name in names:
                 label = "default" if name == DEFAULT_PROFILE else name
@@ -1049,8 +1059,18 @@ class TuiSession:
                 return None
         return provider, want_secret_auth, typed_url
 
-    def _choose_add_model(self, provider, profile_name, profile_token, agent_name: str):
-        """Discover and choose a model; ``_BACK`` returns to profile choice."""
+    def _discover_models(self, provider, profile_name, profile_token):
+        """ONE discovery request per provider+credential pick.
+
+        Discovery is always tried first and is the source of truth; the
+        registry's ``known_models`` is only consulted when discovery actually
+        FAILED (not ``result.ok``) — a successful discovery that legitimately
+        returned zero models is a real answer, not a reason to substitute the
+        built-in list and mislabel it "discovery unavailable". Returns
+        ``(models, using_known, result_ok)`` so every caller can label its
+        prompt with the source that fed it (the DECIDED no-mislabeling rule)
+        without re-deriving the fallback a second time.
+        """
         from codehelper.services.models_api import list_models
         from codehelper.services.paths import Paths
         from codehelper.services.secrets import token_for_discovery
@@ -1059,20 +1079,23 @@ class TuiSession:
             Paths.default(), provider, profile_name=profile_name or None
         )
         result = list_models(provider, token=discovery_token)
-        # Discovery is always tried first and is the source of truth; the
-        # registry's `known_models` is only consulted when discovery comes
-        # back with nothing (structurally unavailable, e.g. zai, or a
-        # transient failure) — never used to override a real result. Which
-        # source fed the menu is shown in the prompt so a stale built-in
-        # entry is never mistaken for something the endpoint just confirmed.
-        models = result.models
-        # Fall back to the registry's known_models only when discovery
-        # actually FAILED (not result.ok) — a successful discovery that
-        # legitimately returned zero models is a real answer, not a reason to
-        # substitute the built-in list and mislabel it "discovery unavailable".
-        using_known = not result.ok and provider.known_models
-        if using_known:
-            models = provider.known_models
+        using_known = not result.ok and bool(provider.known_models)
+        models = provider.known_models if using_known else result.models
+        return models, using_known, result.ok
+
+    def _choose_add_model(
+        self, provider, profile_name, profile_token, agent_name: str, *, discovery=None
+    ):
+        """Discover and choose a model; ``_BACK`` returns to profile choice.
+
+        ``discovery`` is an optional precomputed :meth:`_discover_models`
+        result — the add flow re-enters this screen on every Back/Esc, and
+        each re-entry used to re-issue the HTTP request for a list that
+        cannot have changed between keystrokes.
+        """
+        if discovery is None:
+            discovery = self._discover_models(provider, profile_name, profile_token)
+        models, using_known, result_ok = discovery
         items = [(model, model) for model in models]
         items.extend((("__custom__", "Enter model manually"), (_BACK, "Back")))
         # The breadcrumb names the agent already scoped by the row that opened
@@ -1084,7 +1107,7 @@ class TuiSession:
                 f"Select a model for {provider.name} "
                 "(known models — discovery unavailable):"
             )
-        elif not result.ok:
+        elif not result_ok:
             base = f"Model discovery unavailable for {provider.name}; enter a model:"
         else:
             base = f"Select a model for {provider.name}:"
@@ -1170,9 +1193,18 @@ class TuiSession:
             else:
                 profile = ("", None, None, None)
             profile_name, profile_token, _, _ = profile
+            # ONE discovery per profile pick: the model/alias menus below
+            # re-enter on every Back/Esc, and each re-entry used to re-issue
+            # the HTTP request (up to its full timeout on a dead endpoint)
+            # for a list that cannot have changed between keystrokes.
+            discovery = self._discover_models(provider, profile_name, profile_token)
             while True:
                 model = self._choose_add_model(
-                    provider, profile_name, profile_token, agent_name=agent_name
+                    provider,
+                    profile_name,
+                    profile_token,
+                    agent_name=agent_name,
+                    discovery=discovery,
                 )
                 if model == _BACK:
                     break
@@ -2280,15 +2312,7 @@ class TuiSession:
         highlighted backend to its real preset/wrapper alias first; native
         and the trailing add chip have no token to edit.
         """
-        if value in (_ADD_AGENT, _ADD_WRAPPER):
-            # Same guard `d` carries: the action rows name no wrapper, so a
-            # focused-value leak here would look up a wrapper literally
-            # named "+ add wrapper".
-            return None
-        chip = self._focused_chip(value)
-        if chip is None:
-            return None
-        return f"token:{self._chip_name(chip)}"
+        return self._focused_prefixed_action(value, "token")
 
     def _edit_action(self, value: str) -> str | None:
         """Return the edit action for the focused row/chip (issue #100).
@@ -2299,12 +2323,22 @@ class TuiSession:
         rename as a row inside); the Profiles screen keeps its own local `e`
         for profile renames.
         """
+        return self._focused_prefixed_action(value, "edit")
+
+    def _focused_prefixed_action(self, value: str, prefix: str) -> str | None:
+        """``f"{prefix}:{alias}"`` for the focused chip, ``None`` when inert.
+
+        The ONE focused-chip resolution both prefixed verbs share: the action
+        rows name no wrapper (a leak would look up a wrapper literally named
+        ``+ add wrapper``), and native/the add chip own nothing token- or
+        edit-shaped.
+        """
         if value in (_ADD_AGENT, _ADD_WRAPPER):
             return None
         chip = self._focused_chip(value)
         if chip is None:
             return None
-        return f"edit:{self._chip_name(chip)}"
+        return f"{prefix}:{self._chip_name(chip)}"
 
     def _require_installed_managed(self, alias: str, *, message: str) -> bool:
         """The installed+managed guard shared by rename/edit/default-Enter.
@@ -2603,20 +2637,23 @@ class TuiSession:
         draft["tiers"] = None
 
     def _pick_edit_subagent(self, spec, draft) -> None:
-        from codehelper.services.models_api import list_models
-        from codehelper.services.paths import Paths
-        from codehelper.services.secrets import token_for_discovery
-
         provider_obj, profile = self._edit_provider_view(spec, draft)
-        token = token_for_discovery(Paths.default(), provider_obj, profile_name=profile)
-        result = list_models(provider_obj, token=token)
-        models = result.models or (provider_obj.known_models if not result.ok else [])
+        models, using_known, result_ok = self._discover_models(
+            provider_obj, profile, None
+        )
         items: list[tuple[str, str]] = [
             ("__unset__", "( unset — no separate subagent model )")
         ]
         items.extend((m, m) for m in models)
         items.extend([("__custom__", "Enter model manually"), (_BACK, "Back")])
-        choice = self._pick(items, f"Subagent model for {provider_obj.name}:")
+        # Same source-labeling rule as _choose_add_model: a stale built-in
+        # list must never read as something the endpoint just confirmed.
+        hint = (
+            " (known models — discovery unavailable)"
+            if using_known
+            else ("" if result_ok else " (discovery unavailable)")
+        )
+        choice = self._pick(items, f"Subagent model for {provider_obj.name}{hint}:")
         if choice == "__unset__":
             draft["subagent"] = None
         elif choice == "__custom__":
@@ -2723,14 +2760,17 @@ class TuiSession:
         return "codehelper"
 
     def _show_help(self) -> None:
-        from codehelper.cli.menu import press_any_key
-
-        print("a add (agent row: scoped to it) · t token · e edit · d delete")
-        print("+ add agent: new CLI integration · + add wrapper: any agent")
-        print("p profiles · s settings (proxy, stored tokens)")
-        print("←→ + Enter on the + add chip: same as a")
-        print("Up/Down row · Left/Right chip · Enter apply · Esc quit · Ctrl-C quit")
-        press_any_key("Press any key to continue...")
+        self._notify(
+            "\n".join(
+                (
+                    "a add (agent row: scoped to it) · t token · e edit · d delete",
+                    "+ add agent: new CLI integration · + add wrapper: any agent",
+                    "p profiles · s settings (proxy, stored tokens)",
+                    "←→ + Enter on the + add chip: same as a",
+                    "Up/Down row · Left/Right chip · Enter apply · Esc quit · Ctrl-C quit",
+                )
+            )
+        )
 
     def _profile_row_label(self) -> str:
         return f"Profile: {self._tab_label}" if self._tab_label else "Profile"
