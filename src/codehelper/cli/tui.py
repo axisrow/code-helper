@@ -406,7 +406,7 @@ class TuiSession:
         exit_word: str = "back",
         on_tab: Callable[[], None] | None = None,
         on_token: Callable[[str], None] | None = None,
-        on_key: dict[str, Callable[[str], object]] | None = None,
+        on_key: dict[str, Callable[[str], str | None]] | None = None,
         chips: bool = False,
         numbered: bool = True,
     ) -> str:
@@ -1475,7 +1475,7 @@ class TuiSession:
         provider_items = [
             (p.name, f"{p.name} — {p.description}") for p in self._secret_providers()
         ]
-        keys: dict[str, Callable[[str], object]] = {}
+        keys: dict[str, Callable[[str], str | None]] = {}
         for i in range(10):
             keys[f"DIGIT_{i}"] = lambda _value, i=i: self._on_slot(
                 9 if i == 0 else i - 1
@@ -1489,7 +1489,7 @@ class TuiSession:
         if provider == _BACK:
             return
         names = list(profile_names(paths, provider))
-        rename_keys: dict[str, Callable[[str], object]] = {
+        rename_keys: dict[str, Callable[[str], str | None]] = {
             "e": lambda value: None if value == _BACK else f"rename:{value}"
         }
         while True:
@@ -1602,7 +1602,7 @@ class TuiSession:
                 ("toggle-reveal", f"Reveal values: {'on' if reveal else 'off'}"),
                 (_BACK, "Back"),
             ]
-            keys: dict[str, Callable[[str], object]] = {
+            keys: dict[str, Callable[[str], str | None]] = {
                 "s": lambda _value: self._toggle_tokens_reveal()
             }
             choice = self._pick(

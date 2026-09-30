@@ -6,6 +6,7 @@ TTY (mirroring how ``services/secrets.py`` tests inject ``getpass_fn``).
 
 from __future__ import annotations
 
+import io
 import sys
 
 import pytest
@@ -19,6 +20,7 @@ from codehelper.cli.menu import (
     read_line,
     select_from_menu,
 )
+from codehelper.errors import CodeHelperError
 
 
 def _fake_keys(keys):
@@ -931,3 +933,22 @@ def test_fit_cuts_exactly_at_a_span_boundary_keeps_code_intact():
     assert result.count("\033[7m") == line.count("\033[7m")
     # No dangling half-written escape byte sequence.
     assert result.count("\033[") == result.count("m")
+
+
+@pytest.mark.unit
+def test_select_from_menu_refuses_captured_stdout(monkeypatch):
+    # The TUI's silent `_run` capture used to leave this menu rendering into
+    # the buffer while it blocked on real stdin — a blank, frozen screen with
+    # an invisible prompt (Esc there killed the whole TUI). Refuse instead.
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    with pytest.raises(CodeHelperError, match="needs a TTY"):
+        select_from_menu(["a", "b"])
+
+
+@pytest.mark.unit
+def test_select_from_menu_injected_read_key_bypasses_tty_guard(monkeypatch):
+    # Headless callers (the whole test suite) inject read_key — the guard is
+    # about driving the REAL terminal with nowhere to render, not about
+    # stdin/out being redirected per se.
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    assert select_from_menu(["a", "b"], read_key=_fake_keys(["ENTER"])) == "a"
