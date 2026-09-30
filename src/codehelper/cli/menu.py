@@ -27,6 +27,8 @@ import shutil
 import sys
 from collections.abc import Callable, Mapping, Sequence
 
+from codehelper.errors import CodeHelperError
+
 __all__ = [
     "select_from_menu",
     "read_line",
@@ -767,8 +769,8 @@ def _dispatch_key(
     *,
     on_tab: Callable[[], None] | None,
     on_token: Callable[[str], None] | None,
-    on_key: Mapping[str, Callable[[str], object]] | None,
-):
+    on_key: Mapping[str, Callable[[str], str | None]] | None,
+) -> str | None:
     """Act on one translated ``key`` — returns a sentinel or a selected value.
 
     Returns:
@@ -826,7 +828,7 @@ def select_from_menu(
     hint: str | None | Callable[[], str] = None,
     on_tab: Callable[[], None] | None = None,
     on_token: Callable[[str], None] | None = None,
-    on_key: Mapping[str, Callable[[str], object]] | None = None,
+    on_key: Mapping[str, Callable[[str], str | None]] | None = None,
     unnumbered: frozenset[str] = frozenset(),
     numbered: bool = True,
     read_key: Callable[[], str] | None = None,
@@ -920,6 +922,19 @@ def select_from_menu(
     reserved = {"CANCEL", "HARD_CANCEL"}
     if on_key is not None and reserved & set(on_key):
         raise ValueError("on_key cannot override cancellation keys")
+    if read_key is None and print_fn is print and not sys.stdout.isatty():
+        # A menu with nowhere to render: the default `print` would push the
+        # frames into the captured/piped buffer while the default reader
+        # still blocks on the real stdin — the caller sees a blank, frozen
+        # screen with the prompt running invisibly (the TUI's silent `_run`
+        # capture did exactly this on the edit-screen context-window
+        # question). Refuse instead; injecting `print_fn` (headless drivers)
+        # or `read_key` (tests) is the explicit opt-out.
+        raise CodeHelperError(
+            "interactive menu needs a TTY on stdout — it would render "
+            "invisibly and hang; answer non-interactively instead "
+            "(e.g. the edit screen's ctx row or --context-window)"
+        )
     state = _build_menu_state(
         items, hint=hint, unnumbered=unnumbered, numbered=numbered
     )
