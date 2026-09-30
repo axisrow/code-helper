@@ -45,6 +45,20 @@ from codehelper.services.model import RETIRED_PROVIDER_NAMES, provider_storage_n
 from codehelper.services.paths import Paths
 
 
+def _write_credentials(paths: Paths, data: dict[str, dict[str, str]]) -> None:
+    """Persist ``credentials.json`` atomically — the ONE serialization.
+
+    Every writer inside a :func:`_locked_update` block goes through this (the
+    way ``state._write_state`` owns state.json): indent/sort_keys/trailing
+    newline/0600 is one fact, not one fact per writer.
+    """
+    atomic_write(
+        paths.credentials_file(),
+        json.dumps(data, indent=2, sort_keys=True) + "\n",
+        mode=0o600,
+    )
+
+
 def _storage_names(provider_name: str) -> tuple[str, ...]:
     """``provider_name``, plus its retired predecessor name if it has one.
 
@@ -303,32 +317,27 @@ def seed_default_profile(paths: Paths, provider_name: str, token: str) -> bool:
         if profile_names(paths, provider_name):
             return False
 
+        # ONE read: parse once, hand the parsed object forward — the guard
+        # against clobbering a corrupt file and the write below used to read
+        # the same file twice.
+        data: dict[str, dict[str, str]] = {}
         if path.exists():
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
+                loaded = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, ValueError):
+                loaded = None
+            if not isinstance(loaded, dict):
                 print(
                     f"warning: could not recover the {provider_name} token "
-                    f"profile because {path} is not valid JSON",
+                    f"profile because {path} is not a readable JSON object",
                     file=sys.stderr,
                 )
                 return False
-            if not isinstance(data, dict):
-                print(
-                    f"warning: could not recover the {provider_name} token "
-                    f"profile because {path} does not contain a JSON object",
-                    file=sys.stderr,
-                )
-                return False
+            data = loaded
 
         try:
-            data = load_credentials(paths)
             data.setdefault(provider_name, {})[DEFAULT_PROFILE] = token
-            atomic_write(
-                paths.credentials_file(),
-                json.dumps(data, indent=2, sort_keys=True) + "\n",
-                mode=0o600,
-            )
+            _write_credentials(paths, data)
         except OSError as e:
             print(
                 f"warning: could not cache the existing {provider_name} token "
@@ -425,11 +434,7 @@ def save_credential(
     with _locked_update(paths):
         data = load_credentials(paths)
         data.setdefault(provider_name, {})[profile_name] = token
-        atomic_write(
-            paths.credentials_file(),
-            json.dumps(data, indent=2, sort_keys=True) + "\n",
-            mode=0o600,
-        )
+        _write_credentials(paths, data)
 
 
 def rename_profile(
@@ -476,11 +481,7 @@ def rename_profile(
         if source_name != provider_name and not profiles:
             del data[source_name]
         try:
-            atomic_write(
-                paths.credentials_file(),
-                json.dumps(data, indent=2, sort_keys=True) + "\n",
-                mode=0o600,
-            )
+            _write_credentials(paths, data)
         except OSError as e:
             print(
                 f"warning: could not rename the token profile for {provider_name} "
@@ -538,11 +539,7 @@ def _invalidate_locked(paths: Paths, provider_name: str, profile_name: str) -> N
     if not profiles:
         del data[provider_name]
     try:
-        atomic_write(
-            paths.credentials_file(),
-            json.dumps(data, indent=2, sort_keys=True) + "\n",
-            mode=0o600,
-        )
+        _write_credentials(paths, data)
     except OSError as e:
         print(
             f"warning: could not invalidate the stale cached token for "

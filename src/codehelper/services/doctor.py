@@ -38,9 +38,7 @@ from codehelper.services.paths import Paths
 from codehelper.services.proxy import redact_proxy_url
 from codehelper.services.render import openai_env_key
 from codehelper.services.wrappers import (
-    discover_managed,
-    is_managed,
-    preset_names,
+    installed_managed_names,
     spec_from_installed,
 )
 
@@ -553,10 +551,8 @@ def _proxy_rows(paths: Paths, environ: Mapping[str, str]) -> list[CheckRow]:
     its row. An unreconstructable wrapper (corrupt profile) reads as no row —
     its health is the other rows' job; this report only describes proxies.
     """
-    aliases = set(discover_managed(paths))
-    aliases.update(name for name in preset_names() if is_managed(paths, name))
     rows: list[CheckRow] = []
-    for alias in sorted(aliases):
+    for alias in installed_managed_names(paths):
         spec = spec_from_installed(paths, alias)
         if spec is None or spec.shape is not ConfigShape.OPENAI_TOML:
             continue

@@ -51,6 +51,15 @@ def write_settings(paths: Paths, data: dict) -> None:
     paths.claude_settings().write_text(json.dumps(data), encoding="utf-8")
 
 
+def read_settings(paths: Paths) -> dict:
+    """Read back ``~/.claude/settings.json`` as a parsed object.
+
+    The read twin of :func:`write_settings` — behind the former per-file
+    ``_read`` copies (test_claude_settings / test_proxy / test_tui).
+    """
+    return json.loads(paths.claude_settings().read_text(encoding="utf-8"))
+
+
 # --- the select_from_menu test double ----------------------------------------
 
 

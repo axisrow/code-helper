@@ -42,6 +42,7 @@ from codehelper.backends._atomic import (
 from codehelper.errors import CodeHelperError
 from codehelper.services.claude_settings import diff_preview
 from codehelper.services.model import (
+    CODEX_RESERVED_PROVIDER_IDS,
     Agent,
     BaseUrlPolicy,
     ConfigShape,
@@ -96,16 +97,11 @@ class DefaultPatch:
     env_key: str = ""
 
 
-#: Provider IDs Codex CLI itself treats as built-in and refuses to see
-#: overridden in ``[model_providers.<id>]`` — NOT this project's own
-#: reservation (contrast :data:`codehelper.services.naming.RESERVED_ALIASES`,
-#: which reserves *wrapper* names in this tool's own ``~/.local/bin``
-#: namespace). This list is Codex's, sourced from its own error message
-#: ("model_providers contains reserved built-in provider IDs"); kept in sync
-#: by hand since Codex does not expose it as a queryable API. Confirmed
-#: reserved as of Codex CLI v0.150.1: "openai", "ollama" — the latter is why
-#: this project's own ``ollama`` provider was renamed to ``ollama-direct``.
-CODEX_RESERVED_PROVIDER_IDS = frozenset({"openai", "ollama"})
+# ``CODEX_RESERVED_PROVIDER_IDS`` is re-exported from
+# :mod:`codehelper.services.model` via the import above: the model module owns
+# the list and enforces it against the registry at import time, so BOTH
+# writers of a ``[model_providers.<name>]`` table (this module's patch and
+# render.openai_toml_body behind `add`) are covered by one guard.
 
 
 def resolve_default_patch(agent: Agent, provider: Provider, model: str) -> DefaultPatch:

@@ -63,6 +63,7 @@ from codehelper.services.paths import Paths
 __all__ = [
     "load_user_agents",
     "load_user_agents_strict",
+    "validate_alias_not_agent_binary",
     "all_agents",
     "get_agent",
     "add_user_agent",
@@ -97,28 +98,44 @@ def _parse_entry(entry: object) -> _RawUserAgent | None:
     return _RawUserAgent(name=name, binary=binary, description=description)
 
 
-def _entries_to_agents(entries: list[object]) -> tuple[Agent, ...]:
+def _entries_to_agents(
+    entries: list[object], *, strict: bool = False
+) -> tuple[Agent, ...]:
     """Turn a validated ``agents`` list into a tuple of :class:`Agent`.
 
-    Per-entry skip, shared by both readers: a stray bad entry (a non-dict, a
-    missing field, a name/binary that fails the regex) must not cost the user
-    every other agent in the file. Defense in depth: entries are validated
-    again on the way IN by :func:`add_user_agent`, but a hand-edited file
-    bypasses that gate, so a binary/name that fails the same regex checked at
-    write time is skipped here too rather than trusted.
+    ONE per-entry loop for both readers — they differ only in the error
+    channel. Permissive skips a bad entry: a stray non-dict, a missing field,
+    a name/binary that fails the regex must not cost the user every other
+    agent in the file (the same per-entry-skip posture ``load_credentials``
+    takes for a bad credential). Strict raises, so a corrupt registry is
+    surfaced instead of silently destroyed by the next write. Defense in
+    depth either way: entries are validated again on the way IN by
+    :func:`add_user_agent`, but a hand-edited file bypasses that gate, so a
+    binary/name that fails the same regex checked at write time is not
+    trusted here.
     """
     agents: list[Agent] = []
     seen_names: set[str] = set()
     for raw_entry in entries:
         parsed = _parse_entry(raw_entry)
         if parsed is None:
+            if strict:
+                raise CodeHelperError("agents registry contains an invalid entry")
             continue
         try:
             validate_agent_binary(parsed.name)
             validate_agent_binary(parsed.binary)
         except CodeHelperError:
+            if strict:
+                raise CodeHelperError(
+                    f"agents registry contains an invalid entry: {parsed.name!r}"
+                ) from None
             continue
         if parsed.name in seen_names:
+            if strict:
+                raise CodeHelperError(
+                    f"agents registry contains a duplicate entry: {parsed.name!r}"
+                )
             continue
         seen_names.add(parsed.name)
         agents.append(
@@ -186,34 +203,32 @@ def load_user_agents_strict(paths: Paths) -> tuple[Agent, ...]:
     entries = data.get("agents")
     if not isinstance(entries, list):
         raise CodeHelperError("agents registry is corrupt: expected an 'agents' list")
+    return _entries_to_agents(entries, strict=True)
 
-    agents: list[Agent] = []
-    seen_names: set[str] = set()
-    for raw_entry in entries:
-        parsed = _parse_entry(raw_entry)
-        if parsed is None:
-            raise CodeHelperError("agents registry contains an invalid entry")
-        try:
-            validate_agent_binary(parsed.name)
-            validate_agent_binary(parsed.binary)
-        except CodeHelperError:
-            raise CodeHelperError(
-                f"agents registry contains an invalid entry: {parsed.name!r}"
-            ) from None
-        if parsed.name in seen_names:
-            raise CodeHelperError(
-                f"agents registry contains a duplicate entry: {parsed.name!r}"
-            )
-        seen_names.add(parsed.name)
-        agents.append(
-            Agent(
-                name=parsed.name,
-                binary=parsed.binary,
-                shapes=frozenset({ConfigShape.OLLAMA_LAUNCH}),
-                description=parsed.description,
-            )
+
+def validate_alias_not_agent_binary(paths: Paths, alias: str) -> None:
+    """Refuse ``alias`` if it names a user-defined agent's binary.
+
+    The ONE home of the shadow rule. :func:`naming.validate_alias` covers only
+    the static built-in registry, but a user-defined agent's binary is a real
+    agent binary too, and a wrapper named after it would shadow the real
+    executable on PATH exactly as a built-in one would. Every wrapper-creating
+    boundary (``add``, ``rename``) checks through here, so the rule and its
+    message live in one place instead of one copy per call site.
+
+    The STRICT read: a corrupt registry must fail closed, not read as "no user
+    agents" and let a wrapper silently shadow a real binary.
+
+    Raises:
+        CodeHelperError: ``alias`` collides with a user agent's binary, or the
+            registry is corrupt (strict-read propagation).
+    """
+    user_binaries = {a.binary for a in load_user_agents_strict(paths)}
+    if alias in user_binaries:
+        raise CodeHelperError(
+            f"{alias!r} is a reserved name — a wrapper named after a "
+            f"user-defined agent's binary would shadow the real one on PATH"
         )
-    return tuple(agents)
 
 
 def all_agents(paths: Paths) -> tuple[Agent, ...]:

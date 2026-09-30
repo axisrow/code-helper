@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from conftest import ctx_window_zero
+from conftest import ctx_window_zero, read_settings, write_settings
 
 from codehelper.__main__ import main
 from codehelper.services.paths import Paths
@@ -2994,7 +2994,6 @@ def test_enter_on_deepseek_ollama_chip_hot_applies_without_confirmation(monkeypa
     _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
-    import json
 
     settings = json.loads(Paths.default().claude_settings().read_text(encoding="utf-8"))
     assert (
@@ -3021,7 +3020,6 @@ def test_deepseek_ollama_chip_can_switch_back_to_native(monkeypatch):
     settings_path = paths.claude_settings()
     if not settings_path.exists():
         return
-    import json
 
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     # CLAUDE_CODE_EFFORT_LEVEL (effort=max's wrapper-side env carrier) is the
@@ -3045,7 +3043,6 @@ def test_deepseek_ollama_chip_can_switch_to_glm_with_zai_url(monkeypatch):
     _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "RIGHT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
-    import json
 
     settings = json.loads(Paths.default().claude_settings().read_text(encoding="utf-8"))
     assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
@@ -3067,7 +3064,6 @@ def test_chip_apply_is_silent_no_wrote_no_pause(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "wrote" not in output
     assert "Press any key" not in output
-    import json
 
     settings = json.loads(Paths.default().claude_settings().read_text(encoding="utf-8"))
     assert (
@@ -3261,17 +3257,11 @@ def _settings_screen(monkeypatch, picks):
 
 
 def _write_proxy_settings(env: dict) -> None:
-    paths = Paths.default()
-    paths.claude_dir.mkdir(parents=True, exist_ok=True)
-    paths.claude_settings().write_text(
-        json.dumps({"env": env, "hooks": {"PreToolUse": []}}), encoding="utf-8"
-    )
+    write_settings(Paths.default(), {"env": env, "hooks": {"PreToolUse": []}})
 
 
 def _proxy_env() -> dict:
-    return json.loads(Paths.default().claude_settings().read_text(encoding="utf-8"))[
-        "env"
-    ]
+    return read_settings(Paths.default())["env"]
 
 
 def _settings_labels(monkeypatch) -> list:

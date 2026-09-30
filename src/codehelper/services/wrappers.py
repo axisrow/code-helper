@@ -47,7 +47,7 @@ from codehelper.backends._atomic import (
 from codehelper.errors import CodeHelperError
 from codehelper.services.agents import (
     all_agents,
-    load_user_agents_strict,
+    validate_alias_not_agent_binary,
 )
 from codehelper.services.agents import (
     get_agent as get_any_agent,
@@ -69,6 +69,7 @@ from codehelper.services.render import (
     openai_toml_body,
     render_legacy_script,
     render_script,
+    shell_unquote,
 )
 from codehelper.services.spec import (
     PRESETS,
@@ -194,17 +195,22 @@ def removal_discards_only_secret(paths: Paths, name: str) -> bool:
     credential and a cached token survives ``disable`` by contract — False.
     Anything ambiguous (unreadable body, unresolvable provider) counts as
     at-risk, the same fail-closed direction the overwrite guard takes.
+
+    ONE body read feeds the whole chain: marker presence, the secret check,
+    the provider name and the token extraction all key off it (the fields
+    helpers take already-parsed fields, ``token_from_installed`` takes the
+    body) — the per-callee reads this guard used to stack up are gone.
     """
-    if not is_managed(paths, name):
+    body = read_text_or_none(paths.script_for(name))
+    if body is None or _marker_line(body) is None:
         return False
-    if not _ownership_marker_provider_is_secret(paths, name):
+    fields = _marker_fields_from(body)
+    if not _marker_provider_is_secret(fields):
         return False
-    provider_name = _installed_provider_name(paths, name)
-    token = (
-        token_from_installed(paths, name, provider_name)
-        if provider_name is not None
-        else None
-    )
+    provider_name = _provider_name_from_fields(fields)
+    if provider_name is None:
+        return True
+    token = token_from_installed(paths, name, provider_name, body=body)
     if not token:
         return True
     from codehelper.services.secrets import credential_for, profile_names
@@ -212,6 +218,18 @@ def removal_discards_only_secret(paths: Paths, name: str) -> bool:
     return token not in (
         credential_for(paths, provider_name, profile)
         for profile in profile_names(paths, provider_name)
+    )
+
+
+def _marker_line(body: str) -> str | None:
+    """The marker line inside ``body``, or ``None``.
+
+    The ONE owner of the first-two-line scan — :func:`_marker_fields_from`
+    and the single-read guard :func:`removal_discards_only_secret` both key
+    off it, so the scan order cannot drift between them.
+    """
+    return next(
+        (ln for ln in body.split("\n")[:2] if ln.startswith(MARKER_PREFIX)), None
     )
 
 
@@ -226,9 +244,7 @@ def _marker_fields_from(body: str) -> dict[str, str]:
     ``effort=`` #100); the next one happens here or nowhere. Empty dict when ``body`` carries no marker on
     its first two lines.
     """
-    marker = next(
-        (ln for ln in body.split("\n")[:2] if ln.startswith(MARKER_PREFIX)), None
-    )
+    marker = _marker_line(body)
     if marker is None:
         return {}
     return dict(re.findall(r"(\w+)=([^,()\s]+)", marker[len(MARKER_PREFIX) :]))
@@ -257,7 +273,17 @@ def _installed_provider_name(paths: Paths, name: str) -> str | None:
     wrapper whose provider cannot even be named — not this function's
     problem to guess.
     """
-    provider_name = _marker_fields(paths, name).get("provider")
+    return _provider_name_from_fields(_marker_fields(paths, name))
+
+
+def _provider_name_from_fields(fields: dict[str, str]) -> str | None:
+    """The registry-resolved provider named by marker FIELDS, or ``None``.
+
+    Fields-based core of :func:`_installed_provider_name` — the single-read
+    guard reuses it on fields it already parsed instead of re-reading the
+    wrapper body.
+    """
+    provider_name = fields.get("provider")
     if not provider_name:
         return None
     try:
@@ -289,7 +315,15 @@ def _ownership_marker_provider_is_secret(paths: Paths, name: str) -> bool:
     the same fail-open-to-"not secret" default the guard already had, just no
     longer reachable via a corrupt profile specifically.
     """
-    fields = _marker_fields(paths, name)
+    return _marker_provider_is_secret(_marker_fields(paths, name))
+
+
+def _marker_provider_is_secret(fields: dict[str, str]) -> bool:
+    """True iff marker FIELDS name a secret-auth provider.
+
+    Fields-based core of :func:`_ownership_marker_provider_is_secret` — the
+    single-read guard reuses it on fields it already parsed.
+    """
     # The RECORDED auth first (issue #81): a wrapper installed with
     # `--auth secret` on an OVERRIDABLE provider (ollama-direct) is secret
     # even though the registry answers "literal" — the registry check below
@@ -405,7 +439,7 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
     else:
         model = _model_from_body(body)
 
-    if not all((fields.get("agent"), fields.get("provider"), model)):
+    if not model or not fields.get("agent") or not fields.get("provider"):
         return None
 
     # ALL tiers, not just the one that names the wrapper. A single model would
@@ -490,7 +524,12 @@ def spec_from_installed(paths: Paths, name: str) -> WrapperSpec | None:
 
 
 def token_from_installed(
-    paths: Paths, name: str, provider_name: str, *, spec: WrapperSpec | None = None
+    paths: Paths,
+    name: str,
+    provider_name: str,
+    *,
+    spec: WrapperSpec | None = None,
+    body: str | None = None,
 ) -> str | None:
     """Recover a secret token from an installed wrapper we can fully trust.
 
@@ -504,17 +543,18 @@ def token_from_installed(
     provider-mismatched wrapper. The token value is intentionally kept inside
     this service and is never logged.
 
-    ``spec`` is an optional preloaded :func:`spec_from_installed` result
-    (issue #110) — the chip readback already reconstructed the same spec and
-    would otherwise pay a second full re-read of the wrapper file here.
-    ``None`` reconstructs from disk, exactly as before.
+    ``spec``/``body`` are optional preloaded :func:`spec_from_installed` /
+    wrapper-body results (issue #110) — the chip readback already
+    reconstructed them and would otherwise pay a second full re-read of the
+    wrapper file here. ``None`` reads from disk, exactly as before.
     """
     if spec is None:
         spec = spec_from_installed(paths, name)
     if spec is None or spec.auth != "secret" or spec.provider.name != provider_name:
         return None
 
-    body = read_text_or_none(paths.script_for(name))
+    if body is None:
+        body = read_text_or_none(paths.script_for(name))
     if body is None:
         return None
     if spec.shape is ConfigShape.ANTHROPIC_ENV:
@@ -568,7 +608,7 @@ def _env_value(body: str, var: str) -> str | None:
     than shell parsing; the doubled-quote escape is reversed to match.
     """
     found = re.search(rf"^export {var}='(.*)'$", body, re.MULTILINE)
-    return found.group(1).replace("'\"'\"'", "'") if found else None
+    return shell_unquote(found.group(1)) if found else None
 
 
 def _tiers_from_body(body: str) -> TierModels | None:
@@ -580,7 +620,7 @@ def _tiers_from_body(body: str) -> TierModels | None:
     haiku = _env_value(body, "ANTHROPIC_DEFAULT_HAIKU_MODEL")
     sonnet = _env_value(body, "ANTHROPIC_DEFAULT_SONNET_MODEL")
     opus = _env_value(body, "ANTHROPIC_DEFAULT_OPUS_MODEL")
-    if None in (haiku, sonnet, opus):
+    if haiku is None or sonnet is None or opus is None:
         return None
     return TierModels(haiku=haiku, sonnet=sonnet, opus=opus)
 
@@ -605,7 +645,7 @@ def _model_from_body(body: str) -> str | None:
     # The launch shape's --model is followed by the load-bearing ` --`
     # separator; the agent-native shape's by the forwarded-args `"$@"` quote.
     found = re.search(r"--model '(.*?)' (?=--|\")", body)
-    return found.group(1).replace("'\"'\"'", "'") if found else None
+    return shell_unquote(found.group(1)) if found else None
 
 
 def _toml_unescape(value: str) -> str:
@@ -1264,8 +1304,6 @@ def _remove_owned_paths(paths_to_check: list[Path], *, dry_run: bool) -> bool:
     Returns:
         True iff anything was removed (or, in dry-run, would be).
     """
-    import sys
-
     changed = False
     for path in paths_to_check:
         if not path.exists():
@@ -1306,8 +1344,6 @@ def _warn_stale_catalog(paths: Paths, alias: str) -> None:
     removes a marker-owned catalog, because there the removal IS the explicit,
     confirmed action.
     """
-    import sys
-
     catalog_path = paths.codex_catalog_for(alias)
     if catalog_path.exists() and _ownership_catalog_marker(catalog_path):
         print(
@@ -1477,16 +1513,19 @@ def remove_wrapper(
     # leaves a permanent file behind in ``~/.codex``. Unlinking a lock
     # another process currently flocks is safe on POSIX (the holder keeps
     # its fd; the next installer recreates and flocks the fresh file).
+    # One read of the companion proves ownership for the config AND its lock
+    # (the lock holds nothing but the flock — same proof, issue #125 review).
+    companion_ours = _ownership_marker_only(paths.codex_config_for(name))
     siblings = [
         path
         for path, ours in (
             (
                 paths.codex_config_for(name),
-                _ownership_marker_only(paths.codex_config_for(name)),
+                companion_ours,
             ),
             (
                 lock_path_for(paths.codex_config_for(name)),
-                _ownership_marker_only(paths.codex_config_for(name)),
+                companion_ours,
             ),
             (
                 paths.codex_catalog_for(name),
@@ -1618,12 +1657,7 @@ def rename_wrapper(
         return True
 
     validate_alias(new_alias)
-    user_binaries = {a.binary for a in load_user_agents_strict(paths)}
-    if new_alias in user_binaries:
-        raise CodeHelperError(
-            f"{new_alias!r} is a reserved name — a wrapper named after a "
-            f"user-defined agent's binary would shadow the real one on PATH"
-        )
+    validate_alias_not_agent_binary(paths, new_alias)
     spec = spec_from_installed(paths, old_alias)
     if spec is None:
         raise CodeHelperError(
@@ -2547,6 +2581,25 @@ def discover_managed(paths: Paths) -> list[str]:
     return sorted(found)
 
 
+def installed_managed_names(paths: Paths) -> list[str]:
+    """Sorted names of EVERY installed managed wrapper: presets ∪ ad-hoc.
+
+    The ONE enumeration of "what did we install" — ``wrappers_for_provider``'s
+    blast-radius scan and ``doctor._proxy_rows`` both union installed presets
+    with :func:`discover_managed`, and three hand-rolled spellings had already
+    started to drift on whether to pre-check existence. A new installer kind
+    gets found everywhere at once. (The TUI's add screen also needs
+    UNinstalled presets and keeps its own scan on purpose.)
+    """
+    names = {
+        spec.name
+        for spec in WRAPPERS
+        if is_installed(paths, spec.name) and is_managed(paths, spec.name)
+    }
+    names.update(discover_managed(paths))
+    return sorted(names)
+
+
 def wrappers_for_provider(paths: Paths, provider: Provider) -> list[str]:
     """Installed managed wrappers whose resolved provider is ``provider``.
 
@@ -2563,13 +2616,10 @@ def wrappers_for_provider(paths: Paths, provider: Provider) -> list[str]:
     (corrupt marker) is skipped rather than guessed at, consistent with
     :func:`_installed_provider_name`'s contract.
     """
-    names: set[str] = set()
-    for spec in WRAPPERS:
-        if is_installed(paths, spec.name) and is_managed(paths, spec.name):
-            names.add(spec.name)
-    names.update(discover_managed(paths))
     return sorted(
-        name for name in names if _installed_provider_name(paths, name) == provider.name
+        name
+        for name in installed_managed_names(paths)
+        if _installed_provider_name(paths, name) == provider.name
     )
 
 

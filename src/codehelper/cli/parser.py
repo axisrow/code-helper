@@ -67,7 +67,10 @@ from codehelper.services import (
 from codehelper.services import (
     context_window as context_window_service,
 )
-from codehelper.services.agents import all_agents, load_user_agents_strict
+from codehelper.services.agents import (
+    all_agents,
+    validate_alias_not_agent_binary,
+)
 from codehelper.services.agents import get_agent as get_any_agent
 from codehelper.services.claude_settings import current_switch
 from codehelper.services.codex_default import clear_default, restore_default
@@ -116,7 +119,7 @@ from codehelper.services.spec import (
     spec_from_preset,
     suggest_alias,
 )
-from codehelper.services.state import active_selection
+from codehelper.services.state import active_selection, load_state
 from codehelper.services.wrappers import (
     WRAPPERS,
     Unset,
@@ -252,10 +255,11 @@ def _handle_list(args: argparse.Namespace) -> int:
     # call sites share) because this is CLI presentation, not a wrapper row.
 
     paths = Paths.default()
-    selection = active_selection(paths)
+    state = load_state(paths)
+    selection = active_selection(paths, state=state)
     if selection is not None:
         provider, _ = selection
-        profile = valid_active_profile(paths, provider)
+        profile = valid_active_profile(paths, provider, state=state)
         if profile:
             print(f"Active profile: {provider}/{profile}")
 
@@ -816,20 +820,34 @@ def _add_install_and_cache(spec, req, paths, token, resolved, profile_name):
             cached = credential_for(paths, spec.provider.name, cache_profile)
             if cached and cached != token:
                 invalidate_cached_credential(paths, spec.provider.name, cache_profile)
-    if (
-        resolved is not None
-        and req.profile_rename_from
-        and req.profile_rename_to
-        and req.profile_rename_from != req.profile_rename_to
-        and not dry_run
-    ):
-        rename_provider_profile(
+    if resolved is not None:
+        _maybe_rename_profile(
             paths,
             spec.provider.name,
             req.profile_rename_from,
             req.profile_rename_to,
+            dry_run=dry_run,
         )
     return wrote
+
+
+def _maybe_rename_profile(
+    paths: Paths,
+    provider_name: str,
+    rename_from: str | None,
+    rename_to: str | None,
+    *,
+    dry_run: bool,
+) -> None:
+    """Run a requested ``--profile-rename`` unless absent, no-op or dry-run.
+
+    The ONE gate both writers of a renamed profile share (``add`` and
+    ``edit-token``) — the same condition had drifted into two hand-rolled
+    copies that differed in little more than spelling.
+    """
+    if not rename_from or not rename_to or rename_from == rename_to or dry_run:
+        return
+    rename_provider_profile(paths, provider_name, rename_from, rename_to)
 
 
 def _handle_add(args: argparse.Namespace | AddRequest) -> int:
@@ -924,18 +942,12 @@ def _handle_add(args: argparse.Namespace | AddRequest) -> int:
         profile_name = spec.profile_name
 
     # The alias reservation (naming.validate_alias) covers only the static
-    # built-in registry. A user-defined agent's binary is a real agent binary
-    # too, and a wrapper named after it would shadow the real executable on
-    # PATH exactly as a built-in one would — so reject it here, at the single
-    # boundary every wrapper creation flows through, before any token prompt.
-    # The STRICT read: a corrupt registry must fail closed, not read as "no
-    # user agents" and let a wrapper silently shadow a real binary.
-    user_binaries = {a.binary for a in load_user_agents_strict(paths)}
-    if spec.alias in user_binaries:
-        raise CodeHelperError(
-            f"{spec.alias!r} is a reserved name — a wrapper named after a "
-            f"user-defined agent's binary would shadow the real one on PATH"
-        )
+    # built-in registry; a user-defined agent's binary gets the same guard
+    # from agents.validate_alias_not_agent_binary — the ONE home of the
+    # shadow rule, shared with `rename`. Checked here, at the single
+    # boundary every wrapper creation flows through, before any token
+    # prompt; the STRICT read inside fails closed on a corrupt registry.
+    validate_alias_not_agent_binary(paths, spec.alias)
 
     # The explicit window rides the spec from here on (issue #83): resolved
     # AFTER compatibility/alias validation — a bad pairing must never reach
@@ -1198,18 +1210,9 @@ def _handle_edit_token(args: argparse.Namespace | EditTokenRequest) -> int:
         source=SOURCE_PROMPT,
         dry_run=dry_run,
     )
-    if (
-        profile_rename_from
-        and profile_rename_to
-        and profile_rename_from != profile_rename_to
-        and not dry_run
-    ):
-        rename_provider_profile(
-            paths,
-            spec.provider.name,
-            profile_rename_from,
-            profile_rename_to,
-        )
+    _maybe_rename_profile(
+        paths, spec.provider.name, profile_rename_from, profile_rename_to, dry_run=dry_run
+    )
     if not wrote:
         print("no changes")
     return 0
@@ -1665,7 +1668,10 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths, *, state=None, spec=Non
         raise CodeHelperError(
             f"no installed wrapper named {name!r} — see `codehelper list`"
         )
-    if spec.agent.name != "claude":
+    # DATA predicate, not the agent's name: the set of agents that can have
+    # their live session retargeted is "declares ANTHROPIC_ENV" (today only
+    # claude; a future claude-compatible agent needs no edit here).
+    if ConfigShape.ANTHROPIC_ENV not in spec.agent.shapes:
         raise CodeHelperError(
             f"wrapper {name!r} is a {spec.agent.name} wrapper — "
             f"`switch --from-wrapper` can only retarget a claude session"
@@ -1710,7 +1716,7 @@ def _switch_axes_from_preset(req: SwitchRequest, paths, *, state=None, creds=Non
     if not req.from_preset:
         raise CodeHelperError("internal error: missing preset for chipset switch")
     spec = spec_from_preset(get_preset(req.from_preset))
-    if spec.agent.name != "claude":
+    if ConfigShape.ANTHROPIC_ENV not in spec.agent.shapes:
         raise CodeHelperError(f"preset {spec.name!r} is not a Claude backend")
     # Same gate as the flags path: a preset is registry data that survives a
     # disable, so the resolver — not only the chip filter — must refuse.

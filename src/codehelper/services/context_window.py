@@ -35,7 +35,7 @@ from codehelper.errors import CodeHelperError
 from codehelper.services.limits import MAX_CONTEXT_WINDOW
 from codehelper.services.paths import Paths
 from codehelper.services.render import MODEL_CONTEXT_WINDOWS, uniform_context_window
-from codehelper.services.state import context_window, set_context_window
+from codehelper.services.state import context_window, load_state, set_context_window
 
 __all__ = ["CONTEXT_WINDOW_PRESETS", "resolve_context_window"]
 
@@ -106,10 +106,11 @@ def resolve_context_window(
     # may declare a session-wide window (review round 2, PR #84: answering
     # one tier must not over-declare a mix of windows).
     values: set[int] = set()
+    state = load_state(paths)  # ONE read for the whole tier loop (issue #110)
     for model in model_list:
         value = MODEL_CONTEXT_WINDOWS.get(model)
         if value is None:
-            value = context_window(paths, model)
+            value = context_window(paths, model, state=state)
             if value is None:
                 # Unknown AND unrecorded: ask once (or degrade honestly).
                 # The answer records under THIS model — the one the menu
@@ -125,6 +126,10 @@ def resolve_context_window(
                 )
                 if value is None:  # non-interactive: honest no-declaration
                     return None
+                # The ask RECORDED the answer: refresh the snapshot so a later
+                # tier of the SAME pass sees it — "an ANSWERED model is never
+                # re-asked" holds within one run, not just across runs.
+                state = load_state(paths)
         values.add(value)
     if len(values) == 1:
         # Reaching here with a single value implies at least one state
