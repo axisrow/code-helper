@@ -48,6 +48,7 @@ packages = ["src/codehelper"]
 [tool.ruff]
 line-length = 88
 target-version = "py311"
+extend-exclude = ["mutants"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "UP", "B"]

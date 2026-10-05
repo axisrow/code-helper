@@ -2709,7 +2709,14 @@ class TuiSession:
             except CodeHelperError as exc:
                 self._notify(f"error: {exc}")
             return
-        draft["ctx"] = _parse_context_window(choice)
+        # Preset values are menu data, not --context-window text: "0" is the
+        # deliberate no-declaration answer (the ask flow in
+        # services/context_window parses these the same way), while the FLAG
+        # parser deliberately rejects a typed literal 0 as a typo for 'none'
+        # (test_switch_context_window_rejects_garbage). Routing a preset
+        # through _parse_context_window made the menu's own first choice
+        # raise.
+        draft["ctx"] = int(choice)
 
     def _pick_edit_rename(self, spec, draft) -> None:
         if self._on_rename(spec.alias):
