@@ -1211,7 +1211,11 @@ def _handle_edit_token(args: argparse.Namespace | EditTokenRequest) -> int:
         dry_run=dry_run,
     )
     _maybe_rename_profile(
-        paths, spec.provider.name, profile_rename_from, profile_rename_to, dry_run=dry_run
+        paths,
+        spec.provider.name,
+        profile_rename_from,
+        profile_rename_to,
+        dry_run=dry_run,
     )
     if not wrote:
         print("no changes")

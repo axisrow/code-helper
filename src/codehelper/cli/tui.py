@@ -2536,9 +2536,10 @@ class TuiSession:
     def _apply_edit(self, alias: str, draft) -> bool:
         """Dispatch the drafted edit; True when the screen should close.
 
-        ``silent=self._chip_silent()`` — the ``_run`` rule for chip-grade
-        applies: a dry run must surface its preview, a real write is already
-        reflected by the redraw. The applied-hint is gated on the POST-edit
+        Runs live (see the call below): the edit handler may prompt — the
+        ctx re-resolution on a changed model set, a fresh token on a profile
+        change — and a prompt must be visible before its blocking read. The
+        applied-hint is gated on the POST-edit
         readback, not on ``wrote``: an effort-only codex edit stays applied
         and the hint must not claim otherwise.
         """
@@ -2564,7 +2565,12 @@ class TuiSession:
             else draft["base_url"],
             **self._session_flags(),
         )
-        wrote = self._run(_handle_edit_wrapper, req, silent=self._chip_silent())
+        # live, not silent: an edit that changes the model set re-enters the
+        # ctx resolver (wrappers.edit_wrapper), and an unknown-and-unrecorded
+        # model opens its menu — under silent capture that menu sees a non-TTY
+        # stdout and refuses (the #132 guard). Same reasoning as add's
+        # live=True: any handler that may prompt must run live.
+        wrote = self._run(_handle_edit_wrapper, req, live=True)
         if not wrote:
             return False
         now_applied = self._edit_was_applied(alias)
@@ -2703,7 +2709,14 @@ class TuiSession:
             except CodeHelperError as exc:
                 self._notify(f"error: {exc}")
             return
-        draft["ctx"] = _parse_context_window(choice)
+        # Preset values are menu data, not --context-window text: "0" is the
+        # deliberate no-declaration answer (the ask flow in
+        # services/context_window parses these the same way), while the FLAG
+        # parser deliberately rejects a typed literal 0 as a typo for 'none'
+        # (test_switch_context_window_rejects_garbage). Routing a preset
+        # through _parse_context_window made the menu's own first choice
+        # raise.
+        draft["ctx"] = int(choice)
 
     def _pick_edit_rename(self, spec, draft) -> None:
         if self._on_rename(spec.alias):
