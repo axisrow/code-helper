@@ -2994,7 +2994,6 @@ def test_enter_on_deepseek_ollama_chip_hot_applies_without_confirmation(monkeypa
     _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
-
     settings = json.loads(Paths.default().claude_settings().read_text(encoding="utf-8"))
     assert (
         settings["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"]
@@ -3042,7 +3041,6 @@ def test_deepseek_ollama_chip_can_switch_to_glm_with_zai_url(monkeypatch):
     monkeypatch.setenv("ZAI_API_KEY", "sk-test")
     _real_menu_keys(monkeypatch, ["RIGHT", "ENTER", "RIGHT", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
-
 
     settings = json.loads(Paths.default().claude_settings().read_text(encoding="utf-8"))
     assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
