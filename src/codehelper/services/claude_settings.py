@@ -578,7 +578,17 @@ def live_axes_for_spec(spec) -> tuple[Provider, TierModels, str | None]:
 
 
 def matches_switch_spec(active_env: dict[str, str] | None, spec) -> bool:
-    """True iff a managed snapshot exactly represents ``spec``'s target."""
+    """True iff a managed snapshot represents ``spec``'s target.
+
+    ``active_env`` is an ``active_switch_env`` result — ALREADY filtered to
+    ``MANAGED_ENV_KEYS``; a raw ``read_env`` dict carries foreign keys
+    (proxy, Claude Code's own) that this predicate must not be fed. The
+    token axis is substituted FROM the snapshot itself (#80/#81 token
+    honesty): ``ANTHROPIC_AUTH_TOKEN`` structurally cannot falsify the
+    match here — the live-token pin lives at the chip's apply side
+    (``tui._chip_is_applied_switch``), which resolves the chip's own token
+    and compares it to the live one.
+    """
     if active_env is None:
         return False
     try:
