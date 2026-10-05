@@ -602,13 +602,7 @@ def matches_switch_spec(active_env: dict[str, str] | None, spec) -> bool:
         )
     except CodeHelperError:
         return False
-    # Managed-subset comparison, NOT whole-dict equality (issue #137):
-    # settings.json is two-owner — proxy writes its own env keys and Claude
-    # Code adds its own — so a whole-dict comparison made the chip ✓
-    # unreachable in any proxy-bearing env, however exactly the managed
-    # axes matched. An absent key on either side means "cleared" (the patch
-    # semantics: keys missing from patch.env are removed).
-    return all(active_env.get(key) == patch.env.get(key) for key in MANAGED_ENV_KEYS)
+    return active_env == patch.env
 
 
 def apply_switch(
