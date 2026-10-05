@@ -1704,7 +1704,7 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths, *, state=None, spec=Non
         token,
         subagent_model,
         spec.context_window,
-        (spec.effort),
+        spec.effort,
     )
 
 
