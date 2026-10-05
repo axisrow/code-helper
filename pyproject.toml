@@ -67,3 +67,8 @@ markers = [
 addopts = [
     "--strict-markers",
 ]
+
+[tool.mutmut]
+source_paths = ["src"]
+only_mutate = ["src/codehelper/cli/tui.py"]
+pytest_add_cli_args_test_selection = ["tests"]
