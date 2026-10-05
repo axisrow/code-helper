@@ -138,6 +138,7 @@ def resolve_switch_patch(
     token: str,
     subagent_model: str | None = None,
     context_window: int | None = None,
+    effort: str | None = None,
     current_env: dict[str, str] | None = None,
 ) -> SettingsPatch:
     """Resolve the patch from the axes. Pure, no IO.
@@ -223,6 +224,13 @@ def resolve_switch_patch(
         opus=tier_models.opus,
         subagent=subagent_model,
         window=window,
+        # Issue #135 — effort rides the live env the way ctx rides the
+        # declaration: an explicit level (or "" = the env_reset blank, which
+        # a running session's watcher resets) is SET; None is "not
+        # specified" — the key is absent from the patch, and the patch
+        # semantics then REMOVE a stale key (a plain switch must not
+        # silently keep the previous level).
+        effort_env=effort,
     )
     return SettingsPatch(provider_name=provider.name, env=env)
 
@@ -585,6 +593,12 @@ def matches_switch_spec(active_env: dict[str, str] | None, spec) -> bool:
             # the catalog here would leave every ctx-carrying chip's own ✓
             # unset (or a wrong one set).
             context_window=getattr(spec, "context_window", None),
+            # Same honesty for effort (issue #135): an effort-carrying
+            # wrapper and its effort-less twin (same provider, same models,
+            # same token) are two different live targets once switch writes
+            # CLAUDE_CODE_EFFORT_LEVEL — the expected patch must know which
+            # one this chip is.
+            effort=getattr(spec, "effort", None),
         )
     except CodeHelperError:
         return False
@@ -599,6 +613,7 @@ def apply_switch(
     token: str = "",
     subagent_model: str | None = None,
     context_window: int | None = None,
+    effort: str | None = None,
     dry_run: bool = False,
     force: bool = False,
     confirm=None,
@@ -643,6 +658,7 @@ def apply_switch(
         token=token,
         subagent_model=subagent_model,
         context_window=context_window,
+        effort=effort,
         current_env=original_env if isinstance(original_env, dict) else {},
     )
 

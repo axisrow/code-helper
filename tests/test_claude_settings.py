@@ -1175,3 +1175,25 @@ def test_preloaded_env_answers_the_readers_without_a_file(tmp_path, monkeypatch)
     # exactly what both readers report for it — not a re-read.
     assert current_switch(paths, env={}) is None
     assert active_switch_env(paths, env={}) is None
+
+
+@pytest.mark.unit
+def test_matches_switch_spec_survives_a_spec_without_effort_field():
+    """The two-arg getattr default matters for duck-typed specs (issue #135):
+    a snapshot matcher must ANSWER, not raise AttributeError, when the spec
+    carries no effort attribute at all."""
+    from types import SimpleNamespace
+
+    from codehelper.services.model import ConfigShape, get_provider
+
+    spec = SimpleNamespace(
+        name="stub",
+        provider=get_provider("zai"),
+        model="glm-5.3",
+        shape=ConfigShape.ANTHROPIC_ENV,
+        tier_models=None,
+        subagent_model=None,
+        context_window=None,
+        # NB: no `effort` attribute — the getattr default must hold.
+    )
+    assert matches_switch_spec({"ANTHROPIC_BASE_URL": "x"}, spec) is False

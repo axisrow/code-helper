@@ -707,3 +707,87 @@ def test_switch_split_tier_question_names_and_records_the_unknown_model(
     assert context_window(paths, "mystery-haiku") == 2_000_000
     assert context_window(paths, "glm-5.3") is None  # catalog tier: untouched
     assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in _settings(tmp_path)["env"]
+
+
+# --------------------------------------------------------------------------- #
+# effort rides the live env (issue #135) — the ctx (#83) precedent
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+def test_switch_effort_flag_writes_the_env_key(tmp_path, monkeypatch):
+    """`--effort max` lands in settings.json's env — a NEW plain `claude`
+    session reads it from there instead of the persisted modelSettings
+    effortLevel, which is exactly what a wrapper's own payload carries."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
+    assert (
+        main(["switch", "zai", "--model", "glm-5.2", "--effort", "max", "--force"]) == 0
+    )
+    assert _settings(tmp_path)["env"]["CLAUDE_CODE_EFFORT_LEVEL"] == "max"
+
+
+@pytest.mark.integration
+def test_switch_effort_omitted_strips_a_stale_key(tmp_path, monkeypatch):
+    """No --effort flag = the patch carries no effort: an existing key is
+    removed — honest "you did not specify one", and a plain follow-up switch
+    must not silently keep the previous level."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
+    assert (
+        main(["switch", "zai", "--model", "glm-5.2", "--effort", "max", "--force"]) == 0
+    )
+    assert main(["switch", "zai", "--model", "glm-5.3", "--force"]) == 0
+    assert "CLAUDE_CODE_EFFORT_LEVEL" not in _settings(tmp_path)["env"]
+
+
+@pytest.mark.integration
+def test_switch_effort_none_blanks_so_the_live_session_resets(tmp_path, monkeypatch):
+    """`--effort none` is the explicit reset: the key is written BLANK (the
+    env_reset idiom — a running claude's watcher resets it), not removed."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
+    assert (
+        main(["switch", "zai", "--model", "glm-5.2", "--effort", "max", "--force"]) == 0
+    )
+    assert (
+        main(["switch", "zai", "--model", "glm-5.3", "--effort", "none", "--force"])
+        == 0
+    )
+    assert _settings(tmp_path)["env"]["CLAUDE_CODE_EFFORT_LEVEL"] == ""
+
+
+@pytest.mark.integration
+def test_switch_from_wrapper_carries_the_recorded_effort(tmp_path, monkeypatch):
+    """A wrapper marker records effort=max — the --from-wrapper fast path
+    lifts it like it lifts ctx (#83): the live env ends up with the SAME
+    backend the wrapper's own script would reach, effort included."""
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    paths = Paths.from_home(tmp_path)
+    install_wrapper(
+        paths,
+        build_spec(
+            agent="claude",
+            provider="zai",
+            model="glm-5.3",
+            alias="glm-eff",
+            effort="max",
+        ),
+        token="sk-wrap",
+    )
+    save_credential(paths, "zai", "default", "sk-wrap")
+    assert main(["switch", "--from-wrapper", "glm-eff", "--force"]) == 0
+    assert _settings(tmp_path)["env"]["CLAUDE_CODE_EFFORT_LEVEL"] == "max"
+
+
+@pytest.mark.integration
+def test_switch_native_blanks_a_live_effort(tmp_path, monkeypatch):
+    monkeypatch.setenv("ZAI_API_KEY", "sk-env")
+    assert (
+        main(["switch", "zai", "--model", "glm-5.2", "--effort", "max", "--force"]) == 0
+    )
+    assert main(["switch", "native", "--force"]) == 0
+    assert _settings(tmp_path)["env"]["CLAUDE_CODE_EFFORT_LEVEL"] == ""
+
+
+@pytest.mark.integration
+def test_switch_rejects_an_unknown_effort_level(tmp_path):
+    with pytest.raises(SystemExit):
+        main(["switch", "zai", "--model", "glm-5.2", "--effort", "ultra", "--force"])
