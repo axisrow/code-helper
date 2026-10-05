@@ -269,7 +269,9 @@ def test_token_never_appears_in_result_or_error():
     """Same invariant as elsewhere in the project: secrets are not echoed."""
     fetch = _fetch_raising(urllib.error.URLError("boom"))
     result = list_models(_OPENAI, fetch=fetch, token="s3cret")
-    assert "s3cret" not in (result.error or "")
+    assert not result.ok
+    assert result.error is not None
+    assert "s3cret" not in result.error
     assert "s3cret" not in result.source
 
 
@@ -428,5 +430,7 @@ def test_401_never_leaks_the_token():
     result = list_models(
         _OPENAI, fetch=_fetch_raising(_http_error(401)), token="s3cret"
     )
-    assert "s3cret" not in (result.error or "")
+    assert not result.ok
+    assert result.error is not None
+    assert "s3cret" not in result.error
     assert "s3cret" not in result.source
