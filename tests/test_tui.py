@@ -2198,12 +2198,12 @@ def test_edit_effort_pick_offers_the_shape_own_levels(monkeypatch):
 
 
 @pytest.mark.integration
-def test_claude_chip_stays_applied_after_an_effort_only_edit():
-    """The claude twin of the codex #83 pin: the chip compares the LIVE ENV
-    dict, and effortLevel is a top-level --settings key, not env — so an
-    effort-only edit leaves the env untouched and the ✓ must stay. Two
-    same-axes wrappers differing ONLY in effort are indistinguishable as
-    chips BY DESIGN (the applied-hint stays silent)."""
+def test_claude_chip_reads_the_recorded_effort_after_an_effort_only_edit():
+    """SUPERSEDED by issue #135 (was: "an effort-only edit keeps the ✓").
+    Effort now rides the live env the chip compares (CLAUDE_CODE_EFFORT_LEVEL
+    via switch/--from-wrapper), so the ✓ is EXACT about it: editing the
+    wrapper's effort away from the live level honestly drops the ✓ — the
+    applied-hint must fire and Enter re-applies the new level."""
     from codehelper.services.spec import build_spec
     from codehelper.services.wrappers import edit_wrapper, install_wrapper
 
@@ -2226,17 +2226,17 @@ def test_claude_chip_stays_applied_after_an_effort_only_edit():
 
     session = _claude_session()
     assert (
-        session._chip_is_applied("claude", _chip_named(session, "claude-eff")) is True
+        session._chip_is_applied("claude", _chip_named(session, "claude-eff")) is False
     )
 
 
 @pytest.mark.integration
 def test_max_wrapper_chip_stays_applied():
-    """max is the ONE effort level the chip compare DOES see (env-carried) —
-    and it still reads ✓: neither side of the comparison ever holds the key,
-    because a wrapper carries it in process env/--settings only and no
-    switch ever writes it into settings.json (the /code-review#130 check:
-    the renderer's env dict is NOT what the chip compares against)."""
+    """A max-effort wrapper applied live reads ✓: since issue #135 switch
+    writes CLAUDE_CODE_EFFORT_LEVEL, the chip's expected patch threads the
+    same recorded level, and both sides of the comparison agree — the
+    /code-review#130 caveat (the renderer's env dict is NOT what the chip
+    compares against) still holds: this is the switch patch, not render."""
     from codehelper.services.spec import build_spec
     from codehelper.services.wrappers import install_wrapper
 
@@ -3689,7 +3689,8 @@ def _install_zai_pair(alias_a: str, token_a: str, alias_b: str, token_b: str):
 def _apply_live(spec, token: str) -> None:
     """Make ``spec`` the genuinely live backend, the way Enter on its chip
     does (``switch --from-wrapper`` = live_axes_for_spec + the file token +
-    the spec's recorded context window, issue #83)."""
+    the spec's recorded context window, issue #83, and its recorded effort,
+    issue #135)."""
     from codehelper.services.claude_settings import apply_switch, live_axes_for_spec
 
     provider, tiers, subagent = live_axes_for_spec(spec)
@@ -3700,6 +3701,7 @@ def _apply_live(spec, token: str) -> None:
         token=token,
         subagent_model=subagent,
         context_window=getattr(spec, "context_window", None),
+        effort=getattr(spec, "effort", None),
         force=True,
     )
 
@@ -4173,3 +4175,51 @@ def test_main_screen_redraws_and_exits_cleanly_with_the_preloads(tmp_path):
     assert "✓ glm" in text
     # In-place redraws across the whole session, not a single frame.
     assert text.count("Esc quit") >= 5
+
+
+@pytest.mark.integration
+def test_effort_carrying_chip_is_distinguished_from_its_twin(monkeypatch):
+    """The chip predicate compares the ENV dict — once switch can write
+    CLAUDE_CODE_EFFORT_LEVEL (issue #135), the expected patch must thread
+    the spec's effort, or an effort-carrying wrapper and its effort-less
+    twin (same provider, same models) become indistinguishable and BOTH
+    read ✓ while only one is live."""
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    _first, second = _install_zai_pair(
+        "glm-acc1", "token-aaaa", "glm-acc2", "token-bbbb"
+    )
+    from codehelper.services.paths import Paths
+    from codehelper.services.spec import build_spec
+    from codehelper.services.wrappers import install_wrapper, spec_from_installed
+
+    install_wrapper(
+        Paths.default(),
+        build_spec(
+            agent="claude",
+            provider="zai",
+            model="glm-5.3",
+            alias="glm-effort",
+            effort="max",
+        ),
+        # SAME credential as glm-acc2: token alone must not distinguish
+        # them — only the effort axis may.
+        token="token-bbbb",
+    )
+    effort_spec = spec_from_installed(Paths.default(), "glm-effort")
+    assert effort_spec is not None
+
+    # Live = the effort-less twin: only IT reads applied.
+    _apply_live(second, "token-bbbb")
+    session = _claude_session()
+    assert session._chip_is_applied("claude", _chip_named(session, "glm-acc2")) is True
+    assert (
+        session._chip_is_applied("claude", _chip_named(session, "glm-effort")) is False
+    )
+
+    # Live = the effort carrier: only IT reads applied.
+    _apply_live(effort_spec, "token-bbbb")
+    session = _claude_session()
+    assert (
+        session._chip_is_applied("claude", _chip_named(session, "glm-effort")) is True
+    )
+    assert session._chip_is_applied("claude", _chip_named(session, "glm-acc2")) is False

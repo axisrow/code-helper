@@ -475,6 +475,10 @@ class SwitchRequest:
     # data, not a pathname: selecting it must work even when no wrapper has
     # been installed (or an unrelated executable owns that alias on PATH).
     from_preset: str | None = None
+    # Issue #135 — the effort axis rides the live env like ctx rides the
+    # declaration: a level string sets CLAUDE_CODE_EFFORT_LEVEL, "none" is
+    # the explicit blank, None is "not specified" (the key is stripped).
+    effort: str | None = None
     # Explicit context window (issue #83): an int, or 0 for "no declaration".
     # Only meaningful on the explicit-axes path; --from-wrapper/--from-preset
     # carry their own recorded answer, and mixing them is rejected.
@@ -512,4 +516,5 @@ class SwitchRequest:
             debug=bool(_g(args, "debug", False)),
             from_preset=None,
             context_window=_g(args, "context_window"),
+            effort=_g(args, "effort"),
         )

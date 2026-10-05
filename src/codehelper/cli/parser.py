@@ -1637,16 +1637,18 @@ def _switch_resolve_token(
 
 
 def _switch_axes_from_wrapper(req: SwitchRequest, paths, *, state=None, spec=None):
-    """Resolve ``(provider, tier_models, token, subagent_model, context_window)``
-    from an already-installed wrapper — the ``--from-wrapper`` fast path.
+    """Resolve ``(provider, tier_models, token, subagent_model, context_window,
+    effort)`` from an already-installed wrapper — the ``--from-wrapper`` fast
+    path.
 
     Guaranteed to reach the SAME backend that wrapper's own script would:
     ``tier_models``/``base_url`` are recovered from the rendered body
     (``wrappers.spec_from_installed``) and the token from the same file
     (``wrappers.token_from_installed``) — zero prompts, zero re-derivation.
-    The recorded ``ctx`` (issue #83) rides the reconstructed spec the same
-    way — a wrapper's chip and its ``--from-wrapper`` switch can never
-    disagree about the declared window.
+    The recorded ``ctx`` (issue #83) and the recorded ``effort`` (issue
+    #135) ride the reconstructed spec the same way — a wrapper's chip and
+    its ``--from-wrapper`` switch can never disagree about the declared
+    window or the effort level.
 
     An ``ollama-launch`` claude wrapper is converted to Ollama's
     Anthropic-compatible live-settings target, just like its preset chip.
@@ -1696,7 +1698,14 @@ def _switch_axes_from_wrapper(req: SwitchRequest, paths, *, state=None, spec=Non
             )
     elif spec.auth == "literal":
         token = spec.auth_value
-    return provider, tier_models, token, subagent_model, spec.context_window
+    return (
+        provider,
+        tier_models,
+        token,
+        subagent_model,
+        spec.context_window,
+        spec.effort,
+    )
 
 
 def _switch_axes_from_preset(req: SwitchRequest, paths, *, state=None, creds=None):
@@ -1732,17 +1741,23 @@ def _switch_axes_from_preset(req: SwitchRequest, paths, *, state=None, creds=Non
         _switch_resolve_token(provider, req, paths, non_interactive=True, creds=creds),
         subagent_model,
         spec.context_window,  # None for every preset — catalog-derived
+        spec.effort,  # None for every preset — registry data carries none
     )
 
 
 def _switch_axes_from_flags(
     req: SwitchRequest, paths, context_window: int | None = None
 ):
-    """Resolve ``(provider, tier_models, token, subagent_model, context_window)``
-    from the explicit ``--provider``/``--model``/``--haiku``/... flags.
+    """Resolve ``(provider, tier_models, token, subagent_model, context_window,
+    effort)`` from the explicit ``--provider``/``--model``/``--haiku``/...
+    flags.
 
     ``context_window`` arrives ALREADY PARSED by ``_handle_switch`` (a
     validated ``int | None``) — this resolver never sees the raw flag text.
+    The ``--effort`` flag is translated here: a level rides verbatim,
+    ``"none"`` is the explicit blank (""), and no flag at all is ``None`` —
+    "not specified", which strips a stale key instead of keeping it
+    (issue #135).
     """
     from codehelper.services.spec import TierModels
 
@@ -1757,7 +1772,7 @@ def _switch_axes_from_flags(
     provider = with_auth(with_base_url(provider, req.base_url), req.auth == "secret")
 
     if provider.env_reset:
-        return provider, None, "", None, None
+        return provider, None, "", None, None, None
 
     if req.haiku or req.sonnet or req.opus:
         if not (req.haiku and req.sonnet and req.opus):
@@ -1791,7 +1806,10 @@ def _switch_axes_from_flags(
         )
 
     token = _switch_resolve_token(provider, req, paths)
-    return provider, tier_models, token, req.subagent_model, context_window
+    effort = (
+        None if req.effort is None else ("" if req.effort == "none" else req.effort)
+    )
+    return provider, tier_models, token, req.subagent_model, context_window, effort
 
 
 def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
@@ -1875,20 +1893,28 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         return 0
 
     if req.from_preset:
-        provider, tier_models, token, subagent_model, preset_window = (
+        provider, tier_models, token, subagent_model, preset_window, preset_effort = (
             _switch_axes_from_preset(req, paths)
         )
         context_window = preset_window
+        effort = preset_effort
     elif req.from_wrapper:
-        provider, tier_models, token, subagent_model, wrapper_window = (
-            _switch_axes_from_wrapper(req, paths)
-        )
+        (
+            provider,
+            tier_models,
+            token,
+            subagent_model,
+            wrapper_window,
+            wrapper_effort,
+        ) = _switch_axes_from_wrapper(req, paths)
         context_window = wrapper_window
+        effort = wrapper_effort
     else:
-        provider, tier_models, token, subagent_model, flag_window = (
+        provider, tier_models, token, subagent_model, flag_window, flag_effort = (
             _switch_axes_from_flags(req, paths, context_window)
         )
         context_window = flag_window
+        effort = flag_effort
 
     wrote = claude_settings.apply_switch(
         paths,
@@ -1897,6 +1923,7 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         token=token,
         subagent_model=subagent_model,
         context_window=context_window,
+        effort=effort,
         dry_run=req.dry_run,
         # A provider switch is an explicitly requested hot-apply operation.
         # A chip press (the TUI) opts in via force=True and skips the prompt;
@@ -2451,6 +2478,15 @@ def build_parser() -> argparse.ArgumentParser:
         "1000000), or 'none' for no declaration; omit to derive from the "
         "catalog, or to be asked once for an unknown model; explicit-axes "
         "form only (--from-wrapper/--from-preset carry their own)",
+    )
+    p_switch.add_argument(
+        "--effort",
+        default=None,
+        choices=["low", "medium", "high", "xhigh", "max", "none"],
+        help="reasoning effort to write as CLAUDE_CODE_EFFORT_LEVEL into the "
+        "live env (issue #135) — 'max' only rides this env spelling, "
+        "'none' blanks it; omit to strip a stale key. --from-wrapper "
+        "carries the wrapper's own recorded effort instead",
     )
     p_switch.add_argument(
         "--base-url",

@@ -71,5 +71,5 @@ addopts = [
 
 [tool.mutmut]
 source_paths = ["src"]
-only_mutate = ["src/codehelper/cli/tui.py"]
+only_mutate = ["src/codehelper/services/claude_settings.py"]
 pytest_add_cli_args_test_selection = ["tests"]
