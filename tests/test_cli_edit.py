@@ -8,7 +8,7 @@ real dispatch, HOME isolated by the autouse fixture.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import argparse
 
 import pytest
 
@@ -308,7 +308,7 @@ def test_edit_refuses_an_explicitly_disabled_provider(tmp_path, monkeypatch):
 def test_edit_request_from_namespace_sentinel_contract():
     """The bridge maps an ABSENT flag to UNSET (keep) and the ``none``
     spelling to None (clear) — the two must never collapse."""
-    req = EditWrapperRequest.from_namespace(SimpleNamespace(name="glm"))
+    req = EditWrapperRequest.from_namespace(argparse.Namespace(name="glm"))
     assert isinstance(req.model, type(UNSET))
     assert isinstance(req.effort, type(UNSET))
     assert isinstance(req.subagent_model, type(UNSET))
@@ -316,7 +316,7 @@ def test_edit_request_from_namespace_sentinel_contract():
     assert req.tier_overrides is None or isinstance(req.tier_overrides, type(UNSET))
 
     req = EditWrapperRequest.from_namespace(
-        SimpleNamespace(
+        argparse.Namespace(
             name="glm",
             effort="none",
             subagent_model="none",
@@ -331,7 +331,9 @@ def test_edit_request_from_namespace_sentinel_contract():
 @pytest.mark.unit
 def test_edit_request_rejects_a_malformed_tier():
     with pytest.raises(Exception, match="TIER=MODEL"):
-        EditWrapperRequest.from_namespace(SimpleNamespace(name="glm", tier=["haiku"]))
+        EditWrapperRequest.from_namespace(
+            argparse.Namespace(name="glm", tier=["haiku"])
+        )
 
 
 @pytest.mark.integration

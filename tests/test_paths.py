@@ -47,7 +47,7 @@ def test_from_home_is_pure_no_fs_effects(tmp_path):
 def test_paths_is_frozen(tmp_path):
     p = Paths.from_home(tmp_path)
     with pytest.raises(dataclasses.FrozenInstanceError):
-        p.bin_dir = tmp_path
+        p.__setattr__("bin_dir", tmp_path)
 
 
 @pytest.mark.unit
