@@ -7,6 +7,7 @@ allowed to ignore the outcome and fall back to manual entry.
 
 from __future__ import annotations
 
+import email.message
 import json
 import urllib.error
 
@@ -170,6 +171,7 @@ def test_daemon_unreachable_reports_error():
     fetch = _fetch_raising(urllib.error.URLError(ConnectionRefusedError(61)))
     result = list_models(_OLLAMA, fetch=fetch)
     assert not result.ok
+    assert result.error is not None
     assert "could not reach ollama-direct" in result.error
     assert "manually" in result.error  # tells the user the way forward
     assert result.models == ()
@@ -186,6 +188,7 @@ def test_timeout_reports_error():
 def test_non_json_response_reports_error():
     result = list_models(_OLLAMA, fetch=_fetch_returning(b"<html>nope</html>"))
     assert not result.ok
+    assert result.error is not None
     assert "non-JSON" in result.error
 
 
@@ -193,6 +196,7 @@ def test_non_json_response_reports_error():
 def test_json_but_not_an_object_reports_error():
     result = list_models(_OLLAMA, fetch=_fetch_returning(b"[1,2,3]"))
     assert not result.ok
+    assert result.error is not None
     assert "unexpected" in result.error
 
 
@@ -212,6 +216,7 @@ def test_200_auth_envelope_without_data_is_an_error_not_ok_empty():
     )
     result = list_models(_OPENAI, fetch=fetch)
     assert not result.ok
+    assert result.error is not None
     assert "unexpected response" in result.error
     assert result.models == ()
 
@@ -232,6 +237,7 @@ def test_api_none_short_circuits_without_fetching():
 
     result = list_models(_NO_LIST, fetch=_explode)
     assert not result.ok
+    assert result.error is not None
     assert "does not publish a model list" in result.error
 
 
@@ -370,6 +376,7 @@ def test_empty_base_url_is_reported_before_any_normalization_or_fetch():
     )
     result = list_models(provider, fetch=_explode)
     assert not result.ok
+    assert result.error is not None
     assert "has no base URL configured" in result.error
 
 
@@ -380,7 +387,11 @@ def test_empty_base_url_is_reported_before_any_normalization_or_fetch():
 
 def _http_error(code: int) -> urllib.error.HTTPError:
     return urllib.error.HTTPError(
-        "https://example.invalid/v1/models", code, "x", {}, None
+        "https://example.invalid/v1/models",
+        code,
+        "x",
+        email.message.Message(),
+        None,
     )
 
 
@@ -388,6 +399,7 @@ def _http_error(code: int) -> urllib.error.HTTPError:
 def test_401_reports_a_token_specific_message_not_start_it():
     result = list_models(_OPENAI, fetch=_fetch_raising(_http_error(401)))
     assert not result.ok
+    assert result.error is not None
     assert "start it" not in result.error
     assert "EXAMPLE_API_KEY" in result.error
 
@@ -396,6 +408,7 @@ def test_401_reports_a_token_specific_message_not_start_it():
 def test_403_reports_a_token_specific_message():
     result = list_models(_OPENAI, fetch=_fetch_raising(_http_error(403)))
     assert not result.ok
+    assert result.error is not None
     assert "EXAMPLE_API_KEY" in result.error
 
 
@@ -405,6 +418,7 @@ def test_other_http_errors_keep_the_generic_reachability_message():
     generic wording (and its "manually" fallback hint) still applies."""
     result = list_models(_OPENAI, fetch=_fetch_raising(_http_error(500)))
     assert not result.ok
+    assert result.error is not None
     assert "could not reach" in result.error
     assert "manually" in result.error
 

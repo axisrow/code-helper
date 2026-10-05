@@ -39,8 +39,9 @@ class _RedirectingHandler(http.server.BaseHTTPRequestHandler):
         )  # TEST-NET-2, unroutable
         self.end_headers()
 
-    def log_message(self, *_a):  # silence default stderr request logging
-        pass
+    def log_message(self, format: str, *args: object) -> None:
+        """Silence default stderr request logging."""
+        del format, args
 
 
 @pytest.fixture
