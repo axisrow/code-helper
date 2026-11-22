@@ -69,7 +69,7 @@ import contextlib
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
 
-from codehelper.backends._atomic import guarded_replace
+from codehelper.backends._atomic import file_lock, guarded_replace
 from codehelper.errors import CodeHelperError
 from codehelper.services.claude_settings import (
     credential_values,
@@ -81,7 +81,8 @@ from codehelper.services.claude_settings import (
     settings_backup_slots,
     without_env_keys,
 )
-from codehelper.services.paths import Paths
+from codehelper.services.paths import ClaudeTarget, Paths
+from codehelper.services.state import load_state, saved_proxy, set_saved_proxy
 
 __all__ = [
     "PROXY_ENV_KEYS",
@@ -122,6 +123,35 @@ _OWNED_ENV_KEYS: tuple[str, ...] = (*PROXY_ENV_KEYS, *NO_PROXY_ENV_KEYS)
 #: proxies", and rejecting one here — with that reason — beats letting the
 #: agent fail later at a layer that cannot explain why.
 _ALLOWED_SCHEMES = ("http", "https")
+NATIVE_API_HOST = "api.anthropic.com"
+ZAI_API_HOST = "api.z.ai"
+
+
+def no_proxy_matches(value: str, host: str) -> bool:
+    """Match a host against the documented comma or space separated list."""
+    host = host.lower().rstrip(".")
+    for entry in value.replace(",", " ").split():
+        name = entry.lower().removesuffix(":443").rstrip(".")
+        if name == "*":
+            return True
+        domain = name.removeprefix("*.").lstrip(".")
+        if domain and (host == domain or host.endswith("." + domain)):
+            return True
+    return False
+
+
+def bypasses_proxy(env: dict, host: str) -> bool:
+    return any(
+        isinstance(value := env.get(key), str) and no_proxy_matches(value, host)
+        for key in NO_PROXY_ENV_KEYS
+    )
+
+
+def with_zai_bypass(value: str) -> str:
+    entries = value.replace(",", " ").lower().split()
+    if ZAI_API_HOST in entries:
+        return value
+    return f"{value.rstrip()}, {ZAI_API_HOST}" if value.strip() else ZAI_API_HOST
 
 
 @dataclass(frozen=True)
@@ -132,16 +162,38 @@ class ProxyStatus:
     in :data:`PROXY_ENV_KEYS` order, i.e. the one Claude Code would itself
     use); ``saved_url`` is the address remembered for the next ``proxy on``.
     They differ exactly when the proxy is off but an address is remembered.
+    ``configured`` includes proxy keys explicitly blanked by ``proxy off``.
     """
 
     url: str | None
     saved_url: str | None
     no_proxy: str | None
+    api_host: str | None = None
+    bypassed: bool = False
+    configured: bool = False
 
     @property
     def enabled(self) -> bool:
         """Whether a proxy is live. Derived, so it cannot disagree with ``url``."""
         return self.url is not None
+
+    @property
+    def route(self) -> str:
+        if not self.api_host:
+            return "API route unknown"
+        backend = {
+            NATIVE_API_HOST: "Native Anthropic",
+            ZAI_API_HOST: "GLM",
+        }.get(self.api_host, self.api_host)
+        if self.url is None:
+            return f"{backend} · direct (proxy off)"
+        try:
+            validate_proxy_url(self.url)
+        except CodeHelperError:
+            return f"{backend} · invalid proxy URL"
+        if self.bypassed:
+            return f"{backend} · direct (NO_PROXY)"
+        return f"{backend} · via proxy"
 
     @property
     def restorable_url(self) -> str | None:
@@ -190,22 +242,23 @@ def validate_proxy_url(url: str) -> str:
             "proxy URL is empty — give one like http://127.0.0.1:8118"
         )
 
-    parsed = urlparse(candidate)
+    try:
+        parsed = urlparse(candidate)
+        port = parsed.port
+    except ValueError:
+        raise CodeHelperError("invalid proxy URL — use http://host:port") from None
     if parsed.scheme in ("socks", "socks4", "socks5", "socks5h"):
-        raise CodeHelperError(
-            f"{candidate!r} is a SOCKS proxy — Claude Code does not support "
-            f"SOCKS; use an http:// or https:// proxy"
-        )
+        raise CodeHelperError("Claude Code does not support SOCKS; use HTTP or HTTPS")
     if parsed.scheme not in _ALLOWED_SCHEMES:
         raise CodeHelperError(
-            f"{candidate!r} has no usable scheme — Claude Code refuses to "
+            "proxy URL has no usable scheme — Claude Code refuses to "
             f"start on a proxy URL it cannot parse; write it as "
             f"http://host:port (supported: {', '.join(_ALLOWED_SCHEMES)})"
         )
-    if not parsed.hostname:
-        raise CodeHelperError(
-            f"{candidate!r} names no host — write it as http://host:port"
-        )
+    if not parsed.hostname or any(char.isspace() for char in parsed.hostname):
+        raise CodeHelperError("proxy URL names no host — use http://host:port")
+    if port == 0:
+        raise CodeHelperError("proxy URL port must be greater than zero")
     return candidate
 
 
@@ -220,14 +273,18 @@ def redact_proxy_url(url: str) -> str:
     """
     try:
         parsed = urlparse(url)
+        port = parsed.port
     except ValueError:
-        return url
-    if not parsed.password:
+        return "***"
+    if parsed.username is None:
         return url
     host = parsed.hostname or ""
-    if parsed.port:
-        host = f"{host}:{parsed.port}"
-    netloc = f"{parsed.username or ''}:***@{host}"
+    if ":" in host:
+        host = f"[{host}]"
+    if port:
+        host = f"{host}:{port}"
+    identity = f"{parsed.username}:***" if parsed.password is not None else "***"
+    netloc = f"{identity}@{host}"
     return urlunparse(parsed._replace(netloc=netloc))
 
 
@@ -374,7 +431,7 @@ def _verify_proxy_patch(original: dict, patched: dict, patch: dict[str, str]) ->
         if patched_env.get(key) != value:
             raise CodeHelperError(
                 f"internal error: patch_proxy_settings failed to apply "
-                f"{key}={value!r} — this is a codehelper bug, please report it"
+                f"{key} — this is a codehelper bug, please report it"
             )
     if without_env_keys(original, _OWNED_ENV_KEYS) != without_env_keys(
         patched, _OWNED_ENV_KEYS
@@ -391,6 +448,7 @@ def proxy_status(
     *,
     env: dict | None = None,
     state: dict[str, object] | None = None,
+    target: ClaudeTarget = "cli",
 ) -> ProxyStatus:
     """What the proxy configuration currently is. Read-only, NEVER raises.
 
@@ -409,9 +467,11 @@ def proxy_status(
     (issue #110) — the TUI main loop reads both files once per iteration;
     the default ``None`` reads the files.
     """
-    from codehelper.services.state import saved_proxy
-
-    env = (read_env(paths) if env is None else env) or {}
+    if state is None:
+        state = load_state(paths)
+    if env is None:
+        env = read_env(paths)
+    env = env or {}
     url = next(
         (
             value
@@ -429,10 +489,22 @@ def proxy_status(
         ),
         None,
     )
+    base_url = env.get("ANTHROPIC_BASE_URL") or f"https://{NATIVE_API_HOST}"
+    try:
+        api_host = urlparse(base_url).hostname if isinstance(base_url, str) else None
+    except ValueError:
+        api_host = None
+    if target == "desktop":
+        from codehelper.services.claude_desktop import desktop_api_host
+
+        api_host = desktop_api_host(paths)
     return ProxyStatus(
         url=url,
         saved_url=saved,
         no_proxy=no_proxy,
+        api_host=api_host,
+        bypassed=bool(api_host and bypasses_proxy(env, api_host)),
+        configured="proxy" in state or any(key in env for key in PROXY_ENV_KEYS),
     )
 
 
@@ -444,6 +516,7 @@ def apply_proxy(
     dry_run: bool = False,
     force: bool = False,
     confirm=None,
+    snapshot: tuple[str, dict] | None = None,
 ) -> bool:
     """Patch the proxy keys in ``~/.claude/settings.json``'s ``env`` block.
 
@@ -478,14 +551,23 @@ def apply_proxy(
     if url:
         url = validate_proxy_url(url)
 
-    settings_path = paths.claude_settings()
-    original_text, original = read_settings(paths)
+    path = paths.claude_settings()
+    original_text, original = snapshot if snapshot is not None else read_settings(paths)
 
-    original_env = original.get("env")
+    original_env = original.get("env", {})
+    if not isinstance(original_env, dict):
+        raise CodeHelperError(f"{path} must contain a JSON object in `env`")
+    if no_proxy is not None:
+        if no_proxy_matches(no_proxy, NATIVE_API_HOST):
+            raise CodeHelperError(
+                f"NO_PROXY bypasses {NATIVE_API_HOST} — use `proxy off` for direct access"
+            )
+        no_proxy = with_zai_bypass(no_proxy)
+
     patch = resolve_proxy_patch(
         url=url,
         no_proxy=no_proxy,
-        current_env=original_env if isinstance(original_env, dict) else {},
+        current_env=original_env,
     )
     if not patch:
         return False
@@ -506,31 +588,62 @@ def apply_proxy(
 
     if dry_run:
         print(preview or "(no textual change)")
-        print(f"would write {settings_path}")
+        print(f"would write {path}")
         return True
 
-    if not force and not (confirm and confirm(settings_path, preview)):
+    if not force and not (confirm and confirm(path, preview)):
         raise CodeHelperError(
-            f"about to patch {settings_path} — refusing without confirmation "
+            f"about to patch {path} — refusing without confirmation "
             f"(use --force, or re-run interactively)"
         )
 
+    def save_address_before_off() -> None:
+        live = proxy_status(paths, env=original_env)
+        if live.url and live.url != live.saved_url:
+            set_saved_proxy(paths, live.url)
+
+    backups = settings_backup_slots(path)
     guarded_replace(
-        settings_path,
+        path,
         expected=original_text,
         new_text=patched_text,
-        stale_message=(
-            f"{settings_path} changed since it was read — refusing to write "
-            f"a patch computed off a stale snapshot (a concurrent switch or "
-            f"hand-edit may have run; re-run to patch the current file)"
-        ),
-        backup_slots=settings_backup_slots(paths),
+        stale_message=f"{path} changed since it was read — retry the proxy edit",
+        backup_slots=backups,
         mode=0o600,
+        before_replace=save_address_before_off if url == "" else None,
     )
 
     action = "disabled proxy in" if url == "" else "wrote"
-    print(f"{action} {settings_path} (backup: {paths.claude_settings_backup(1)})")
+    print(f"{action} {path} (backup: {backups[-1]})")
     return True
+
+
+def native_switch_proxy(paths: Paths, settings: dict) -> dict:
+    """Restore the CLI proxy in the same write as the Native provider."""
+    env = settings.get("env", {})
+    status = proxy_status(paths, env=env)
+    if not status.configured:
+        return settings
+    if bypasses_proxy(env, NATIVE_API_HOST):
+        raise CodeHelperError(
+            f"NO_PROXY bypasses {NATIVE_API_HOST} — fix it with `codehelper proxy --no-proxy`"
+        )
+    if not status.restorable_url:
+        raise CodeHelperError(
+            "Native Anthropic needs a proxy — set one with `codehelper proxy --url`"
+        )
+    try:
+        url = validate_proxy_url(status.restorable_url)
+    except CodeHelperError:
+        raise CodeHelperError(
+            "Native Anthropic needs a valid proxy — set one with `codehelper proxy --url`"
+        ) from None
+    if status.enabled:
+        return settings
+    patch = resolve_proxy_patch(url=url, current_env=env)
+    patched = patch_proxy_settings(settings, patch)
+    _verify_proxy_patch(settings, patched, patch)
+    return patched
 
 
 def set_proxy_state(
@@ -570,63 +683,47 @@ def set_proxy_state(
         CodeHelperError: ``on`` with no address known anywhere, or an
             invalid ``url`` (rejected before anything is written).
     """
-    from codehelper.services.state import set_saved_proxy
-
-    status = proxy_status(paths)
+    snapshot = read_settings(paths)
+    original_env = snapshot[1].get("env", {})
+    if not isinstance(original_env, dict):
+        raise CodeHelperError("Claude settings must contain a JSON object in `env`")
+    status = proxy_status(paths, env=original_env)
 
     if action == "toggle":
         action = "off" if status.enabled else "on"
 
-    target: str | None = None
+    address: str | None = None
     if url is not None:
-        target = validate_proxy_url(url)
+        address = validate_proxy_url(url)
     elif action == "on":
-        target = status.restorable_url
-        if not target:
+        address = status.restorable_url
+        if not address:
             raise CodeHelperError(
                 "no proxy address configured — set one first: "
                 "codehelper proxy --url http://host:port"
             )
     elif action == "off":
-        target = ""
-
-    to_save = status.url if target == "" else target
-    destroys_the_address = target == "" and bool(status.url)
-
-    # `off` erases the only live copy of the address, so it must not run at
-    # all unless that address is safely banked FIRST. Ordering it the other
-    # way — blank, then bank, then warn if the bank failed — loses the
-    # address outright: the settings backup that would have held it is
-    # rotated away by the very next settings write, and `off` has already
-    # reported success. Refusing up front instead leaves the proxy visibly
-    # ON, a state the user can see and act on.
-    #
-    # This is not the "save before blanking" ordering that shipped first and
-    # was wrong. That one banked before the user had confirmed anything, so a
-    # declined confirmation left a remembered address that was never applied.
-    # Here the bank happens only for the one operation that destroys the
-    # value, and `apply_proxy`'s own stale-snapshot guard still refuses a
-    # patch computed off a superseded read — so a concurrent writer cannot
-    # have its endpoint disabled while this command banks the old one.
-    if destroys_the_address and to_save and to_save != status.saved_url:
-        if not dry_run:
-            set_saved_proxy(paths, to_save)
+        address = ""
 
     wrote = apply_proxy(
         paths,
-        url=target,
+        url=address,
         no_proxy=no_proxy,
         dry_run=dry_run,
         force=force,
         confirm=confirm,
+        snapshot=snapshot,
     )
 
     # Turning ON (or setting a new address) writes it into settings.json, so
     # the value is never at risk here — a bank failure costs nothing, because
     # the live file holds it. Best-effort is right for this direction.
-    if wrote and not destroys_the_address and to_save and to_save != status.saved_url:
-        if not dry_run:
-            with contextlib.suppress(CodeHelperError):
-                set_saved_proxy(paths, to_save)
+    if wrote and not dry_run and address and address != status.saved_url:
+        with (
+            contextlib.suppress(CodeHelperError, OSError),
+            file_lock(paths.claude_settings()),
+        ):
+            if proxy_status(paths).url == address:
+                set_saved_proxy(paths, address)
 
     return wrote

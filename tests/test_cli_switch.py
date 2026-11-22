@@ -18,6 +18,7 @@ from conftest import write_settings as _write_settings
 from codehelper.__main__ import main
 from codehelper.cli.parser import _handle_switch
 from codehelper.cli.requests import SwitchRequest
+from codehelper.services import claude_settings
 from codehelper.services.claude_settings import MANAGED_ENV_KEYS
 from codehelper.services.paths import Paths
 from codehelper.services.secrets import save_credential
@@ -51,6 +52,88 @@ def _preset_request(name: str) -> SwitchRequest:
         debug=False,
         from_preset=name,
     )
+
+
+@pytest.mark.integration
+def test_claude_launcher_resumes_with_the_original_settings(tmp_path, monkeypatch):
+    paths = Paths.from_home(tmp_path)
+    transcript = paths.claude_dir / "projects" / "test" / "existing.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text('{"type":"user","message":"session history"}\n')
+    history = transcript.read_bytes()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "alternate"))
+    launches = []
+
+    def exec_claude(binary, argv, env):
+        launches.append((binary, argv, env.get("CLAUDE_CONFIG_DIR")))
+
+    monkeypatch.setattr(claude_settings.os, "execvpe", exec_claude)
+    resume = ["--", "--resume", "existing"]
+    assert main(["claude", "--dry-run", *resume]) == 0
+    assert launches == []
+    assert main(["claude", *resume]) == 0
+    assert launches == [("claude", ["claude", "--resume", "existing"], None)]
+    assert transcript.read_bytes() == history
+
+
+@pytest.mark.integration
+def test_native_restores_the_shared_proxy_with_provider(tmp_path, capsys):
+    paths = Paths.from_home(tmp_path)
+    url = "http://user:private-proxy-password@proxy.test:8123"
+    original_env = {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai",
+        "ANTHROPIC_AUTH_TOKEN": "private-zai-token",
+        "HTTPS_PROXY": url,
+        "NO_PROXY": "api.z.ai",
+        "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
+    }
+    _write_settings(paths, {"env": original_env})
+    assert main(["proxy", "off", "--force"]) == 0
+    off_settings = paths.claude_settings().read_text(encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(["switch", "native", "--dry-run"]) == 0
+    preview = capsys.readouterr().out
+    assert "private-proxy-password" not in preview
+    assert "private-zai-token" not in preview
+    assert paths.claude_settings().read_text(encoding="utf-8") == off_settings
+
+    assert main(["switch", "native", "--force"]) == 0
+    env = _settings(tmp_path)["env"]
+    assert env["ANTHROPIC_BASE_URL"] == ""
+    assert env["HTTPS_PROXY"] == url
+    assert env["NO_PROXY"] == "api.z.ai"
+    assert env["CLAUDE_CODE_AUTO_MODE_SERVER"] == "0"
+    assert paths.claude_settings_backup(1).read_text(encoding="utf-8") == off_settings
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("bypass", ["*", "localhost .anthropic.com"])
+def test_native_rejects_proxy_bypass(tmp_path, capsys, bypass):
+    paths = Paths.from_home(tmp_path)
+    _write_settings(
+        paths,
+        {"env": {"HTTPS_PROXY": "http://proxy.test:8123", "no_proxy": bypass}},
+    )
+    original = paths.claude_settings().read_bytes()
+
+    assert main(["switch", "native", "--force"]) == 1
+    assert "NO_PROXY bypasses api.anthropic.com" in capsys.readouterr().err
+    assert paths.claude_settings().read_bytes() == original
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("url", ["", "http://proxy.test:bad"])
+def test_native_requires_a_usable_address_for_a_configured_proxy(tmp_path, capsys, url):
+    paths = Paths.from_home(tmp_path)
+    _write_settings(
+        paths, {"env": {"HTTPS_PROXY": url, "ANTHROPIC_BASE_URL": "https://api.z.ai"}}
+    )
+    original = paths.claude_settings().read_bytes()
+
+    assert main(["switch", "native", "--force"]) == 1
+    assert "Native Anthropic needs" in capsys.readouterr().err
+    assert paths.claude_settings().read_bytes() == original
 
 
 @pytest.mark.integration

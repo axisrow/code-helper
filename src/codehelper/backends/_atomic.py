@@ -31,6 +31,7 @@ import json
 import os
 import stat
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from codehelper.errors import CodeHelperError
@@ -263,6 +264,7 @@ def guarded_replace(
     stale_message: str,
     backup_slots: tuple[Path, Path, Path] | None = None,
     mode: int | None = None,
+    before_replace: Callable[[], None] | None = None,
 ) -> None:
     """The one commit tail every config writer shares: lock → stale-snapshot
     refusal → backup rotation → :func:`atomic_write`, all under ONE lock.
@@ -282,6 +284,8 @@ def guarded_replace(
        hand-edit wins the race instead of being silently clobbered.
        ``stale_message`` is OWNER-OWNED: each writer keeps its own wording;
        only the "changed since it was read" substring is shared contract.
+       An optional ``before_replace`` runs at this point, under the lock, so
+       a proxy can save the address in the exact snapshot it is clearing.
     3. One rotation rule for every ring: rotate iff ``backup_slots`` is given
        AND ``expected`` is non-empty. A restore passes no slots — restoring
        is the "put it back" operation, not a fresh edit to archive. An empty
@@ -303,6 +307,8 @@ def guarded_replace(
         current = read_text_or_none(path) or ""
         if current != expected:
             raise CodeHelperError(stale_message)
+        if before_replace is not None:
+            before_replace()
         if backup_slots is not None and expected:
             rotate_backups(backup_slots, current=expected)
         atomic_write(path, new_text, mode=mode)

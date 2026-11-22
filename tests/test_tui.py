@@ -9,10 +9,17 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from conftest import ctx_window_zero, read_settings, write_settings
+from conftest import ctx_window_zero, write_settings
 
 from codehelper.__main__ import main
+from codehelper.services.doctor import BYPASS_ENV_NAMES, PROXY_ENV_NAMES
 from codehelper.services.paths import Paths
+
+
+@pytest.fixture(autouse=True)
+def _isolate_proxy_env(monkeypatch):
+    for name in (*PROXY_ENV_NAMES, *BYPASS_ENV_NAMES):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _tui_args(**overrides: bool) -> argparse.Namespace:
@@ -481,14 +488,12 @@ def test_t_rotates_token_for_secret_wrapper_from_main_screen(monkeypatch, capsys
     secrets.save_credential(paths, "zai", "sk-old", "default")
     assert main(["add", "glm", "--profile", "default"]) == 0
     capsys.readouterr()  # drop the add's own transcript — count only the TUI flow
-    # Main screen rows: the two agent chipset rows (claude, codex), the proxy
-    # chipset row, the `+ add agent` action row, then the wrapper list
-    # [deepseek-ollama, glm, glm-ollama] under Section("claude"). Five DOWNs reach
-    # glm; `t` opens its token profile picker, ENTER picks the first profile
+    # The second wrapper follows two agent rows, two proxy rows, and Add agent.
+    # `t` opens its token picker and Enter picks the first profile
     # (default), the getpass stub supplies the new token.
     _real_menu_keys(
         monkeypatch,
-        ["DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "TOKEN", "ENTER", "CANCEL"],
+        ["DOWN"] * 6 + ["TOKEN", "ENTER", "CANCEL"],
     )
     monkeypatch.setattr("getpass.getpass", lambda _prompt: "sk-new")
 
@@ -622,10 +627,10 @@ def test_a_on_the_codex_row_scopes_add_to_codex(monkeypatch):
     agent picker, landing straight on a provider list scoped to codex."""
     seen: list[str] = []
 
-    # Main screen: DOWN moves off claude onto codex, `a` triggers the scoped
+    # Main screen: Two Downs reach Codex CLI, `a` triggers the scoped
     # Add. The provider screen that follows returns Back (below), which
     # lands back on the main screen — CANCEL then quits.
-    real_menu_keys = iter(["DOWN", "a", "CANCEL"])
+    real_menu_keys = iter(["DOWN", "DOWN", "a", "CANCEL"])
 
     def _select(items, *, prompt: str | Callable[[], str] = "", **kwargs):
         text = prompt() if callable(prompt) else prompt
@@ -945,7 +950,8 @@ def test_main_screen_chipset_apply_through_a_real_pty(tmp_path):
         # Each key waits for the redraw proving it landed: the row cursor on
         # codex, then the reverse-video focus on the wrapper chip. ENTER's
         # marker is the confirm prompt itself.
-        menu_key("\x1b[B", "> codex")
+        menu_key("\x1b[B", "> Claude.app")
+        menu_key("\x1b[B", "> Codex CLI")
         menu_key("\x1b[C", "\x1b[7mqwen3.5-codex")
         menu_key("\r", "Continue? [y/N]")
         assert b"About to write" in output
@@ -1051,8 +1057,7 @@ def test_agy_add_flow_through_a_real_pty(tmp_path):
         # wrapper → agent picker → agy (third row) → antigravity (the only
         # provider row) → the known-models picker → first model → default
         # alias → ctx "none".
-        menu_key("\x1b[B", "> codex")
-        menu_key("\x1b[B", "> proxy")
+        menu_key("\x1b[B", "> Claude.app")
         menu_key("a", "What do you want to add?")
         menu_key("\r", "Add a wrapper for which agent?")
         menu_key("\x1b[B", "> codex")
@@ -1179,7 +1184,8 @@ def test_set_default_confirmation_preview_is_visible_before_the_prompt(tmp_path)
         read_until("Esc quit")
         # Each key waits for the redraw proving it landed: the row cursor on
         # codex, then the reverse-video focus on the wrapper chip.
-        menu_key("\x1b[B", "> codex")
+        menu_key("\x1b[B", "> Claude.app")
+        menu_key("\x1b[B", "> Codex CLI")
         menu_key("\x1b[C", "\x1b[7mqwen3.5-codex")
         # The preview/prompt is written outside the TUI's raw-mode redraw
         # loop, so canonical-mode input() reads a real line — send "n\n".
@@ -1700,12 +1706,10 @@ def test_main_screen_enter_sets_default_wrapper(monkeypatch):
     assert default_wrapper(paths, "claude") is None
     install_wrapper(paths, "glm", token="test-token")
 
-    # Past the two agent chipset rows, the proxy row and the `+ add agent`
+    # Past the two agent chipset rows, two proxy rows and the `+ add agent`
     # action row, then one more DOWN to reach glm (the second wrapper, after
     # deepseek-ollama); Enter makes it the default.
-    _real_menu_keys(
-        monkeypatch, ["DOWN", "DOWN", "DOWN", "DOWN", "DOWN", "ENTER", "CANCEL"]
-    )
+    _real_menu_keys(monkeypatch, ["DOWN"] * 6 + ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
     assert default_wrapper(paths, "claude") == "glm"
 
@@ -1731,11 +1735,8 @@ def test_wrapper_named_add_agent_is_selectable_from_main_screen(monkeypatch):
             alias="add-agent",
         ),
     )
-    # The `add-agent` wrapper is the 9th selectable row: the two agent chipset
-    # rows, the proxy row, the `+ add agent` action row, then the
-    # deepseek-ollama/glm/glm-ollama/bai presets. Eight DOWNs
-    # reach it; Enter must set it as default, not open add-agent.
-    _real_menu_keys(monkeypatch, ["DOWN"] * 8 + ["ENTER", "CANCEL"])
+    # Two agents, two proxies, Add agent and four presets precede this wrapper.
+    _real_menu_keys(monkeypatch, ["DOWN"] * 9 + ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
     assert default_wrapper(paths, "claude") == "add-agent"
 
@@ -1759,11 +1760,8 @@ def test_wrapper_named_add_wrapper_is_selectable_from_main_screen(monkeypatch):
             alias="add-wrapper",
         ),
     )
-    # The `add-wrapper` wrapper is the 9th selectable row (two agent chipset
-    # rows, the proxy row, the `+ add agent` action row, then the
-    # deepseek-ollama/glm/glm-ollama/bai presets). Eight DOWNs
-    # reach it; Enter must set it as default, not open the add flow.
-    _real_menu_keys(monkeypatch, ["DOWN"] * 8 + ["ENTER", "CANCEL"])
+    # Two agents, two proxies, Add agent and four presets precede this wrapper.
+    _real_menu_keys(monkeypatch, ["DOWN"] * 9 + ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
     assert default_wrapper(paths, "claude") == "add-wrapper"
 
@@ -1789,8 +1787,8 @@ def test_main_screen_enter_on_an_unmanaged_foreign_file_does_not_set_a_ghost_def
     foreign.chmod(0o755)
 
     # `deepseek-ollama` is the first wrapper row, below the two agent chipset rows,
-    # the proxy row and the `+ add agent` action row.
-    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "DOWN", "DOWN", "ENTER", "CANCEL"])
+    # the two proxy rows and the `+ add agent` action row.
+    _real_menu_keys(monkeypatch, ["DOWN"] * 5 + ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
     assert default_wrapper(paths, "claude") is None
@@ -2483,12 +2481,12 @@ def test_exact_readback_is_per_agent_registry_data():
 def test_chipset_cursor_moves_with_the_list_not_duplicates(monkeypatch):
     """Moving the list cursor to codex highlights ONLY codex's chip — claude
     keeps its `✓` but loses the reverse-video block it had a moment ago."""
-    frames = _capture_frames(monkeypatch, ["DOWN", "CANCEL"])
+    frames = _capture_frames(monkeypatch, ["DOWN", "DOWN", "CANCEL"])
     assert main(["tui"]) == 0
 
     import codehelper.cli.tui as tui
 
-    rows = frames[1]
+    rows = frames[-1]
     assert f"{tui._REVERSE}✓ native{tui._RESET}" in rows["codex"]
     assert tui._REVERSE not in rows["claude"]
 
@@ -2547,9 +2545,9 @@ def test_enter_on_the_add_chip_opens_add_scoped_to_that_agent(monkeypatch):
     """Enter on the `+ add` chip is equivalent to `a` on that row: it opens
     Add pre-scoped to the agent, no kind/agent picker in between."""
     seen: list[str] = []
-    # Main screen: DOWN reaches codex, RIGHT moves past native to `+ add`,
+    # Main screen: Two Downs reach codex, RIGHT moves past native to `+ add`,
     # ENTER applies it.
-    real_menu_keys = iter(["DOWN", "RIGHT", "ENTER", "CANCEL"])
+    real_menu_keys = iter(["DOWN", "DOWN", "RIGHT", "ENTER", "CANCEL"])
 
     def _select(items, *, prompt: str | Callable[[], str] = "", **kwargs):
         text = prompt() if callable(prompt) else prompt
@@ -2752,9 +2750,9 @@ def test_one_iteration_reads_settings_env_once(monkeypatch):
     calls = {"read_env": 0}
     real = claude_settings_service.read_env
 
-    def counting(paths):
+    def counting(paths, **kwargs):
         calls["read_env"] += 1
-        return real(paths)
+        return real(paths, **kwargs)
 
     monkeypatch.setattr(claude_settings_service, "read_env", counting)
 
@@ -3138,7 +3136,7 @@ def test_codex_native_chip_routes_through_the_cli_handler(monkeypatch):
         "_handle_set_default",
         lambda req: seen.append(req) or 0,
     )
-    _real_menu_keys(monkeypatch, ["DOWN", "ENTER", "CANCEL"])
+    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "ENTER", "CANCEL"])
     assert main(["tui"]) == 0
 
     assert len(seen) == 1
@@ -3259,7 +3257,11 @@ def _write_proxy_settings(env: dict) -> None:
 
 
 def _proxy_env() -> dict:
-    return read_settings(Paths.default())["env"]
+    from codehelper.services.claude_settings import (
+        read_settings as read_active_settings,
+    )
+
+    return read_active_settings(Paths.default())[1]["env"]
 
 
 def _settings_labels(monkeypatch) -> list:
@@ -3279,17 +3281,15 @@ def _settings_labels(monkeypatch) -> list:
 
 
 @pytest.mark.integration
-def test_settings_screen_has_no_second_proxy_toggle(monkeypatch):
-    """On/off belongs to the chipset row alone. Two controls for one setting
-    is exactly the duplication that made a bare `Proxy: on` row ambiguous —
-    is `on` the state, or the button?"""
+def test_settings_has_one_proxy_toggle_for_shared_claude(monkeypatch):
+    """Live settings expose one control for the shared proxy."""
     _write_proxy_settings({"HTTPS_PROXY": "http://127.0.0.1:8118"})
     labels = _settings_labels(monkeypatch)
 
     main(["tui"])
 
-    assert any(str(label).startswith("Proxy address:") for label in labels)
-    assert not any(str(label).startswith("Proxy:") for label in labels)
+    assert "Claude CLI / Claude.app proxy: on (toggle)" in labels
+    assert sum("(toggle)" in label for label in labels) == 1
 
 
 @pytest.mark.integration
@@ -3301,7 +3301,7 @@ def test_settings_screen_reads_the_address_from_the_file(monkeypatch):
 
     main(["tui"])
 
-    assert "Proxy address: http://127.0.0.1:8118" in labels
+    assert "Claude CLI / Claude.app proxy address: http://127.0.0.1:8118" in labels
 
 
 @pytest.mark.integration
@@ -3328,8 +3328,8 @@ def test_settings_screen_edits_no_proxy_in_both_spellings(monkeypatch):
     main(["tui"])
 
     env = _proxy_env()
-    assert env["NO_PROXY"] == "localhost,.corp"
-    assert env["no_proxy"] == "localhost,.corp"
+    assert env["NO_PROXY"] == "localhost,.corp, api.z.ai"
+    assert env["no_proxy"] == env["NO_PROXY"]
     assert env["HTTPS_PROXY"] == "http://127.0.0.1:8118"
 
 
@@ -3491,104 +3491,91 @@ def test_tokens_screen_binds_s_and_s_survives_translation(monkeypatch):
 
 
 @pytest.mark.integration
-def test_proxy_row_marks_the_live_state_and_offers_the_other(monkeypatch):
-    """The whole point of the chipset shape: both options are always on
-    screen and `✓` says which one is live, so Enter is never ambiguous."""
-    _write_proxy_settings({"HTTPS_PROXY": "http://127.0.0.1:8118"})
+def test_main_screen_labels_four_clients_and_proxy_scope(monkeypatch):
+    _write_proxy_settings(
+        {
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            "HTTPS_PROXY": "http://127.0.0.1:8118",
+            "NO_PROXY": "api.z.ai",
+        }
+    )
+    monkeypatch.setenv("HTTPS_PROXY", "http://env.test:8123")
     rows = []
 
-    def _select(items, **_kwargs):
-        rows.extend(
-            entry[1](selected=False, ansi=False)
-            for entry in items
-            if isinstance(entry, tuple) and callable(entry[1])
-        )
+    def select(items, **_kwargs):
+        for entry in items[:4]:
+            label = entry[1]
+            rows.append(label(selected=False, ansi=False) if callable(label) else label)
         return "quit"
 
-    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
-
-    main(["tui"])
-
-    proxy_row = next(r for r in rows if r.startswith("proxy"))
-    assert "✓ on" in proxy_row
-    assert "off" in proxy_row
-    assert "http://127.0.0.1:8118" in proxy_row
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", select)
+    assert main(["tui"]) == 0
+    for row, label in zip(
+        rows, ("Claude CLI", "Claude.app", "Codex CLI", "ChatGPT.app"), strict=True
+    ):
+        assert row.startswith(label)
+    assert "api.z.ai · direct (NO_PROXY) [shared settings]" in rows[0]
+    assert "Native Anthropic · via proxy [shared settings]" in rows[1]
+    assert "HTTPS_PROXY=http://env.test:8123" in rows[2]
+    assert "launch via http://127.0.0.1:8118" in rows[3]
 
 
 @pytest.mark.integration
-def test_proxy_row_marks_off_when_the_proxy_is_disabled(monkeypatch):
-    from codehelper.services.state import set_saved_proxy
+def test_settings_has_one_proxy_switch_for_both_claude_clients(monkeypatch):
+    _write_proxy_settings({"HTTPS_PROXY": "http://127.0.0.1:8118"})
+    observed = []
 
-    _write_proxy_settings({"HTTPS_PROXY": "", "HTTP_PROXY": ""})
-    set_saved_proxy(Paths.default(), "http://127.0.0.1:8118")
-    rows = []
+    def select(items, prompt="", **_kwargs):
+        if prompt == "Settings:":
+            observed.extend(items)
+            return "__back__"
+        return "quit" if observed else "settings"
 
-    def _select(items, **_kwargs):
-        rows.extend(
-            entry[1](selected=False, ansi=False)
-            for entry in items
-            if isinstance(entry, tuple) and callable(entry[1])
-        )
-        return "quit"
-
-    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", _select)
-
-    main(["tui"])
-
-    proxy_row = next(r for r in rows if r.startswith("proxy"))
-    assert "✓ off" in proxy_row
-    assert "✓ on" not in proxy_row
+    monkeypatch.setattr("codehelper.cli.menu.select_from_menu", select)
+    monkeypatch.setattr("codehelper.cli.menu.press_any_key", lambda *_a, **_k: None)
+    assert main(["tui"]) == 0
+    assert [item for item in observed if "toggle" in item[0]] == [
+        ("proxy-toggle", "Claude CLI / Claude.app proxy: on (toggle)")
+    ]
+    assert all("Claude mode" not in label for _, label in observed)
 
 
 @pytest.mark.integration
-def test_enter_on_the_off_chip_disables_the_proxy(monkeypatch):
-    """Enter applies the chip under the cursor — the same contract as an
-    agent row, which is what removes the on/off ambiguity."""
+def test_settings_turns_off_shared_proxy(monkeypatch):
     _write_proxy_settings({"HTTPS_PROXY": "http://127.0.0.1:8118"})
-    # Two DOWNs past claude/codex reach the proxy row; RIGHT moves the chip
-    # cursor from `on` to `off`; Enter applies it.
-    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "RIGHT", "ENTER", "CANCEL"])
+    _settings_screen(monkeypatch, ["proxy-toggle"])
 
     assert main(["tui"]) == 0
-
     assert _proxy_env()["HTTPS_PROXY"] == ""
 
 
 @pytest.mark.integration
-def test_enter_on_the_already_live_chip_is_a_silent_noop(monkeypatch):
-    _write_proxy_settings({"HTTPS_PROXY": "http://127.0.0.1:8118"})
-    before = Paths.default().claude_settings().read_text(encoding="utf-8")
-    # The cursor starts on `on`, which is already applied.
-    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "ENTER", "CANCEL"])
+def test_reselecting_native_restores_the_shared_proxy(monkeypatch):
+    proxy = "http://127.0.0.1:8118"
+    _write_proxy_settings({"HTTPS_PROXY": proxy})
 
+    assert main(["proxy", "off", "--force"]) == 0
+    assert _proxy_env()["HTTPS_PROXY"] == ""
+    _real_menu_keys(monkeypatch, ["ENTER", "CANCEL"])
     assert main(["tui"]) == 0
-
-    assert Paths.default().claude_settings().read_text(encoding="utf-8") == before
+    assert _proxy_env()["HTTPS_PROXY"] == proxy
 
 
 @pytest.mark.integration
-def test_turning_on_with_no_address_anywhere_asks_for_one(monkeypatch):
-    """The one case Enter cannot just act on: refusing with an error the user
-    can't fix from this screen would be a dead end, so it prompts instead."""
+def test_turning_on_with_no_address_asks_for_one(monkeypatch):
     _write_proxy_settings({"IS_DEMO": "1"})
-    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "ENTER", "CANCEL"])
+    _settings_screen(monkeypatch, ["proxy-toggle"])
     monkeypatch.setattr(
         "codehelper.cli.menu.read_line", lambda *_a, **_k: "http://10.0.0.1:3128"
     )
-    monkeypatch.setattr("codehelper.cli.menu.press_any_key", lambda *_a, **_k: None)
 
     assert main(["tui"]) == 0
-
     assert _proxy_env()["HTTPS_PROXY"] == "http://10.0.0.1:3128"
 
 
 @pytest.mark.integration
-def test_delete_on_the_proxy_row_is_inert(monkeypatch):
-    """The row owns no file; `d` there must not go looking for a wrapper
-    named `proxy:`."""
-    _write_proxy_settings({"HTTPS_PROXY": "http://127.0.0.1:8118"})
-    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "d", "CANCEL"])
-
+def test_delete_on_the_app_row_is_inert(monkeypatch):
+    _real_menu_keys(monkeypatch, ["DOWN", "d", "CANCEL"])
     assert main(["tui"]) == 0
 
 
@@ -3622,9 +3609,8 @@ def test_delete_on_a_wrapper_row_still_dispatches(monkeypatch):
         return 0
 
     monkeypatch.setattr("codehelper.cli.parser._handle_remove", _spy_remove)
-    # Row 5 is the first preset/wrapper row: agent:claude, agent:codex,
-    # proxy, + add agent, then deepseek-ollama.
-    _real_menu_keys(monkeypatch, ["DOWN", "DOWN", "DOWN", "DOWN", "d", "CANCEL"])
+    # Two agent rows, two proxy rows and Add agent precede deepseek-ollama.
+    _real_menu_keys(monkeypatch, ["DOWN"] * 5 + ["d", "CANCEL"])
 
     assert main(["tui"]) == 0
     assert len(seen) == 1
@@ -4143,7 +4129,7 @@ def test_main_screen_redraws_and_exits_cleanly_with_the_preloads(tmp_path):
         read_until("Esc quit")
         menu_key("\x1b[D", "glm")  # chip cursor: pure in-memory, in-place
         menu_key("\x1b[C", "glm")
-        menu_key("\x1b[B", "proxy")  # DOWN onto the proxy chipset row
+        menu_key("\x1b[B", "> Claude.app")
         menu_key("s", "Settings:")  # proxy readback screen
         menu_key("\x1b", "Esc quit")
         menu_key("p", "Active profile")  # profile resolvers screen

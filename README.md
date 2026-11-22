@@ -421,16 +421,72 @@ names in the shell or launcher that runs it, or prefix one invocation:
 https_proxy=http://proxy.lan:8118 glm-5-codex
 ```
 
-`codehelper proxy` is **Claude Code-scoped**, not a machine-wide switch: it
-edits the proxy keys in `~/.claude/settings.json`'s `env` block, so it
-reaches Claude Code sessions and nothing else. A Codex wrapper gets its proxy
-exclusively from its process environment — `proxy on` does not change what it
-does.
+The TUI shows **Claude CLI**, **Claude.app**, **Codex CLI**, and **ChatGPT.app**.
+In **Settings** (`s`), edit the shared **Claude CLI / Claude.app** proxy
+address, on/off state, and `NO_PROXY`. Both `codehelper proxy` targets edit the
+same settings. Use `codehelper proxy --status` for the terminal client's API
+route and `codehelper proxy --target desktop --status` for the app's profile.
 
-`codehelper doctor` reports, for each installed Codex wrapper, which proxy
-variables your current environment supplies, the effective address, and
-whether the wrapper's endpoint host is in `NO_PROXY` (i.e. bypassed) — the
-read-only answer to "why is my wrapper not going through the proxy?".
+Edits with `proxy --no-proxy` keep `api.z.ai` in both bypass variables so GLM
+can connect directly. Selecting Native in Claude CLI restores a configured
+proxy after `proxy off` and checks that `api.anthropic.com` uses it. The Codex
+CLI row reports the current launch environment. `codehelper doctor` shows the
+proxy and bypass list for installed Codex wrappers.
+
+## Claude settings and history
+
+Claude CLI and the local Code tab in Claude.app share `~/.claude/settings.json`.
+`codehelper switch` updates that file for the next prompt of an open CLI
+session. Shared provider and Auto mode settings can also affect local Code
+sessions in the app. Resume a terminal session with `claude --resume` or
+`codehelper claude -- --resume`. Both use the original `~/.claude` history.
+
+The experimental **Separate** mode was removed. It wrote provider settings to
+a launch-time `--settings` file while open CLI sessions watched
+`~/.claude/settings.json`. The menu could show a new provider while the open
+session still used the old one. If a session was started with the Separate
+file, reopen it with `claude --resume` to use the shared settings.
+
+If you previously launched Claude.app with a different `CLAUDE_CONFIG_DIR`,
+quit it and reopen it from Dock or Finder to return to the original history.
+Restore the original path in the app's local editor if you configured it
+there. [Claude settings and scope](https://code.claude.com/docs/en/settings)
+[Claude Desktop shared configuration](https://code.claude.com/docs/en/desktop#shared-configuration)
+
+## Claude.app gateway on macOS
+
+`codehelper desktop --gateway URL` prepares a local profile and opens
+Claude.app. For an Ollama Desktop gateway listening on its default port,
+preview the profile and then apply it.
+
+```bash
+codehelper desktop --gateway http://127.0.0.1:11435 --dry-run
+codehelper desktop --gateway http://127.0.0.1:11435
+```
+
+Claude.app discovers the available models through the gateway’s `/v1/models`
+endpoint. For a gateway that requires a Bearer API key, pipe the key to
+`--token-stdin` and use `--force` for a noninteractive run. The preview shows
+the settings files and keys that would change. [Claude.app gateway configuration](https://claude.com/docs/third-party/claude-desktop/gateway#configure-the-app)
+
+**Restore Claude.app to Native Anthropic** in Settings, or
+`codehelper desktop --restore`, returns from a Codehelper or Ollama gateway
+to the subscription profile, where you can open your Native conversations.
+
+## ChatGPT.app on macOS
+
+Press Enter on **ChatGPT.app** in the TUI, or run:
+
+```bash
+codehelper chatgpt
+```
+
+The launcher uses the active or saved Claude proxy for the app and its
+Codex runtime. It keeps loopback connections local and uses the original
+Codex session directory. If ChatGPT.app is already open, quit it normally
+and run the command from an external terminal. The TUI reports the launch
+configuration, and the proxy log is the source for verifying the live route.
+[ChatGPT and Codex network requirements](https://help.openai.com/en/articles/9247338-network-recommendations-for-chatgpt-errors-on-web-and-apps)
 
 ## Safety
 
