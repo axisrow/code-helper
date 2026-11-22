@@ -252,7 +252,11 @@ def set_active_selection(paths: Paths, provider_name: str, profile_name: str) ->
         _write_state(paths, state)
 
 
-def saved_proxy(paths: Paths, *, state: dict[str, object] | None = None) -> str | None:
+def saved_proxy(
+    paths: Paths,
+    *,
+    state: dict[str, object] | None = None,
+) -> str | None:
     """The proxy address remembered for the next ``proxy on``, or ``None``.
 
     A third independent top-level pointer, alongside ``active`` and

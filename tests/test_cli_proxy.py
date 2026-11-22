@@ -103,8 +103,8 @@ def test_no_proxy_edits_both_spellings_without_touching_the_proxy(tmp_path):
     assert main(["proxy", "--no-proxy", "localhost,.corp", "--force"]) == 0
 
     env = _env(tmp_path)
-    assert env["NO_PROXY"] == "localhost,.corp"
-    assert env["no_proxy"] == "localhost,.corp"
+    assert env["NO_PROXY"] == "localhost,.corp, api.z.ai"
+    assert env["no_proxy"] == env["NO_PROXY"]
     assert env["HTTPS_PROXY"] == _URL
 
 
@@ -147,3 +147,27 @@ def test_dry_run_off_neither_writes_the_file_nor_saves_the_address(tmp_path):
         == before
     )
     assert saved_proxy(Paths.from_home(tmp_path)) is None
+
+
+@pytest.mark.integration
+def test_proxy_status_shows_zai_bypass_and_native_route(tmp_path, capsys):
+    paths = Paths.from_home(tmp_path)
+    env = {"HTTPS_PROXY": "http://proxy.test:8123", "NO_PROXY": "localhost api.z.ai"}
+    write_settings(paths, {"env": dict(env, ANTHROPIC_BASE_URL="https://api.z.ai")})
+    assert main(["proxy", "--status"]) == 0
+    assert "GLM · direct (NO_PROXY)" in capsys.readouterr().out
+
+    assert main(["proxy", "--target", "desktop", "--status"]) == 0
+    out = capsys.readouterr().out
+    assert "Claude.app proxy (shared settings)" in out
+    assert "Native Anthropic · via proxy" in out
+
+    assert main(["proxy", "--target", "desktop", "off", "--force"]) == 0
+    assert "Native Anthropic · direct (proxy off)" in capsys.readouterr().out
+    assert main(["proxy", "--status"]) == 0
+    assert "GLM · direct (proxy off)" in capsys.readouterr().out
+
+    assert main(["proxy", "on", "--force"]) == 0
+    assert "GLM · direct (NO_PROXY)" in capsys.readouterr().out
+    assert main(["proxy", "--target", "desktop", "--status"]) == 0
+    assert "Native Anthropic · via proxy" in capsys.readouterr().out

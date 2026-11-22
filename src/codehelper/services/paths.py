@@ -26,8 +26,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from codehelper.errors import CodeHelperError
+
+ClaudeTarget = Literal["cli", "desktop"]
 
 
 @dataclass(frozen=True)
@@ -198,19 +201,15 @@ class Paths:
         return self.codex_dir / f"config.toml.bak{slot}"
 
     def claude_settings(self) -> Path:
-        """``~/.claude/settings.json`` — Claude Code's OWN global settings.
-
-        Distinct from every other file this project generates: this tool
-        never creates or owns it wholesale, only patches its ``env`` block in
-        place (never a replacement) via ``services/claude_settings.py``'s
-        ``switch`` command — same relationship ``codex_main_config`` has to
-        ``~/.codex/config.toml``. Pure arithmetic, no IO, no existence check —
-        same contract as every other accessor here.
-        """
+        """The original Claude user settings, shared with Claude.app."""
         return self.claude_dir / "settings.json"
 
+    def legacy_claude_app_settings(self) -> Path:
+        """Alternate settings file used by older codehelper builds."""
+        return self.claude_desktop_app_dir() / "Code" / "settings.json"
+
     def claude_settings_backup(self, slot: int) -> Path:
-        """``~/.claude/settings.json.bak<slot>`` — one of three rotating backups.
+        """One of three rotating backups next to the shared settings file.
 
         ``slot`` must be 1, 2, or 3 (1 = most recent). ``switch`` rotates
         these FIFO-style before every real patch: 2→3 (oldest lost), 1→2,
@@ -219,7 +218,12 @@ class Paths:
         """
         if slot not in (1, 2, 3):
             raise CodeHelperError(f"invalid backup slot (must be 1, 2, or 3): {slot!r}")
-        return self.claude_dir / f"settings.json.bak{slot}"
+        return self.claude_settings().with_suffix(f".json.bak{slot}")
+
+    def claude_desktop_app_dir(self, *, third_party: bool = False) -> Path:
+        """The macOS Desktop app's own first- or third-party data directory."""
+        app = "Claude-3p" if third_party else "Claude"
+        return self.claude_dir.parent / "Library" / "Application Support" / app
 
     def credentials_file(self) -> Path:
         """``~/.config/codehelper/credentials.json`` — the cached token store.

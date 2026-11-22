@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from codehelper.errors import CodeHelperError
+from codehelper.services.paths import ClaudeTarget
 from codehelper.services.wrappers import UNSET, Unset
 
 __all__ = [
@@ -383,6 +384,7 @@ class ProxyRequest:
     dry_run: bool
     force: bool
     debug: bool
+    target: ClaudeTarget = "cli"
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> ProxyRequest:
@@ -394,6 +396,7 @@ class ProxyRequest:
             dry_run=bool(_g(args, "dry_run", False)),
             force=bool(_g(args, "force", False)),
             debug=bool(_g(args, "debug", False)),
+            target=_g(args, "target", "cli"),
         )
 
 

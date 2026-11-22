@@ -1959,13 +1959,16 @@ def _handle_proxy(args: argparse.Namespace | ProxyRequest) -> int:
     paths = Paths.default()
 
     if req.status or (req.action is None and req.url is None and req.no_proxy is None):
-        status = proxy_service.proxy_status(paths)
+        status = proxy_service.proxy_status(paths, target=req.target)
+        name = "Claude.app" if req.target == "desktop" else "Claude CLI"
+        print(f"{name} proxy (shared settings)")
         if status.enabled:
             print(f"on — {status.display_url}")
         elif status.saved_url:
             print(f"off (saved: {status.display_saved_url})")
         else:
             print("off (no address configured)")
+        print(f"API route: {status.route}")
         if status.no_proxy:
             print(f"NO_PROXY: {status.no_proxy}")
         return 0
@@ -1987,6 +1990,54 @@ def _handle_proxy(args: argparse.Namespace | ProxyRequest) -> int:
     )
     if not wrote:
         print("no changes")
+    elif not req.dry_run:
+        status = proxy_service.proxy_status(paths, target=req.target)
+        print(f"API route: {status.route}")
+        if status.api_host == proxy_service.NATIVE_API_HOST and not status.enabled:
+            print("Native Anthropic may be unreachable without a proxy")
+    return 0
+
+
+def _handle_claude_launch(args: argparse.Namespace) -> int:
+    arguments = args.arguments
+    if arguments[:1] == ["--"]:
+        arguments = arguments[1:]
+    claude_settings.launch_claude(arguments, dry_run=getattr(args, "dry_run", False))
+    return 0
+
+
+def _handle_chatgpt(args: argparse.Namespace) -> int:
+    from codehelper.services.chatgpt_app import launch_chatgpt
+
+    launch_chatgpt(Paths.default(), dry_run=getattr(args, "dry_run", False))
+    return 0
+
+
+def _handle_desktop(args: argparse.Namespace) -> int:
+    from codehelper.services.claude_desktop import (
+        launch_desktop_gateway,
+        restore_desktop,
+    )
+
+    paths = Paths.default()
+    dry_run = getattr(args, "dry_run", False)
+    if (gateway := getattr(args, "gateway", None)) is not None:
+        launch_desktop_gateway(
+            paths,
+            gateway,
+            token=_token_stdin_value(args),
+            dry_run=dry_run,
+            force=args.force,
+            confirm=_confirm_set_default,
+        )
+    elif getattr(args, "token_stdin", False):
+        raise CodeHelperError("desktop --token-stdin requires --gateway")
+    elif args.restore:
+        restore_desktop(
+            paths, dry_run=dry_run, force=args.force, confirm=_confirm_set_default
+        )
+    else:
+        raise CodeHelperError("choose `desktop --gateway URL` or `desktop --restore`")
     return 0
 
 
@@ -2536,9 +2587,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_proxy = subparsers.add_parser(
         "proxy",
-        help="turn the proxy in ~/.claude/settings.json on or off, set its "
-        "address, or edit NO_PROXY (independent of `switch`, which owns the "
-        "ANTHROPIC_* keys in the same file)",
+        help="manage the shared Claude proxy and NO_PROXY",
         parents=[sub_flags],
     )
     p_proxy.add_argument(
@@ -2557,12 +2606,18 @@ def build_parser() -> argparse.ArgumentParser:
         "cannot parse, and does not support SOCKS)",
     )
     p_proxy.add_argument(
+        "--target",
+        choices=("cli", "desktop"),
+        default="cli",
+        help="which Claude client's API route to report",
+    )
+    p_proxy.add_argument(
         "--no-proxy",
         dest="no_proxy",
         default=None,
         help="set the bypass list, e.g. 'localhost,127.0.0.1,.example.com' "
-        "(space- or comma-separated, '*' bypasses everything); written to "
-        "both NO_PROXY and no_proxy, and never touched by on/off",
+        "(space- or comma-separated); includes api.z.ai and is written to "
+        "both NO_PROXY and no_proxy",
     )
     p_proxy.add_argument(
         "--status",
@@ -2577,6 +2632,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the confirmation prompt",
     )
     p_proxy.set_defaults(func=_handle_proxy)
+
+    p_desktop = subparsers.add_parser(
+        "desktop",
+        help="launch Claude.app with a gateway or return to Native Anthropic",
+        parents=[sub_flags],
+    )
+    desktop_action = p_desktop.add_mutually_exclusive_group()
+    desktop_action.add_argument(
+        "--restore", action="store_true", help="return to Native Anthropic"
+    )
+    desktop_action.add_argument(
+        "--gateway",
+        metavar="URL",
+        help="launch with the gateway's discovered model list",
+    )
+    p_desktop.add_argument(
+        "--token-stdin",
+        action="store_true",
+        help="read a gateway bearer token from stdin",
+    )
+    p_desktop.add_argument("--force", action="store_true", help="skip confirmation")
+    p_desktop.set_defaults(func=_handle_desktop)
+
+    p_claude = subparsers.add_parser(
+        "claude", help="launch Claude CLI with shared settings", parents=[sub_flags]
+    )
+    p_claude.add_argument(
+        "arguments", nargs=argparse.REMAINDER, help="Claude arguments after --"
+    )
+    p_claude.set_defaults(func=_handle_claude_launch)
+
+    p_chatgpt = subparsers.add_parser(
+        "chatgpt", help="launch ChatGPT.app with the shared proxy", parents=[sub_flags]
+    )
+    p_chatgpt.set_defaults(func=_handle_chatgpt)
 
     p_tui = subparsers.add_parser(
         "tui",

@@ -36,25 +36,21 @@ Ownership marker: a closed key list, not a comment
 -----------------------------------------------------
 Every other file this project writes carries a ``# codehelper: managed``
 comment as its ownership proof (``render.MARKER_PREFIX``). JSON has no
-comments. Ownership of *individual keys inside someone else's file* is
-instead defined by :data:`MANAGED_ENV_KEYS` — a fixed, closed tuple. Every
-operation here touches ONLY those keys inside ``env``; every other key, in
-``env`` or at the top level (``permissions``, ``hooks``, ``HTTPS_PROXY``,
-...), is carried through byte-for-byte. :func:`_verify_patch_applied` proves
-this before any write, rather than merely hoping it.
+comments. :data:`MANAGED_ENV_KEYS` defines the keys owned by the provider
+patch. :func:`_verify_patch_applied` verifies the remaining settings before
+any write. Selecting Native with a configured proxy can also apply a validated
+proxy patch through ``services/proxy.py`` in the same write.
 """
 
 from __future__ import annotations
 
 import difflib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from codehelper.backends._atomic import (
-    guarded_replace,
-    read_text_or_none,
-)
+from codehelper.backends._atomic import guarded_replace, read_text_or_none
 from codehelper.errors import CodeHelperError
 from codehelper.services.model import ConfigShape, Provider
 from codehelper.services.paths import Paths
@@ -236,6 +232,23 @@ def resolve_switch_patch(
 
 
 def read_settings(paths: Paths) -> tuple[str, dict]:
+    return read_settings_file(paths.claude_settings())
+
+
+def launch_claude(arguments: list[str], *, dry_run: bool = False) -> None:
+    """Launch the terminal client with the original settings and history."""
+    if dry_run:
+        print("Would launch Claude CLI with the original settings and history")
+        return
+    env = os.environ.copy()
+    env.pop("CLAUDE_CONFIG_DIR", None)
+    try:
+        os.execvpe("claude", ["claude", *arguments], env)
+    except OSError as exc:
+        raise CodeHelperError(f"could not launch Claude CLI: {exc.strerror}") from None
+
+
+def read_settings_file(settings_path: Path) -> tuple[str, dict]:
     """Read ``settings.json`` as ``(raw_text, parsed_object)``.
 
     Returns ``("", {})`` for a MISSING file — a fresh install (no
@@ -252,7 +265,6 @@ def read_settings(paths: Paths) -> tuple[str, dict]:
             config and hooks in it — with a two-key file. This tool never
             repairs the file; it tells the user to fix or move it.
     """
-    settings_path = paths.claude_settings()
     # `read_text_or_none` folds "missing" and "exists but unreadable"
     # (permission denied, binary/non-UTF-8) into the same `None` — by
     # design, for callers that treat both as "not ours, leave it alone".
@@ -273,12 +285,12 @@ def read_settings(paths: Paths) -> tuple[str, dict]:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise CodeHelperError(
-            f"{paths.claude_settings()} is not valid JSON ({exc}) — refusing "
+            f"{settings_path} is not valid JSON ({exc}) — refusing "
             f"to touch it; fix or move the file, then retry"
         ) from exc
     if not isinstance(parsed, dict):
         raise CodeHelperError(
-            f"{paths.claude_settings()} does not contain a JSON object at its "
+            f"{settings_path} does not contain a JSON object at its "
             f"top level — refusing to touch it"
         )
     return raw, parsed
@@ -461,7 +473,7 @@ def credential_values(parsed: dict) -> set[str]:
         return set()
     return {
         value
-        for key in CREDENTIAL_ENV_KEYS
+        for key in (*CREDENTIAL_ENV_KEYS, "CLAUDE_CODE_OAUTH_TOKEN")
         if isinstance(value := env.get(key), str) and value
     }
 
@@ -482,12 +494,27 @@ def _redacted_preview(
     this call is writing. Switching AWAY from a provider whose token is
     still sitting in ``env`` must not print that old value verbatim.
     """
+    from codehelper.services.proxy import PROXY_ENV_KEYS, redact_proxy_url
+
     preview = diff_preview(original, patched, label="settings.json")
     values = credential_values(original_parsed) | credential_values(patched_parsed)
     if token:
         values.add(token)
-    for value in values:
-        preview = preview.replace(value, redact_credential(value))
+    redactions = {value: redact_credential(value) for value in values}
+    for settings in (original_parsed, patched_parsed):
+        env = settings.get("env")
+        if isinstance(env, dict):
+            for key in PROXY_ENV_KEYS:
+                if isinstance(url := env.get(key), str) and url:
+                    redacted = redact_proxy_url(url)
+                    if url != redacted:
+                        redactions[url] = redacted
+    for value, redacted in redactions.items():
+        for ensure_ascii in (True, False):
+            preview = preview.replace(
+                json.dumps(value, ensure_ascii=ensure_ascii)[1:-1],
+                json.dumps(redacted, ensure_ascii=ensure_ascii)[1:-1],
+            )
     return preview
 
 
@@ -658,8 +685,8 @@ def apply_switch(
             settings.json, a patch that fails its own post-write
             verification, or a refused overwrite (no ``--force``/confirmation).
     """
-    settings_path = paths.claude_settings()
-    original_text, original = read_settings(paths)
+    path = paths.claude_settings()
+    original_text, original = read_settings_file(path)
 
     original_env = original.get("env")
     patch = resolve_switch_patch(
@@ -674,6 +701,10 @@ def apply_switch(
 
     patched = patch_settings(original, patch)
     _verify_patch_applied(original, patched, patch)
+    if provider.env_reset:
+        from codehelper.services.proxy import native_switch_proxy
+
+        patched = native_switch_proxy(paths, patched)
 
     patched_text = dump_settings(patched)
     # Compare the PARSED objects, not the raw text: a byte-for-byte text
@@ -694,37 +725,34 @@ def apply_switch(
 
     if dry_run:
         print(preview or "(no textual change)")
-        print(f"would write {settings_path}")
+        print(f"would write {path}")
         return True
 
-    if not force and not (confirm and confirm(settings_path, preview)):
+    if not force and not (confirm and confirm(path, preview)):
         raise CodeHelperError(
-            f"about to patch {settings_path} — refusing without confirmation "
+            f"about to patch {path} — refusing without confirmation "
             f"(use --force, or re-run interactively)"
         )
 
+    backups = settings_backup_slots(path)
     guarded_replace(
-        settings_path,
+        path,
         expected=original_text,
         new_text=patched_text,
-        stale_message=(
-            f"{settings_path} changed since it was read — refusing to write "
-            f"a patch computed off a stale snapshot (a concurrent switch or "
-            f"hand-edit may have run; re-run to patch the current file)"
-        ),
-        backup_slots=settings_backup_slots(paths),
+        stale_message=f"{path} changed since it was read — retry the switch",
+        backup_slots=backups,
         mode=0o600,
     )
     action = "reset to native" if patch.is_reset else "wrote"
-    print(f"{action} {settings_path} (backup: {paths.claude_settings_backup(1)})")
+    print(f"{action} {path} (backup: {backups[-1]})")
     return True
 
 
-def settings_backup_slots(paths: Paths) -> tuple[Path, Path, Path]:
+def settings_backup_slots(path: Path) -> tuple[Path, Path, Path]:
     return (
-        paths.claude_settings_backup(3),
-        paths.claude_settings_backup(2),
-        paths.claude_settings_backup(1),
+        path.with_suffix(".json.bak3"),
+        path.with_suffix(".json.bak2"),
+        path.with_suffix(".json.bak1"),
     )
 
 
@@ -773,8 +801,8 @@ def restore_settings(
             f"— refusing to restore it"
         )
 
-    settings_path = paths.claude_settings()
-    current = read_text_or_none(settings_path) or ""
+    path = paths.claude_settings()
+    current = read_text_or_none(path) or ""
 
     if current == backup_body:
         return False
@@ -801,25 +829,21 @@ def restore_settings(
 
     if dry_run:
         print(preview or "(no textual change)")
-        print(f"would restore {settings_path} from {backup_path}")
+        print(f"would restore {path} from {backup_path}")
         return True
 
-    if not force and not (confirm and confirm(settings_path, preview)):
+    if not force and not (confirm and confirm(path, preview)):
         raise CodeHelperError(
-            f"about to restore {settings_path} from {backup_path} — refusing "
+            f"about to restore {path} from {backup_path} — refusing "
             f"without confirmation (use --force)"
         )
 
     guarded_replace(
-        settings_path,
+        path,
         expected=current,
         new_text=backup_body,
-        stale_message=(
-            f"{settings_path} changed since it was read — refusing to "
-            f"restore over a concurrent change (a concurrent switch or "
-            f"hand-edit may have run; re-run to restore over the current file)"
-        ),
+        stale_message=f"{path} changed since it was read — retry the restore",
         mode=0o600,
     )
-    print(f"restored {settings_path} from {backup_path}")
+    print(f"restored {path} from {backup_path}")
     return True

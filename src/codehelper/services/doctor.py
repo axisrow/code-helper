@@ -430,6 +430,43 @@ def _host_is_bypassed(host: str, bypass_value: str) -> bool:
     return False
 
 
+def codex_launch_proxy_label(
+    paths: Paths, environ: Mapping[str, str] | None = None
+) -> str:
+    """Report Codex CLI's launch environment without guessing the GUI route."""
+    env = os.environ if environ is None else environ
+    _, config, _ = read_default_config(paths)
+    config = config or {}
+    features = config.get("features")
+    if isinstance(features, dict) and features.get("respect_system_proxy") is True:
+        return "system proxy policy · route unverified"
+    keys = (
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+        "http_proxy",
+        "HTTP_PROXY",
+    )
+    name, address = next(((key, env[key]) for key in keys if env.get(key)), ("", ""))
+    if not address:
+        return "no proxy in launch env"
+
+    provider = config.get("model_provider")
+    providers = config.get("model_providers", {})
+    if isinstance(provider, str) and isinstance(providers, dict):
+        entry = providers.get(provider)
+        if isinstance(entry, dict) and isinstance(
+            base_url := entry.get("base_url"), str
+        ):
+            host = _endpoint_host(base_url)
+            if host and any(
+                _host_is_bypassed(host, env.get(key, "")) for key in BYPASS_ENV_NAMES
+            ):
+                return f"{host} · direct (launch NO_PROXY)"
+    return f"launch {name}={redact_proxy_url(address)}"
+
+
 def proxy_env_row(
     wrapper: str,
     endpoint_host: str | None,
