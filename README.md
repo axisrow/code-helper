@@ -441,12 +441,6 @@ session. Shared provider and Auto mode settings can also affect local Code
 sessions in the app. Resume a terminal session with `claude --resume` or
 `codehelper claude -- --resume`. Both use the original `~/.claude` history.
 
-The experimental **Separate** mode was removed. It wrote provider settings to
-a launch-time `--settings` file while open CLI sessions watched
-`~/.claude/settings.json`. The menu could show a new provider while the open
-session still used the old one. If a session was started with the Separate
-file, reopen it with `claude --resume` to use the shared settings.
-
 If you previously launched Claude.app with a different `CLAUDE_CONFIG_DIR`,
 quit it and reopen it from Dock or Finder to return to the original history.
 Restore the original path in the app's local editor if you configured it
