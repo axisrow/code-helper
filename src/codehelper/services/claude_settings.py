@@ -713,15 +713,20 @@ def apply_switch(
     # whose Enter names the exact wrapper) must opt in.
     old_creds = credential_values(original)
     new_creds = credential_values(patched)
-    # Clearing (new_creds empty — `switch native`) is already explicit: the
-    # word "native" IS the command. The guard covers old→new swaps only.
-    if old_creds and new_creds and new_creds != old_creds and not allow_token_change:
-        removed = ", ".join(
-            sorted(redact_credential(v) for v in old_creds - new_creds)
-        )
-        added = ", ".join(
-            sorted(redact_credential(v) for v in new_creds - old_creds)
-        )
+    # Clearing (`switch native`) is already explicit: the word "native" IS
+    # the command. Keyed on env_reset, not on "new_creds is empty": a
+    # credential the patch never touches (a hand-set CLAUDE_CODE_OAUTH_TOKEN)
+    # survives native and would otherwise read as a swap. The guard covers
+    # old→new swaps only.
+    if (
+        not provider.env_reset
+        and old_creds
+        and new_creds
+        and new_creds != old_creds
+        and not allow_token_change
+    ):
+        removed = ", ".join(sorted(redact_credential(v) for v in old_creds - new_creds))
+        added = ", ".join(sorted(redact_credential(v) for v in new_creds - old_creds))
         raise CodeHelperError(
             f"this switch changes the credential ({removed} → {added})"
             " — pass --change-token to confirm"

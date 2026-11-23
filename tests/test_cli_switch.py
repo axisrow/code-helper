@@ -435,6 +435,42 @@ def test_switch_from_wrapper_lifts_tier_models_and_token(tmp_path, monkeypatch):
 
 
 @pytest.mark.integration
+def test_switch_from_wrapper_refuses_a_credential_swap_without_change_token(
+    tmp_path, monkeypatch, capsys
+):
+    """The 2026-11-23 incident, the exact command: `switch --from-wrapper glm
+    --force` must not replace settings.json's live credential with the
+    wrapper's different one unless `--change-token` says so.
+
+    Runs through ``main`` on purpose — the end-to-end run of the flag:
+    argparse dest -> ``SwitchRequest.from_namespace`` -> ``_handle_switch``
+    -> ``apply_switch(allow_token_change=...)``. A dropped ``change_token=``
+    line in ``from_namespace``, or a handler that stops forwarding it, would
+    otherwise turn `--change-token` into a silent no-op with a green suite.
+    """
+    monkeypatch.setenv("ZAI_API_KEY", "sk-wrapper-account-token")
+    assert main(["add", "glm"]) == 0
+    paths = Paths.from_home(tmp_path)
+    _write_settings(paths, {"env": {"ANTHROPIC_AUTH_TOKEN": "sk-live-account-token"}})
+    live = paths.claude_settings().read_bytes()
+    capsys.readouterr()
+
+    assert main(["switch", "--from-wrapper", "glm", "--force"]) == 1
+
+    err = capsys.readouterr().err
+    assert "--change-token" in err
+    assert "sk-l...ken" in err and "sk-w...ken" in err
+    assert "sk-live-account-token" not in err
+    assert "sk-wrapper-account-token" not in err
+    assert paths.claude_settings().read_bytes() == live
+
+    assert main(["switch", "--from-wrapper", "glm", "--force", "--change-token"]) == 0
+    assert (
+        _settings(tmp_path)["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-wrapper-account-token"
+    )
+
+
+@pytest.mark.integration
 def test_switch_from_wrapper_glm_has_no_subagent_model(tmp_path, monkeypatch):
     """The glm preset deliberately sets subagent_model=None (services/spec.py)
     — a switch built from its wrapper must not write a stale/empty
