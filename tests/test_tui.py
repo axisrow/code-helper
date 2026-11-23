@@ -3345,6 +3345,168 @@ def test_cancelling_the_address_prompt_changes_nothing(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Settings → Live env: the managed axes of the CURRENT switch (tiers /
+# subagent / effort / ctx), applied through the real _handle_switch flags
+# path. Provider is read-only here — the chipset owns provider switching.
+# --------------------------------------------------------------------------- #
+
+_LIVE_SWITCH_ENV = {
+    "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "sk-live",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-5.3-flash",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.3-flash",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.4",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "glm-5.3-flash",
+    "CLAUDE_CODE_EFFORT_LEVEL": "max",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
+}
+
+
+@pytest.mark.integration
+def test_settings_offers_the_live_env_row(monkeypatch):
+    _write_proxy_settings(dict(_LIVE_SWITCH_ENV))
+    labels = _settings_labels(monkeypatch)
+
+    main(["tui"])
+
+    assert "Live env (claude): tiers · subagent · effort · ctx" in labels
+
+
+@pytest.mark.unit
+def test_live_env_apply_dispatches_switch_with_the_live_trio(monkeypatch):
+    """An untouched apply must pass the LIVE provider + trio (so the flags
+    path's model gate is satisfied without uniformising mixed tiers) and the
+    live effort/subagent/ctx verbatim — the guard stays armed
+    (change_token=False), the dispatch runs live."""
+    from codehelper.cli.parser import _handle_switch
+    from codehelper.cli.requests import SwitchRequest
+    from codehelper.cli.tui import TuiSession
+
+    write_settings(Paths.default(), {"env": dict(_LIVE_SWITCH_ENV)})
+    session = TuiSession(_tui_args())
+    monkeypatch.setattr(TuiSession, "_notify", lambda self, *_a: None)
+    monkeypatch.setattr(TuiSession, "_pick", lambda self, *_a, **_k: "__apply__")
+    seen = {}
+
+    def fake_run(self, handler, req, *, live=False, silent=False):
+        seen["handler"] = handler
+        seen["req"] = req
+        seen["live"] = live
+        return True
+
+    monkeypatch.setattr(TuiSession, "_run", fake_run)
+
+    session._run_live_env_screen()
+
+    assert seen["handler"] is _handle_switch
+    req = seen["req"]
+    assert isinstance(req, SwitchRequest)
+    assert req.provider == "zai"
+    assert (req.haiku, req.sonnet, req.opus) == (
+        "glm-5.3-flash",
+        "glm-5.3-flash",
+        "glm-5.4",
+    )
+    assert req.subagent_model == "glm-5.3-flash"
+    assert req.effort == "max"
+    assert req.context_window == 1000000
+    assert req.force is True
+    assert req.change_token is False
+    assert seen["live"] is True
+
+
+@pytest.mark.unit
+def test_live_env_effort_pick_dispatches_the_new_level(monkeypatch):
+    from codehelper.cli.tui import TuiSession
+
+    write_settings(Paths.default(), {"env": dict(_LIVE_SWITCH_ENV)})
+    session = TuiSession(_tui_args())
+    monkeypatch.setattr(TuiSession, "_notify", lambda self, *_a: None)
+    picks = iter(["effort", "high", "__apply__"])
+    monkeypatch.setattr(TuiSession, "_pick", lambda self, *_a, **_k: next(picks))
+    seen = {}
+
+    def fake_run(self, _handler, req, **_kwargs):
+        seen["req"] = req
+        return True
+
+    monkeypatch.setattr(TuiSession, "_run", fake_run)
+
+    session._run_live_env_screen()
+
+    assert seen["req"].effort == "high"
+    # The untouched axes still carry the live values verbatim.
+    assert seen["req"].subagent_model == "glm-5.3-flash"
+    assert (seen["req"].haiku, seen["req"].opus) == ("glm-5.3-flash", "glm-5.4")
+
+
+@pytest.mark.unit
+def test_live_env_screen_refuses_to_open_without_a_managed_switch(monkeypatch):
+    from codehelper.cli.tui import TuiSession
+
+    write_settings(Paths.default(), {"env": {"IS_DEMO": "1"}})
+    session = TuiSession(_tui_args())
+    notified = []
+    monkeypatch.setattr(TuiSession, "_notify", lambda self, msg: notified.append(msg))
+    ran = []
+    monkeypatch.setattr(TuiSession, "_run", lambda self, *a, **k: ran.append(a))
+
+    session._run_live_env_screen()
+
+    assert notified and "No managed switch" in notified[0]
+    assert ran == []
+
+
+@pytest.mark.unit
+def test_live_env_screen_rows_show_the_live_values(monkeypatch):
+    from codehelper.cli.tui import TuiSession
+
+    write_settings(Paths.default(), {"env": dict(_LIVE_SWITCH_ENV)})
+    session = TuiSession(_tui_args())
+    frames = []
+
+    def fake_pick(_self, items, prompt="", **_k):
+        if prompt.startswith("Live env"):
+            frames.append(prompt)
+            frames.extend(label for _, label in items)
+        return "__apply__"
+
+    monkeypatch.setattr(TuiSession, "_notify", lambda self, *_a: None)
+    monkeypatch.setattr(TuiSession, "_pick", fake_pick)
+    monkeypatch.setattr(TuiSession, "_run", lambda self, *_a, **_k: True)
+
+    session._run_live_env_screen()
+
+    assert frames[0] == "Live env (zai):"
+    assert "provider: zai (switch via chips)" in frames
+    assert "haiku: glm-5.3-flash" in frames
+    assert "opus: glm-5.4" in frames
+    assert "subagent: glm-5.3-flash" in frames
+    assert "effort: max" in frames
+    assert "ctx: 1000000" in frames
+
+
+@pytest.mark.unit
+def test_live_env_enter_on_the_readonly_provider_row_is_a_noop(monkeypatch):
+    """The provider row is display-only ("switch via chips") and is NOT in
+    the filtered axes: Enter on it must be an inert no-op, not a
+    StopIteration crash and not a dispatch."""
+    from codehelper.cli.tui import _BACK, TuiSession
+
+    write_settings(Paths.default(), {"env": dict(_LIVE_SWITCH_ENV)})
+    session = TuiSession(_tui_args())
+    monkeypatch.setattr(TuiSession, "_notify", lambda self, *_a: None)
+    picks = iter(["provider", _BACK])
+    monkeypatch.setattr(TuiSession, "_pick", lambda self, *_a, **_k: next(picks))
+    ran = []
+    monkeypatch.setattr(TuiSession, "_run", lambda self, *a, **k: ran.append(a))
+
+    session._run_live_env_screen()
+
+    assert ran == []
+
+
+# --------------------------------------------------------------------------- #
 # The Tokens screen (Settings → Tokens) — the CLI `tokens` command's viewer
 # twin: cached credentials + token env vars, masked until toggled.
 # --------------------------------------------------------------------------- #
