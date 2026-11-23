@@ -3486,6 +3486,26 @@ def test_live_env_screen_rows_show_the_live_values(monkeypatch):
     assert "ctx: 1000000" in frames
 
 
+@pytest.mark.unit
+def test_live_env_enter_on_the_readonly_provider_row_is_a_noop(monkeypatch):
+    """The provider row is display-only ("switch via chips") and is NOT in
+    the filtered axes: Enter on it must be an inert no-op, not a
+    StopIteration crash and not a dispatch."""
+    from codehelper.cli.tui import _BACK, TuiSession
+
+    write_settings(Paths.default(), {"env": dict(_LIVE_SWITCH_ENV)})
+    session = TuiSession(_tui_args())
+    monkeypatch.setattr(TuiSession, "_notify", lambda self, *_a: None)
+    picks = iter(["provider", _BACK])
+    monkeypatch.setattr(TuiSession, "_pick", lambda self, *_a, **_k: next(picks))
+    ran = []
+    monkeypatch.setattr(TuiSession, "_run", lambda self, *a, **k: ran.append(a))
+
+    session._run_live_env_screen()
+
+    assert ran == []
+
+
 # --------------------------------------------------------------------------- #
 # The Tokens screen (Settings → Tokens) — the CLI `tokens` command's viewer
 # twin: cached credentials + token env vars, masked until toggled.

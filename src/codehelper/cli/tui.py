@@ -1612,7 +1612,11 @@ class TuiSession:
                 if self._run(_handle_switch, req, live=True):
                     return
                 continue
-            axis = next(a for a in axes if a.key == choice)
+            axis = next((a for a in axes if a.key == choice), None)
+            if axis is None:
+                # The read-only provider row ("switch via chips") — display
+                # only; Enter on it must not crash hunting for an axis.
+                continue
             getattr(self, axis.pick)(spec, draft)
 
     def _session_flags(self) -> _SessionFlags:
