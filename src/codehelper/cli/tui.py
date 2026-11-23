@@ -1573,7 +1573,10 @@ class TuiSession:
             )
             items = [
                 ("provider", f"provider: {provider_name} (switch via chips)"),
-                *[(axis.key, self._edit_axis_label(axis, spec, draft)) for axis in axes],
+                *[
+                    (axis.key, self._edit_axis_label(axis, spec, draft))
+                    for axis in axes
+                ],
                 ("__apply__", apply_label),
                 (_BACK, "Back"),
             ]
@@ -1581,9 +1584,7 @@ class TuiSession:
             if choice == _BACK:
                 return
             if choice == "__apply__":
-                overrides = (
-                    draft["tiers"] if isinstance(draft["tiers"], dict) else {}
-                )
+                overrides = draft["tiers"] if isinstance(draft["tiers"], dict) else {}
                 # The pickers already store str|None / int|None — the casts
                 # only teach the dict[str, object] draft to Pyright.
                 req = self._switch_request(
