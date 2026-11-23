@@ -873,13 +873,31 @@ class TuiSession:
             silent=self._chip_silent(),
         )
 
-    def _switch_request(self, *, provider=None, from_wrapper=None, from_preset=None):
+    def _switch_request(
+        self,
+        *,
+        provider=None,
+        from_wrapper=None,
+        from_preset=None,
+        haiku=None,
+        sonnet=None,
+        opus=None,
+        subagent_model=None,
+        effort=None,
+        context_window=None,
+        change_token=True,
+    ):
         """A :class:`SwitchRequest` carrying only the axis a chip varies.
 
         Every other field is meaningless from the main screen (no model or
         token prompts, no restore), so the shared fields are filled once here
-        instead of at each call site — which also keeps the two apply paths
-        from drifting apart if ``SwitchRequest`` grows another field.
+        instead of at each call site — which also keeps the apply paths from
+        drifting apart if ``SwitchRequest`` grows another field. The axis
+        kwargs serve the Settings → Live env screen: chips stay
+        None-everything, the editor passes the live trio plus the drafted
+        axes. ``change_token`` defaults to the chip's True — its Enter names
+        the exact wrapper — while the editor's resolver-sourced token passes
+        False to keep the credential-swap guard armed.
         """
         from codehelper.cli.requests import SwitchRequest
 
@@ -887,20 +905,22 @@ class TuiSession:
             provider=provider,
             from_wrapper=from_wrapper,
             model=None,
-            haiku=None,
-            sonnet=None,
-            opus=None,
-            subagent_model=None,
+            haiku=haiku,
+            sonnet=sonnet,
+            opus=opus,
+            subagent_model=subagent_model,
             base_url=None,
             auth=None,
             profile=None,
             restore=False,
             slot=None,
             status=False,
+            effort=effort,
+            context_window=context_window,
             # A chip press names the exact wrapper — its token is part of the
             # chip's identity — so the credential-swap guard is satisfied by
             # the selection itself (cli/tui.py: Enter applies with no prompts).
-            change_token=True,
+            change_token=change_token,
             **self._session_flags(),
             # Chips are hot-apply controls.  The target has already been
             # resolved and validated locally; a second interactive prompt
@@ -1360,6 +1380,7 @@ class TuiSession:
                         f"{label} NO_PROXY: {proxy.no_proxy or '(none)'}",
                     ),
                     ("desktop-restore", "Restore Claude.app to Native Anthropic"),
+                    ("live-env", "Live env (claude): tiers · subagent · effort · ctx"),
                     ("providers", "Providers"),
                     ("tokens", "Tokens"),
                     ("debug", f"Debug: {'on' if debug else 'off'}"),
@@ -1379,6 +1400,8 @@ class TuiSession:
                 self.args.dry_run = not getattr(self.args, "dry_run", False)
             elif choice == "tokens":
                 self._run_tokens_screen()
+            elif choice == "live-env":
+                self._run_live_env_screen()
             elif choice == "providers":
                 self._run_providers_screen()
             elif choice == "desktop-restore":
@@ -1457,6 +1480,139 @@ class TuiSession:
                         **flags,
                     ),
                 )
+
+    def _run_live_env_screen(self) -> None:
+        """Settings → live env: edit the managed axes of the CURRENT switch.
+
+        The chipset owns PROVIDER switching (a decided design) — this screen
+        edits the live env's tiers / subagent / effort / ctx around the
+        current provider and applies through the REAL ``_handle_switch``
+        flags path. Provider + the live trio are always passed, so the
+        flags-path "a model is required" gate is satisfied without a CLI
+        change; a mixed tier set survives untouched. Rows and dispatch run
+        off the SAME ``_EDIT_AXES`` table as the wrapper edit screen — the
+        live values ride a spec-shaped stand-in — and one ``read_env`` per
+        screen ENTRY is the whole I/O budget. ``change_token`` stays False:
+        the token here is resolver-sourced (env/cache), not the chip's known
+        wrapper identity, so the credential-swap guard must stay armed.
+        """
+        from types import SimpleNamespace
+        from typing import cast
+
+        from codehelper.cli.parser import _handle_switch
+        from codehelper.services.claude_settings import current_switch, read_env
+        from codehelper.services.model import ConfigShape, get_provider
+        from codehelper.services.paths import Paths
+        from codehelper.services.spec import TierModels
+        from codehelper.services.wrappers import UNSET, Unset
+
+        paths = Paths.default()
+        env = read_env(paths) or {}
+        provider_name = current_switch(paths, env=env)
+        if provider_name in (None, "custom"):
+            self._notify(
+                "No managed switch to edit"
+                + (" (custom endpoint — use the CLI)." if provider_name else ".")
+            )
+            return
+        ctx_raw = str(env.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "") or "")
+        live = {
+            "haiku": env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
+            "sonnet": env.get("ANTHROPIC_DEFAULT_SONNET_MODEL", ""),
+            "opus": env.get("ANTHROPIC_DEFAULT_OPUS_MODEL", ""),
+            "subagent": env.get("CLAUDE_CODE_SUBAGENT_MODEL"),
+            "effort": env.get("CLAUDE_CODE_EFFORT_LEVEL"),
+            "ctx": int(ctx_raw) if ctx_raw.isdigit() else None,
+        }
+        if not (live["haiku"] and live["sonnet"] and live["opus"]):
+            self._notify("Live env is missing a tier model — nothing to edit.")
+            return
+
+        # A spec-shaped stand-in so the edit-screen pickers AND label helpers
+        # run unmodified: they read shape/provider/profile plus the axis
+        # values off the spec.
+        spec = SimpleNamespace(
+            shape=ConfigShape.ANTHROPIC_ENV,
+            provider=get_provider(provider_name),
+            profile_name=None,
+            agent=SimpleNamespace(name=f"live env ({provider_name})"),
+            tier_models=TierModels(
+                haiku=live["haiku"], sonnet=live["sonnet"], opus=live["opus"]
+            ),
+            subagent_model=live["subagent"],
+            effort=live["effort"],
+            context_window=live["ctx"],
+        )
+        axes = [
+            axis
+            for axis in _EDIT_AXES[ConfigShape.ANTHROPIC_ENV]
+            if axis.key in ("haiku", "sonnet", "opus", "subagent", "effort", "ctx")
+        ]
+        draft: dict[str, object] = {
+            # provider/auth/base_url exist only for _edit_provider_view (the
+            # pickers' shared path); they stay UNSET — provider is read-only.
+            "provider": UNSET,
+            "auth": UNSET,
+            "base_url": UNSET,
+            "tiers": UNSET,
+            "subagent": UNSET,
+            "effort": UNSET,
+            "ctx": UNSET,
+        }
+        while True:
+            drafted = [
+                axis
+                for axis in axes
+                if not isinstance(draft[self._edit_draft_key(axis.key)], Unset)
+            ]
+            plural = "es" if len(drafted) != 1 else ""
+            apply_label = (
+                f"( apply — {len(drafted)} axis{plural} changed )"
+                if drafted
+                else "( apply )"
+            )
+            items = [
+                ("provider", f"provider: {provider_name} (switch via chips)"),
+                *[(axis.key, self._edit_axis_label(axis, spec, draft)) for axis in axes],
+                ("__apply__", apply_label),
+                (_BACK, "Back"),
+            ]
+            choice = self._pick(items, f"Live env ({provider_name}):")
+            if choice == _BACK:
+                return
+            if choice == "__apply__":
+                overrides = (
+                    draft["tiers"] if isinstance(draft["tiers"], dict) else {}
+                )
+                # The pickers already store str|None / int|None — the casts
+                # only teach the dict[str, object] draft to Pyright.
+                req = self._switch_request(
+                    provider=provider_name,
+                    haiku=overrides.get("haiku", live["haiku"]),
+                    sonnet=overrides.get("sonnet", live["sonnet"]),
+                    opus=overrides.get("opus", live["opus"]),
+                    subagent_model=(
+                        live["subagent"]
+                        if isinstance(draft["subagent"], Unset)
+                        else cast("str | None", draft["subagent"])
+                    ),
+                    effort=(
+                        live["effort"]
+                        if isinstance(draft["effort"], Unset)
+                        else cast("str | None", draft["effort"])
+                    ),
+                    context_window=(
+                        live["ctx"]
+                        if isinstance(draft["ctx"], Unset)
+                        else cast("int | None", draft["ctx"])
+                    ),
+                    change_token=False,
+                )
+                if self._run(_handle_switch, req, live=True):
+                    return
+                continue
+            axis = next(a for a in axes if a.key == choice)
+            getattr(self, axis.pick)(spec, draft)
 
     def _session_flags(self) -> _SessionFlags:
         """The ``--dry-run``/``--debug`` pair every request construction carries.
