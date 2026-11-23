@@ -566,6 +566,7 @@ def test_apply_switch_dry_run_redacts_the_previous_token_too(tmp_path, capsys):
         tier_models=TierModels.uniform("glm-5.2"),
         token="sk-NEW-zai-secret",
         dry_run=True,
+        allow_token_change=True,
     )
 
     out = capsys.readouterr().out
@@ -606,6 +607,71 @@ def test_apply_switch_force_skips_confirm(tmp_path):
         confirm=_confirm_no,  # must be bypassed by force
     )
     assert changed is True
+
+
+@pytest.mark.unit
+def test_apply_switch_refuses_credential_swap_without_change_token(tmp_path):
+    # 2026-11-23 incident: `--force` alone replaced settings.json's live
+    # token with a DIFFERENT account's key silently. A swap now refuses
+    # unless the switch says so explicitly (allow_token_change / --change-token).
+    paths = Paths.from_home(tmp_path)
+    write_settings(paths, {"env": {"ANTHROPIC_AUTH_TOKEN": "sk-LIVE-key"}})
+    before = paths.claude_settings().read_bytes()
+
+    with pytest.raises(CodeHelperError, match="--change-token") as refused:
+        apply_switch(
+            paths,
+            provider=ZAI,
+            tier_models=TierModels.uniform("glm-5.2"),
+            token="sk-OTHER-account-key",
+            force=True,
+        )
+
+    # The refusal reaches stderr (CLI) / the TUI's error line: masks only,
+    # never the raw credentials it is about.
+    message = str(refused.value)
+    assert "sk-LIVE-key" not in message
+    assert "sk-OTHER-account-key" not in message
+    assert "sk-L...key" in message and "sk-O...key" in message
+    assert paths.claude_settings().read_bytes() == before
+    assert not list(paths.claude_dir.glob("settings.json.bak*"))
+
+
+@pytest.mark.unit
+def test_apply_switch_allow_token_change_swaps_the_credential(tmp_path):
+    paths = Paths.from_home(tmp_path)
+    write_settings(paths, {"env": {"ANTHROPIC_AUTH_TOKEN": "sk-LIVE-key"}})
+
+    changed = apply_switch(
+        paths,
+        provider=ZAI,
+        tier_models=TierModels.uniform("glm-5.2"),
+        token="sk-OTHER-account-key",
+        force=True,
+        allow_token_change=True,
+    )
+
+    assert changed is True
+    assert _read(paths)["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-OTHER-account-key"
+
+
+@pytest.mark.unit
+def test_apply_switch_same_token_needs_no_change_token_flag(tmp_path):
+    # A tier-only edit (or any switch keeping the live credential) must stay
+    # zero-friction — the guard fires on an actual old→new credential change.
+    paths = Paths.from_home(tmp_path)
+    write_settings(paths, {"env": {"ANTHROPIC_AUTH_TOKEN": "sk-LIVE-key"}})
+
+    changed = apply_switch(
+        paths,
+        provider=ZAI,
+        tier_models=TierModels.uniform("glm-5.2"),
+        token="sk-LIVE-key",
+        force=True,
+    )
+
+    assert changed is True
+    assert _read(paths)["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-LIVE-key"
 
 
 @pytest.mark.unit
@@ -714,6 +780,32 @@ def test_apply_switch_native_explicitly_blanks_managed_keys(tmp_path):
 
 
 @pytest.mark.unit
+def test_apply_switch_native_stays_ungated_next_to_a_foreign_oauth_token(tmp_path):
+    # Regression (PR #142 review): credential_values() also reads
+    # CLAUDE_CODE_OAUTH_TOKEN — a FOREIGN key patch_settings preserves — so a
+    # hand-set one made `switch native` read as a credential swap
+    # ({auth, oauth} != {oauth}) and refuse without --change-token. Clearing
+    # is explicit by itself: the word "native" IS the command.
+    paths = Paths.from_home(tmp_path)
+    apply_switch(
+        paths,
+        provider=ZAI,
+        tier_models=TierModels.uniform("glm-5.2"),
+        token="sk-live",
+        force=True,
+    )
+    env = dict(_read(paths)["env"], CLAUDE_CODE_OAUTH_TOKEN="oauth-token-value")
+    write_settings(paths, {"env": env})
+
+    changed = apply_switch(paths, provider=NATIVE, force=True)
+
+    assert changed is True
+    result = _read(paths)["env"]
+    assert result["ANTHROPIC_AUTH_TOKEN"] == ""
+    assert result["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-value"
+
+
+@pytest.mark.unit
 def test_apply_switch_native_on_a_pristine_file_is_a_no_op(tmp_path):
     """switch native must not touch a settings.json with no managed override.
 
@@ -764,6 +856,7 @@ def test_apply_switch_backup_ring_rotates(tmp_path):
             tier_models=TierModels.uniform(model),
             token=f"sk-{model}",
             force=True,
+            allow_token_change=True,  # each iteration swaps the credential
         )
     # After 3 switches (2 rotations beyond the first write), bak1 holds the
     # state right before the LAST switch (glm-5-turbo's), bak2 the one before
@@ -975,6 +1068,7 @@ def test_restore_settings_dry_run_redacts_credentials(tmp_path, capsys):
         tier_models=TierModels.uniform("glm-5.2"),
         token="sk-CURRENT-token-value",
         force=True,
+        allow_token_change=True,
     )
 
     restore_settings(paths, slot=1, dry_run=True)
