@@ -32,7 +32,7 @@ def _settings(tmp_path) -> dict:
     )
 
 
-def _preset_request(name: str) -> SwitchRequest:
+def _preset_request(name: str, *, change_token: bool = False) -> SwitchRequest:
     return SwitchRequest(
         provider=None,
         from_wrapper=None,
@@ -51,6 +51,7 @@ def _preset_request(name: str) -> SwitchRequest:
         force=True,
         debug=False,
         from_preset=name,
+        change_token=change_token,
     )
 
 
@@ -278,7 +279,8 @@ def test_switch_deepseek_ollama_to_glm_cross_provider(tmp_path, monkeypatch):
         "deepseek-v4-flash:0731-cloud"
     )
 
-    assert _handle_switch(_preset_request("glm")) == 0
+    glm_req = _preset_request("glm", change_token=True)
+    assert _handle_switch(glm_req) == 0
     env = _settings(tmp_path)["env"]
     assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "glm-5.3"

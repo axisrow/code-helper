@@ -486,6 +486,11 @@ class SwitchRequest:
     # Only meaningful on the explicit-axes path; --from-wrapper/--from-preset
     # carry their own recorded answer, and mixing them is rejected.
     context_window: int | None = None
+    # 2026-11-23 incident guard: a switch whose resolved credential differs
+    # from the LIVE settings.json one refuses unless confirmed here —
+    # `--force` alone used to swap the account silently. The TUI chip sets
+    # it (its Enter names the exact wrapper); the CLI gets `--change-token`.
+    change_token: bool = False
 
     @classmethod
     def from_namespace(cls, args: argparse.Namespace) -> SwitchRequest:
@@ -520,4 +525,5 @@ class SwitchRequest:
             from_preset=None,
             context_window=_g(args, "context_window"),
             effort=_g(args, "effort"),
+            change_token=bool(_g(args, "change_token", False)),
         )

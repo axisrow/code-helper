@@ -897,6 +897,10 @@ class TuiSession:
             restore=False,
             slot=None,
             status=False,
+            # A chip press names the exact wrapper — its token is part of the
+            # chip's identity — so the credential-swap guard is satisfied by
+            # the selection itself (cli/tui.py: Enter applies with no prompts).
+            change_token=True,
             **self._session_flags(),
             # Chips are hot-apply controls.  The target has already been
             # resolved and validated locally; a second interactive prompt

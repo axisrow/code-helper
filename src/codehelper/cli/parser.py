@@ -1931,6 +1931,7 @@ def _handle_switch(args: argparse.Namespace | SwitchRequest) -> int:
         # --force is passed. The service still validates the complete target,
         # protects unrelated keys, snapshots a backup and rejects stale writes.
         force=req.force,
+        allow_token_change=req.change_token,
         confirm=_confirm_set_default,
     )
     if not wrote:
@@ -2582,6 +2583,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="skip the confirmation prompt (the TUI chip hot-applies either way)",
+    )
+    p_switch.add_argument(
+        "--change-token",
+        action="store_true",
+        default=False,
+        help="confirm a switch that would REPLACE settings.json's live "
+        "credential with a different one; refused without it — a bare "
+        "--force no longer swaps the account silently",
     )
     p_switch.set_defaults(func=_handle_switch)
 

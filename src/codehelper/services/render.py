@@ -243,6 +243,8 @@ def _settings_flag(env: dict[str, str], effort: str | None = None) -> str:
 #: but a lie's risk).
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "glm-5.3": 1_000_000,
+    "glm-5.3-flash": 1_000_000,
+    "glm-5.4": 1_000_000,
     "glm-5.2": 1_000_000,
     "glm-5.2:cloud": 1_000_000,
     "deepseek-v4-flash:0731-cloud": 1_000_000,
