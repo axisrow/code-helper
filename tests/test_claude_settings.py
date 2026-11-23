@@ -618,7 +618,7 @@ def test_apply_switch_refuses_credential_swap_without_change_token(tmp_path):
     write_settings(paths, {"env": {"ANTHROPIC_AUTH_TOKEN": "sk-LIVE-key"}})
     before = paths.claude_settings().read_bytes()
 
-    with pytest.raises(CodeHelperError, match="--change-token"):
+    with pytest.raises(CodeHelperError, match="--change-token") as refused:
         apply_switch(
             paths,
             provider=ZAI,
@@ -627,6 +627,12 @@ def test_apply_switch_refuses_credential_swap_without_change_token(tmp_path):
             force=True,
         )
 
+    # The refusal reaches stderr (CLI) / the TUI's error line: masks only,
+    # never the raw credentials it is about.
+    message = str(refused.value)
+    assert "sk-LIVE-key" not in message
+    assert "sk-OTHER-account-key" not in message
+    assert "sk-L...key" in message and "sk-O...key" in message
     assert paths.claude_settings().read_bytes() == before
     assert not list(paths.claude_dir.glob("settings.json.bak*"))
 
@@ -771,6 +777,32 @@ def test_apply_switch_native_explicitly_blanks_managed_keys(tmp_path):
         key: "" for key in others
     }
     assert not result["env"].get("CLAUDE_CODE_EFFORT_LEVEL")
+
+
+@pytest.mark.unit
+def test_apply_switch_native_stays_ungated_next_to_a_foreign_oauth_token(tmp_path):
+    # Regression (PR #142 review): credential_values() also reads
+    # CLAUDE_CODE_OAUTH_TOKEN — a FOREIGN key patch_settings preserves — so a
+    # hand-set one made `switch native` read as a credential swap
+    # ({auth, oauth} != {oauth}) and refuse without --change-token. Clearing
+    # is explicit by itself: the word "native" IS the command.
+    paths = Paths.from_home(tmp_path)
+    apply_switch(
+        paths,
+        provider=ZAI,
+        tier_models=TierModels.uniform("glm-5.2"),
+        token="sk-live",
+        force=True,
+    )
+    env = dict(_read(paths)["env"], CLAUDE_CODE_OAUTH_TOKEN="oauth-token-value")
+    write_settings(paths, {"env": env})
+
+    changed = apply_switch(paths, provider=NATIVE, force=True)
+
+    assert changed is True
+    result = _read(paths)["env"]
+    assert result["ANTHROPIC_AUTH_TOKEN"] == ""
+    assert result["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-value"
 
 
 @pytest.mark.unit
